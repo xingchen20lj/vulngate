@@ -1,5 +1,7 @@
 # Security Policy
 
+**Language:** English | [简体中文](SECURITY.zh-CN.md)
+
 VulnGate is itself a security tool. This page describes the security posture of
 the plugin and how to report issues in the plugin.
 

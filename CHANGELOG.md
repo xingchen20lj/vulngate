@@ -20,6 +20,8 @@ Initial release.
 - Self-contained installer (`install.sh`) for the personal marketplace
 - Smoke test (`scripts/smoke_test.sh`)
 - Bilingual documentation: `README.zh-CN.md`, `docs/QUICKSTART.zh-CN.md`
+- Chinese translations: `docs/ARCHITECTURE.zh-CN.md`, `SECURITY.zh-CN.md`,
+  `CONTRIBUTING.zh-CN.md` (CHANGELOG and LICENSE remain English by convention)
 - One-command installer with automatic `codex` discovery (`$PATH`, then the CLI
   bundled inside the Codex desktop app), with `--no-enable` and inline validation
   fallbacks

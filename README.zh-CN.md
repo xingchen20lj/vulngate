@@ -123,7 +123,7 @@ codex plugin add vulngate@personal
 | S8 | 账本、已排除清单、轮次汇总 | `ledger/<target>/…` | — |
 
 两种运行模式（宿主原生 / 自主 CLI）与证据契约详见
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+[docs/ARCHITECTURE.zh-CN.md](docs/ARCHITECTURE.zh-CN.md)。
 
 ## 安全与披露
 
@@ -131,7 +131,7 @@ codex plugin add vulngate@personal
   源码。
 - 外部网络与端口监听必须显式批准，并写入审批日志。
 - 发现文档只在本地生成，维护者协调完成且修复公开之前，**不会**发布任何内容。
-- 本插件自身的漏洞请按 [SECURITY.md](SECURITY.md) 报告。
+- 本插件自身的漏洞请按 [SECURITY.zh-CN.md](SECURITY.zh-CN.md) 报告。
 
 ## 开发
 
@@ -141,7 +141,7 @@ codex plugin add vulngate@personal
 - 框架代码位于 `scripts/agent/`（捆绑的 Python 包）
 
 本地迭代：`./install.sh && codex plugin add vulngate@personal`，然后新建线程。
-详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+详见 [CONTRIBUTING.zh-CN.md](CONTRIBUTING.zh-CN.md)。
 
 ## 许可
 

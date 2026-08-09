@@ -1,5 +1,7 @@
 # Architecture
 
+**Language:** English | [简体中文](ARCHITECTURE.zh-CN.md)
+
 VulnGate is a thin native plugin around a deterministic research framework. The
 design principle: **the host Codex agent decides; the bundled code computes.**
 

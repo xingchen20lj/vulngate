@@ -1,5 +1,7 @@
 # Quickstart
 
+**Language:** English | [简体中文](QUICKSTART.zh-CN.md)
+
 This guide walks through a first VulnGate run.
 
 ## 1. Install

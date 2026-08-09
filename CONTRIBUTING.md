@@ -1,5 +1,7 @@
 # Contributing to VulnGate
 
+**Language:** English | [简体中文](CONTRIBUTING.zh-CN.md)
+
 Thanks for considering a contribution. VulnGate is a security research tool; the
 bar for changes is deliberately high because findings produced by this pipeline
 may be reported to vendors or used in coordination.
