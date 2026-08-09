@@ -1,0 +1,46 @@
+{
+  "name": "vulngate",
+  "version": "0.1.0",
+  "description": "VulnGate — a Codex-native vulnerability research pipeline for untrusted-input parsing libraries. Runs the S1→S8 audit loop (attack-surface map → candidates → source audit → PoC matrix → novelty gate → CVSS → disclosure-ready report) with hard evidence gates (G0–G5) driven by the host agent.\n\nAliases: @vulngate, @vg, 漏洞审计, 审计管线, vuln audit.",
+  "author": {
+    "name": "xingchen20lj",
+    "email": "71823107+xingchen20lj@users.noreply.github.com",
+    "url": "https://github.com/xingchen20lj"
+  },
+  "homepage": "https://github.com/xingchen20lj/vulngate",
+  "repository": "https://github.com/xingchen20lj/vulngate",
+  "license": "MIT",
+  "keywords": [
+    "security",
+    "vulnerability-research",
+    "source-audit",
+    "llm-agent",
+    "poc",
+    "novelty",
+    "0day"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "VulnGate",
+    "shortDescription": "S1→S8 漏洞审计管线（宿主驱动 + 硬闸门）",
+    "longDescription": "VulnGate 以原生插件形式把 S1→S8 漏洞研究流程嵌入 Codex：宿主 Agent 负责候选生成、静态审计与结论判定，捆绑 CLI 负责矩阵跑测、Novelty 检索、CVSS 校验与账本落盘。每条“确认”结论都必须有运行时 PoC 证据；上游公开披露命中即降级，严禁声称 0day。\n\nEnglish: VulnGate embeds the S1→S8 vulnerability research pipeline natively in Codex. The host agent owns reasoning; the bundled CLI owns deterministic work (PoC matrix, novelty scan, CVSS consistency, ledger). Every \"confirmed\" finding requires runtime PoC evidence; upstream public disclosure degrades novelty; never claim 0day without it.",
+    "developerName": "xingchen20lj",
+    "category": "Engineering",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/xingchen20lj/vulngate",
+    "defaultPrompt": [
+      "审计这个解析库，跑 S1→S8 全流程",
+      "验证这份 PoC，跑 版本×开关×前置 矩阵",
+      "核验这个候选是否已有公开披露"
+    ],
+    "brandColor": "#0EA5E9",
+    "composerIcon": "./assets/composer-icon.png",
+    "logo": "./assets/logo.png",
+    "logoDark": "./assets/logo-dark.png",
+    "screenshots": []
+  }
+}
