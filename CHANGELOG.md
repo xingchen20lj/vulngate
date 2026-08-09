@@ -5,6 +5,15 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-08-09
+
+### Fixed
+
+- S4 sub-agent boundary hardened: spawn messages must state verbatim that
+  sub-agents may only write PoC sources and matrix outputs, must not create any
+  S5–S8 artifacts or draw conclusions, and that out-of-scope writes are harness
+  errors to be re-done by the main agent (observed in the first Tomcat run)
+
 ## [0.2.0] - 2026-08-09
 
 ### Changed

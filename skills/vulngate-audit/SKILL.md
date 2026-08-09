@@ -120,7 +120,13 @@ Run stages in order. Persist every artifact under the target workspace:
   default-config cell and the claimed-precondition cell.
 - **Spawn one sub-agent per candidate** (up to 3 in parallel) with a bounded task:
   write the PoC under the workspace, compile, run the matrix, and return raw cell
-  outputs plus any `harness_error`. Sub-agents must not conclude; they return evidence.
+  outputs plus any `harness_error`. The spawn message MUST state the boundary
+  verbatim: "You may ONLY write PoC sources and matrix outputs. You must NOT
+  create any S5–S8 artifacts (novelty, severity, reports, ledger) or draw
+  conclusions; return raw evidence only. Writing outside the allowed scope is a
+  harness error and will be discarded." Sub-agents return evidence, never
+  verdicts. If a sub-agent overstepped, treat its extra writes as harness errors
+  and re-do them yourself as main agent.
 - Deterministic runner (also usable directly):
   `python3 scripts/agent_cli.py matrix --workspace <path> --target <name> --round <N>
   --candidate <id>`
