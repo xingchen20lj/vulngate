@@ -8,10 +8,16 @@ This guide walks through a first VulnGate run.
 git clone https://github.com/xingchen20lj/vulngate.git
 cd vulngate
 ./install.sh
-codex plugin add vulngate@personal
 ```
 
-Prerequisites: Codex (CLI or desktop), Python 3.8+, JDK 8+, `rg`.
+`install.sh` installs the plugin, registers the personal marketplace, and enables
+it in Codex automatically. It finds the `codex` command in your `$PATH` or inside
+the Codex desktop app bundle — no separate CLI installation needed when you use the
+desktop app. Prerequisites: a local Codex client (desktop app or CLI), Python
+3.8+, JDK 8+, `rg`.
+
+> **New thread required.** Plugin skills load at thread start — open a new Codex
+> thread after installing.
 
 ## 2. Prepare a target
 

@@ -61,18 +61,44 @@ research honest:
 ```bash
 git clone https://github.com/xingchen20lj/vulngate.git
 cd vulngate
-./install.sh                 # installs to ~/plugins/vulngate and registers the marketplace
-codex plugin add vulngate@personal
+./install.sh
 ```
+
+`install.sh` does everything: copies the plugin to `~/plugins/vulngate`, registers
+the personal marketplace, and enables it in Codex
+(`codex plugin add vulngate@personal`). It finds the `codex` command automatically
+— your `$PATH` first, then the CLI bundled inside the Codex desktop app. **If you
+use the desktop app, you do not need to install the codex CLI separately.** If
+`codex` cannot be found anywhere, the script tells you exactly what to run.
 
 > **New thread required.** Plugin skills load at thread start. Open a new Codex
 > thread after installing so the `vulngate-audit` skill becomes available.
 
-### Install from the marketplace
+### Do I need a local Codex client?
+
+Yes. Plugins run on a local Codex client — the desktop app or the CLI. A
+browser-only ChatGPT session cannot load local plugins. The desktop app ships with
+its own `codex` binary, so installing the app is sufficient. Prefer CLI-only?
+
+```bash
+npm install -g @openai/codex
+```
+
+### Manual install / install from the marketplace
 
 ```bash
 codex plugin add vulngate@personal
 ```
+
+### Troubleshooting: `codex: command not found`
+
+- You are using the desktop app but the terminal cannot find `codex` — run the
+  bundled binary directly:
+  - macOS: `/Applications/ChatGPT.app/Contents/Resources/codex`
+  - Windows (Git Bash): `"$LOCALAPPDATA/Programs/ChatGPT/Resources/codex"`
+- Or add it to your `$PATH` once, then plain `codex` works everywhere.
+- `./install.sh` already performs these lookups for you; the manual command is only
+  needed when the auto-detection fails.
 
 ## Quickstart
 

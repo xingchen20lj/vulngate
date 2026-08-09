@@ -53,18 +53,42 @@ VulnGate 把 Codex 智能体变成一套结构化的安全研究流程。给定�
 ```bash
 git clone https://github.com/xingchen20lj/vulngate.git
 cd vulngate
-./install.sh                 # 安装到 ~/plugins/vulngate 并注册个人市场
-codex plugin add vulngate@personal
+./install.sh
 ```
+
+`install.sh` 一步完成全部操作：把插件复制到 `~/plugins/vulngate`、注册个人市场、
+并在 Codex 中启用（等价于 `codex plugin add vulngate@personal`）。脚本会自动查找
+`codex` 命令——先找 `$PATH`，再找 Codex 桌面应用内置的 CLI。**如果你用的是桌面
+应用，不需要单独安装 codex CLI。** 如果实在找不到 `codex`，脚本会明确告诉你
+该执行什么命令。
 
 > **必须新建线程。** 插件技能在线程启动时加载。安装后请打开一个新的 Codex
 > 线程，`vulngate-audit` 技能才会生效。
 
-### 从市场安装
+### 需要本机 Codex 客户端吗？
+
+需要。插件只能运行在本地 Codex 客户端上（桌面应用或 CLI），纯网页版
+ChatGPT 无法加载本地插件。桌面应用自带 `codex` 可执行文件，装好应用即可。
+如果只想用 CLI：
+
+```bash
+npm install -g @openai/codex
+```
+
+### 手动安装 / 从市场安装
 
 ```bash
 codex plugin add vulngate@personal
 ```
+
+### 常见问题：提示 `codex: command not found`
+
+- 你装了桌面应用，但终端里找不到 `codex` —— 直接使用应用自带的二进制：
+  - macOS：`/Applications/ChatGPT.app/Contents/Resources/codex`
+  - Windows（Git Bash）：`"$LOCALAPPDATA/Programs/ChatGPT/Resources/codex"`
+- 或者把它加入 `$PATH`，之后直接敲 `codex` 即可。
+- `./install.sh` 已经替你做了这些查找；只有当自动检测失败时才需要手动执行
+  上面的命令。
 
 ## 快速开始
 

@@ -20,3 +20,8 @@ Initial release.
 - Self-contained installer (`install.sh`) for the personal marketplace
 - Smoke test (`scripts/smoke_test.sh`)
 - Bilingual documentation: `README.zh-CN.md`, `docs/QUICKSTART.zh-CN.md`
+- One-command installer with automatic `codex` discovery (`$PATH`, then the CLI
+  bundled inside the Codex desktop app), with `--no-enable` and inline validation
+  fallbacks
+- Installation FAQ: no separate codex CLI needed with the desktop app; exact
+  commands when `codex` is not on `$PATH`

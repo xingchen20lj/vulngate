@@ -8,10 +8,14 @@
 git clone https://github.com/xingchen20lj/vulngate.git
 cd vulngate
 ./install.sh
-codex plugin add vulngate@personal
 ```
 
-前置要求：Codex（CLI 或桌面客户端）、Python 3.8+、JDK 8+、`rg`。
+`install.sh` 会自动完成：安装插件、注册个人市场、并在 Codex 中启用。它会先在
+`$PATH` 中查找 `codex` 命令，再查找桌面应用内置的 CLI——用桌面应用的话不需要
+单独安装 CLI。前置要求：本机 Codex 客户端（桌面应用或 CLI）、Python 3.8+、
+JDK 8+、`rg`。
+
+> **必须新建线程。** 插件技能在线程启动时加载——安装后请打开新的 Codex 线程。
 
 ## 2. 准备目标
 
