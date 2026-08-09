@@ -35,3 +35,6 @@ Initial release.
   falling back to fixtures on a 404)
 - PoC observation contract hardened: `INSTANTIATED` is only emitted for
   non-generic results (JSONObject/HashMap/null are reported as `GATE_BLOCKED`)
+- S7 discipline: finding documents must copy the CVSS/tier verbatim from the S6
+  final record — re-writing intermediate/pre-G5 scores marks the document
+  incomplete (prevents report-vs-S6 drift seen in first field run)

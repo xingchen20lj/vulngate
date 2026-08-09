@@ -139,6 +139,12 @@ Run stages in order. Persist every artifact under the target workspace:
 - Render a self-contained finding (`reports/<target>/round-NN/挖洞-发现-*.md`) with:
   summary, affected versions, code locations (`file:line`), trigger conditions,
   full PoC + matrix output, novelty judgment, CVSS + tier, and a timeline.
+- **CVSS/tier must be copied verbatim from `S6/severity.json` (final values).**
+  Never re-write intermediate/pre-G5 scores anywhere in S7 (summary, tables, or
+  notes). If the finding document contains any vector/tier that differs from the
+  S6 final record, the document is NOT complete — reconcile S7 to S6 before
+  proceeding. Rejected intermediate values may be listed only as an explicit
+  "superseded" note quoting the S6 decision.
 - Gate **disclosure**: before fix/publication, the document stays local. Never create
   public GitHub issues/PRs from this workflow.
 
