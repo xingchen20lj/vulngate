@@ -27,3 +27,11 @@ Initial release.
   fallbacks
 - Installation FAQ: no separate codex CLI needed with the desktop app; exact
   commands when `codex` is not on `$PATH`
+
+### Fixed
+
+- `novelty` CLI now resolves pull requests via the documented `/pulls/{n}` GitHub
+  endpoint (callers passing `pull_request` are normalized internally instead of
+  falling back to fixtures on a 404)
+- PoC observation contract hardened: `INSTANTIATED` is only emitted for
+  non-generic results (JSONObject/HashMap/null are reported as `GATE_BLOCKED`)
