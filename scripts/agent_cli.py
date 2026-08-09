@@ -75,9 +75,24 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     return 0 if not missing else 2
 
 
+SOURCE_MAP_PRESETS = {
+    "parsers": r"(parse\w*|read\w*|deserialize\w*|decode\w*|load\w*|convert\w*)\s*\(",
+    "http": r"(doGet|doPost|service|handleRequest|onRequest|DispatcherServlet|Controller|RequestMapping)\s*\(",
+    "expression": r"(evaluate|eval|invoke|getValue|template|render|lookup|format)\s*\(",
+    "io": r"(read\w*|write\w*|copy\w*|unzip|extract\w*|download\w*|openConnection|getInputStream|getOutputStream)\s*\(",
+    "exec": r"(Runtime|ProcessBuilder|exec\w*|CommandLine|startProcess)\s*\(",
+    "config": r"(load\w*|parse\w*|readConfig|getProperty|Properties|Yaml|Xml)\s*\(",
+    "all": r"(parse\w*|read\w*|deserialize\w*|decode\w*|load\w*|convert\w*|doGet|doPost|service|evaluate|eval|invoke|lookup|format|exec\w*|openConnection|getInputStream)\s*\(",
+}
+
+
 def cmd_source_map(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
-    pattern = args.pattern or r"(parse\w*|read\w*|deserialize\w*|convert\w*|load\w*|decode\w*)\s*\("
+    if args.preset and args.preset not in SOURCE_MAP_PRESETS:
+        _out({"error": "unknown preset %r; choose from %s"
+              % (args.preset, ", ".join(sorted(SOURCE_MAP_PRESETS)))})
+        return 2
+    pattern = args.pattern or SOURCE_MAP_PRESETS.get(args.preset, SOURCE_MAP_PRESETS["parsers"])
     source_dirs = [d for d in ("src", "src/main/java") if (root / d).exists()] or ["."]
     hits = se.grep_hits(pattern, source_dirs, root, max_lines=args.max_hits)
     entries = []
@@ -255,6 +270,7 @@ def build_parser() -> argparse.ArgumentParser:
     sm = sub.add_parser("source-map", help="build entry inventory via rg")
     sm.add_argument("--root", required=True)
     sm.add_argument("--pattern", default=None)
+    sm.add_argument("--preset", default=None, choices=sorted(SOURCE_MAP_PRESETS))
     sm.add_argument("--max-hits", type=int, default=200)
     sm.set_defaults(fn=cmd_source_map)
 

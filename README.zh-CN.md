@@ -1,11 +1,14 @@
 # VulnGate
 
-> 面向不可信输入解析库的 Codex 原生漏洞研究流水线。
+> 面向任意代码库的 Codex 原生源码审计流水线——库、Web 框架、中间件、日志库、
+> 表达式引擎、消息/RPC 栈与应用。
 
 **语言：** [English](README.md) | 简体中文
 
-VulnGate 把 Codex 智能体变成一套结构化的安全研究流程。给定目标库的源码与运行
-环境，它会依次推进八个研究阶段（S1–S8）——从攻击面测绘到可上报的发现文档——
+VulnGate 把 Codex 智能体变成一套结构化的安全研究流程。给定任意代码库的源码与
+运行环境——解析库、Web 框架（Spring/Struts）、中间件（Tomcat）、日志库
+（Log4j）、表达式引擎、消息/RPC 栈或应用——它会依次推进八个研究阶段（S1–S8）
+——从攻击面测绘到可上报的发现文档——
 并强制五道证据硬闸门（G0–G5），确保每一条结论都经过运行时验证、过 Novelty
 闸门、且可辩护。
 
@@ -124,6 +127,9 @@ codex plugin add vulngate@personal
 
 两种运行模式（宿主原生 / 自主 CLI）与证据契约详见
 [docs/ARCHITECTURE.zh-CN.md](docs/ARCHITECTURE.zh-CN.md)。
+
+按目标类型分类的攻击面清单（Web 框架、日志库、中间件、表达式引擎、协议栈、
+通用库分别该看什么）见 [docs/AUDIT-PLAYBOOK.md](docs/AUDIT-PLAYBOOK.md)。
 
 ## 安全与披露
 

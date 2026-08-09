@@ -1,11 +1,15 @@
 # VulnGate
 
-> A Codex-native vulnerability research pipeline for untrusted-input parsing libraries.
+> A Codex-native source-audit pipeline for any codebase — libraries, web
+> frameworks, middleware, logging libraries, expression engines, message/RPC
+> stacks, and applications.
 
 **Language:** English | [简体中文](README.zh-CN.md)
 
-VulnGate turns the Codex agent into a structured security research workflow. Given a
-target library's source code and runtime, it walks through eight research stages
+VulnGate turns the Codex agent into a structured security research workflow. Given
+any codebase's source code and runtime — a parsing library, a web framework like
+Spring or Struts, a server like Tomcat, a logging library like Log4j, an
+expression engine, a message/RPC stack, or an application — it walks through eight research stages
 (S1–S8) — from attack-surface mapping to disclosure-ready findings — and enforces
 five hard evidence gates (G0–G5) so that every result is runtime-verified,
 novelty-checked, and defensible.
@@ -136,6 +140,10 @@ See [docs/QUICKSTART.md](docs/QUICKSTART.md) for the full walkthrough.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details on the two operating
 modes (host-native vs. autonomous CLI) and the evidence contract.
+
+The per-target attack-surface checklist (what to look for in web frameworks,
+logging libraries, middleware, expression engines, protocol stacks, and general
+libraries) lives in [docs/AUDIT-PLAYBOOK.md](docs/AUDIT-PLAYBOOK.md).
 
 ## Safety and disclosure
 

@@ -1,6 +1,6 @@
 ---
 name: vulngate-audit
-description: "Drive the VulnGate S1→S8 vulnerability research pipeline natively in Codex. Use when the user asks to audit a parsing/serialization library (Java/Python/Go/etc.) for RCE/DoS/info-disclosure, verify a PoC across a version×feature×precondition matrix, run the novelty gate against upstream issues/PRs and public disclosures, compute CVSS with precondition consistency, or produce a disclosure-ready finding report. Aliases: 漏洞审计, 0day 挖掘, PoC 验证, Novelty 核验."
+description: "Drive the VulnGate S1→S8 source-audit pipeline natively in Codex. Use when the user asks to audit any kind of source code — libraries (parsing/serialization/JSON/XML/YAML), web frameworks (Spring/Struts), middleware/servers (Tomcat/Jetty), logging libraries (Log4j/Logback), expression engines, message/RPC stacks (Dubbo/Netty/Hessian), or applications — for RCE/DoS/info-disclosure/logic flaws; verify a PoC across a version×feature×precondition matrix; run the novelty gate against upstream issues/PRs and public disclosures; compute CVSS with precondition consistency; or produce a disclosure-ready finding report. Aliases: 漏洞审计, 源码审计, 0day 挖掘, PoC 验证, Novelty 核验."
 ---
 
 # VulnGate — S1→S8 漏洞研究管线（宿主驱动）
@@ -9,6 +9,8 @@ description: "Drive the VulnGate S1→S8 vulnerability research pipeline nativel
 
 - 你是主 Agent，拥有全部推理与结论判定；捆绑 CLI（`scripts/`）只做确定性工作。
 - 流程：S1 攻击面 → S2 候选 → S3 源码审计 → S4 PoC 矩阵 → S5 Novelty → S6 CVSS → S7 发现文档 → S8 账本。
+- 适用范围：**任意类型源码**（库 / Web 框架 / 中间件 / 日志库 / 表达式引擎 /
+  RPC 消息栈 / 应用）。目标类型对应的攻击面清单见 `docs/AUDIT-PLAYBOOK.md`。
 - 硬闸门 G0–G5：没有运行时 PoC 输出，不许说“确认”；上游公开命中，一律降级“同族+增量”，严禁声称 0day。
 - S4/S5 用宿主原生 spawn 并行（每个候选一个子 Agent 跑矩阵/查上游），子 Agent 只回传原始证据，结论由你定。
 - 安全边界：JNDI/HTTP 副作用仅回环 127.0.0.1；修复公开前不发布任何内容；网络外发需用户批准。
@@ -46,8 +48,12 @@ export PYTHONPATH="$PLUGIN_ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}"
 ## 3. Prerequisites
 
 - Target source and/or jars with an `env.md` recording: version, JDK, safe-mode
-  switches, default features, build command.
-- JDK (8+; 17/21 recommended), `python3`, and the target's build tool (maven/gradle).
+  switches, default features, build command, and target type (library/framework/
+  middleware/...).
+- `python3`, JDK (8+; 17/21 recommended) for Java targets, and the target's build
+  tool (maven/gradle/npm/go/...). For non-Java targets, the host agent runs the
+  PoC with the appropriate runtime and still records machine-readable
+  observation lines.
 - Network for Novelty (GitHub API; anonymous quota 60/h — set `GITHUB_TOKEN` or
   `GH_TOKEN` when rate-limited, see §10).
 
@@ -61,18 +67,29 @@ Run stages in order. Persist every artifact under the target workspace:
 
 ### S1 — Attack-surface map
 
-- Enumerate modules, entry points (`parse*`, `read*`, `deserialize*`, converters),
-  default feature flags, and version diff if a previous version exists.
+- Determine the **target type** (library / web framework / middleware / logging /
+  expression engine / message-RPC / application) and enumerate its modules and
+  entry points according to `docs/AUDIT-PLAYBOOK.md`: parsing, HTTP request
+  handling, expression evaluation, configuration loading, file/IO, log
+  formatting, protocol decoding, command execution, template rendering, etc.
+  Record default feature flags and version diff if a previous version exists.
 - Ask the bundled CLI for source evidence:
-  `python3 scripts/agent_cli.py source-map --target-dir <path>` (grep-based: entries,
-  danger call sites, class instantiation, reflection).
+  `python3 scripts/agent_cli.py source-map --target-dir <path> --preset <parsers|http|expression|io|exec|config|all>`
+  (grep-based: entries, danger call sites, class instantiation, reflection).
+  Pick the preset matching the target type; `--pattern` overrides for custom regex.
 - Gate **G0** (dead code) and **G1** (untrusted input reachable). If the entry is
   unreachable from untrusted input, record `GATE_BLOCKED` and exclude.
 
 ### S2 — Candidate matrix
 
 - Generate candidates as `{surface, entry, input_shape, logic, hypothesis,
-  precondition_tier, preconditions, entry_feature, target_classes}`.
+  attack_class, precondition_tier, preconditions, entry_feature, target_classes}`.
+- Cover the full attack-class taxonomy from `docs/AUDIT-PLAYBOOK.md`, not only
+  parsing: injection (expression/command/SQL/template), resource (path traversal/
+  XXE/SSRF/arbitrary file), memory & resource exhaustion (OOM/stack overflow/CPU
+  amplification), logic (auth bypass/race/validation bypass), and information
+  disclosure (error stack/debug endpoints/log leaks). Do not anchor candidates to
+  known advisories; the playbook is a checklist, not a limit.
 - Precondition tiers (this drives CVSS later):
   - `0` — default config, no setup.
   - `single-feature` — one library feature flag (e.g. SupportAutoType).
@@ -94,8 +111,11 @@ Run stages in order. Persist every artifact under the target workspace:
 ### S4 — PoC matrix (host-native parallelism)
 
 - For each surviving candidate, the minimal PoC must print machine-readable
-  observation lines (e.g. `INSTANTIATED com.sun.rowset.JdbcRowSetImpl`,
-  `ERROR java.lang.OutOfMemoryError`, `GATE_BLOCKED …`).
+  observation lines (e.g. `INSTANTIATED=<fqcn>`, `ERROR=<exception>`,
+  `GATE_BLOCKED=<reason>`, `NETWORK=<url>`, `PARSED=<type>`). PoC shape follows
+  the target type: a Java class for libraries, an HTTP request for web frameworks,
+  a log line / config file for logging libraries, a byte stream for protocol
+  stacks, a CLI invocation for applications.
 - Matrix: `{versions} × {safe-mode on/off} × {precondition tiers}`. At least the
   default-config cell and the claimed-precondition cell.
 - **Spawn one sub-agent per candidate** (up to 3 in parallel) with a bounded task:
@@ -104,7 +124,9 @@ Run stages in order. Persist every artifact under the target workspace:
 - Deterministic runner (also usable directly):
   `python3 scripts/agent_cli.py matrix --workspace <path> --target <name> --round <N>
   --candidate <id>`
-  (wraps `agent/tools/build.py`; enforces loopback-only egress via source scan).
+  (wraps `agent/tools/build.py`; Java-first, enforces loopback-only egress via
+  source scan). For non-Java PoCs the host runs them itself and drops the
+  observation lines into the same `cells.json` structure.
 - Gate **G4**: a candidate is “confirmed” only when a runtime cell produced the
   claimed effect (instantiation/JNDI/OOM/network marker). Static reasoning alone is
   never confirmation. Record every cell, including failures.

@@ -5,6 +5,27 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-08-09
+
+### Changed
+
+- Scope expanded from parsing/serialization libraries to **any source code**:
+  web frameworks (Spring/Struts), middleware/servers (Tomcat/Jetty), logging
+  libraries (Log4j/Logback), expression engines, message/RPC stacks, and
+  applications
+- S1 entry discovery is now target-type aware (`source-map --preset`:
+  `parsers|http|expression|io|exec|config|all`)
+- S2 candidates cover the full attack-class taxonomy (injection / resource /
+  exhaustion / logic / disclosure), not only parsing
+- S4 PoC shapes follow the target type (Java class, HTTP request, log line,
+  byte stream, CLI invocation); non-Java PoCs are host-run with the same
+  observation contract
+
+### Added
+
+- `docs/AUDIT-PLAYBOOK.md` — per-target-type attack-surface checklist with
+  entry patterns and historical CVE-family references
+
 ## [0.1.0] - 2026-08-09
 
 Initial release.
