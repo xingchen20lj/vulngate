@@ -19,3 +19,4 @@ Initial release.
   consistency, conservative novelty judgments, and loopback-only sandboxing
 - Self-contained installer (`install.sh`) for the personal marketplace
 - Smoke test (`scripts/smoke_test.sh`)
+- Bilingual documentation: `README.zh-CN.md`, `docs/QUICKSTART.zh-CN.md`

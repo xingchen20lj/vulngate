@@ -2,6 +2,8 @@
 
 > A Codex-native vulnerability research pipeline for untrusted-input parsing libraries.
 
+**Language:** English | [简体中文](README.zh-CN.md)
+
 VulnGate turns the Codex agent into a structured security research workflow. Given a
 target library's source code and runtime, it walks through eight research stages
 (S1–S8) — from attack-surface mapping to disclosure-ready findings — and enforces
