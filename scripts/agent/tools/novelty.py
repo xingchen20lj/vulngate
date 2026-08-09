@@ -199,9 +199,14 @@ class NoveltyChecker:
     def fetch_ref(self, repo: str, number: int, kind: str = "issues") -> Optional[UpstreamRef]:
         if not self.offline:
             try:
-                data = self._api("/repos/%s/%s/%d" % (repo, kind, number))
+                # GitHub REST uses /pulls/{n} for pull requests (/issues/{n}
+                # happens to resolve them too, but it is not the documented
+                # endpoint). Normalize so any caller passing "pull_request"
+                # gets the correct URL (harness fix, 2026-08-09).
+                endpoint = "pulls" if kind == "pull_request" else kind
+                data = self._api("/repos/%s/%s/%d" % (repo, endpoint, number))
                 state = data.get("state")
-                if kind == "pulls" and data.get("merged_at"):
+                if endpoint == "pulls" and data.get("merged_at"):
                     state = "merged"
                 return UpstreamRef(
                     ref="#%d" % number, kind=kind, title=data.get("title", ""),

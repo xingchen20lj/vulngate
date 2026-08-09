@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""VulnGate plugin CLI — deterministic helpers for the host Codex agent.
+"""Zero-Day Agent plugin CLI — deterministic helpers for the host Codex agent.
 
 The host agent owns reasoning (S2/S3/S5 judgment). This CLI only executes
 deterministic work: source mapping, PoC matrix runs, novelty evaluation,
@@ -193,7 +193,7 @@ def cmd_novelty(args: argparse.Namespace) -> int:
         else:
             query_failed = True
     for num in data.get("pr_numbers", []):
-        r = checker.fetch_ref(repo, num, "pull_request")
+        r = checker.fetch_ref(repo, num, "pulls")
         if r:
             refs.append(r)
         else:
@@ -246,7 +246,7 @@ def cmd_ledger(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="VulnGate plugin CLI (deterministic helpers)")
+    p = argparse.ArgumentParser(description="Zero-Day Agent plugin CLI (deterministic helpers)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     d = sub.add_parser("doctor", help="environment check")
