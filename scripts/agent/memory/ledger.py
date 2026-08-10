@@ -120,8 +120,12 @@ def render_ledger_md(rows: List[Dict], round_no: int, target: str,
     lines += ["| %s |" % " | ".join(ncols), "|" + "---|" * len(ncols)]
     for r in rows:
         if r.get("novelty") or r.get("cvss"):
-            nv = r.get("novelty", {})
-            cv = r.get("cvss", {})
+            nv_raw = r.get("novelty")
+            cv_raw = r.get("cvss")
+            nv = nv_raw if isinstance(nv_raw, dict) else {
+                "verdict": str(nv_raw or "-"), "reason": "", "increments": []}
+            cv = cv_raw if isinstance(cv_raw, dict) else {
+                "vector": "-", "score": str(cv_raw or "-")}
             lines.append("| %s | %s | %s | %s | %s |" % (
                 r.get("candidate_id", ""),
                 nv.get("verdict", "-"),

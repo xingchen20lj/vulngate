@@ -5,6 +5,14 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] - 2026-08-10
+
+### Fixed
+
+- **ledger 渲染器容错**：`novelty` / `cvss` 传字符串时不再崩溃（字典与字符串
+  均接受）——0.2.3 实战（Metabase round-01）中发现：entries 里写成字符串会抛
+  `AttributeError: 'str' object has no attribute 'get'`。
+
 ## [0.2.3] - 2026-08-10
 
 ### Added
