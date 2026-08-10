@@ -5,6 +5,27 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-08-10
+
+### Fixed (Metabase round-01 lessons)
+
+- **Sub-agent false-stall detection**: SKILL now requires a heartbeat file
+  (`S4/heartbeat-<candidate>.log`), defines stall as heartbeat-stale >5min AND
+  no child processes AND no workdir growth, and mandates artifact
+  preservation + orphan-process cleanup before fallback.
+- **Process registry & dedup**: SKILL requires checking `lsof`/`ps` before
+  booting a service, reusing matching instances, and recording PIDs/ports in
+  `S4/processes.json`; round-end cleanup checklist added.
+- **Ledger evidence hard rule**: `ledger` CLI now rejects any row or exclusion
+  with empty evidence (runtime output / source refs / test results).
+- **source-map language coverage**: CLI now scans Java+Clojure+Python+Go+JS etc.
+  by default (`--globs all`; `--globs java` restricts). `http` preset matches
+  compojure `defendpoint/defroutes` and other non-Java route declarations.
+- **env.md discovery**: SKILL defines lookup order (target dir → parent →
+  workspace root) and self-creation from observable facts when absent.
+- **S5 local patched-version diff**: SKILL requires citing local fixed-version
+  diffs as fix-boundary novelty evidence.
+
 ## [0.2.1] - 2026-08-09
 
 ### Fixed

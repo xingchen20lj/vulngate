@@ -50,6 +50,11 @@ export PYTHONPATH="$PLUGIN_ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}"
 - Target source and/or jars with an `env.md` recording: version, JDK, safe-mode
   switches, default features, build command, and target type (library/framework/
   middleware/...).
+- Locate `env.md` by checking, in order: the target source dir, its parent dir,
+  and the workspace root. If absent, create one yourself from observable facts
+  (git tag/commit, build files, default feature flags) and record where each
+  fact came from. Do not skip S1's version/target-type determination because
+  no `env.md` was provided.
 - `python3`, JDK (8+; 17/21 recommended) for Java targets, and the target's build
   tool (maven/gradle/npm/go/...). For non-Java targets, the host agent runs the
   PoC with the appropriate runtime and still records machine-readable
@@ -127,6 +132,22 @@ Run stages in order. Persist every artifact under the target workspace:
   harness error and will be discarded." Sub-agents return evidence, never
   verdicts. If a sub-agent overstepped, treat its extra writes as harness errors
   and re-do them yourself as main agent.
+- **Sub-agent liveness (Metabase lesson, 2026-08-10):** long target operations
+  (server boot, large-jar decompile/diff, integration tests) are silent for
+  minutes. Never declare a sub-agent "stalled" based only on message silence.
+  Require each sub-agent to maintain a heartbeat file
+  `state/<target>/round-NN/S4/heartbeat-<candidate>.log` (append one line per
+  progress step; touch at least every ~3 minutes). A sub-agent is only stalled
+  when BOTH hold for >5 minutes: heartbeat mtime is stale AND no child process
+  of the audit is running AND its workdir has not grown. Before falling back,
+  inventory its workdir (`ls -la`, `find`), preserve any artifacts under the
+  workspace, reuse partial outputs, and kill orphan processes it started
+  (record PIDs/ports in `S4/processes.json`).
+- **Process registry & dedup:** before starting a service for a PoC, check
+  `lsof -nP -iTCP:<port> -sTCP:LISTEN` and `ps aux` for existing instances of
+  the same target/version. Reuse an already-running instance when it matches
+  the cell's version+config; never boot a second duplicate instance for the
+  same matrix cell. Record every started PID+port in `S4/processes.json`.
 - Deterministic runner (also usable directly):
   `python3 scripts/agent_cli.py matrix --workspace <path> --target <name> --round <N>
   --candidate <id>`
@@ -147,6 +168,10 @@ Run stages in order. Persist every artifact under the target workspace:
     add `--offline` to force fixtures).
 - **Spawn a sub-agent** to collect upstream tracker + web evidence while you audit the
   next candidate; you apply the judgment.
+- **Local patched-version diff:** if a fixed/patched version's jar or source is
+  available locally (e.g. downloaded during the audit), diff the affected
+  classes/files and cite it in the novelty evidence. It bounds the fix
+  (which versions are affected) and is stronger than a version-range guess.
 - Gate **G3**: any upstream open PR/issue or public disclosure covering the same
   mechanism → degrade to `same-family+incremental`, never “0day”. If queries failed
   (`unknown-query-failed`), stay conservative: do not upgrade novelty based on absence
@@ -181,6 +206,16 @@ Run stages in order. Persist every artifact under the target workspace:
 - Append to `ledger/<target>/round-NN/挖洞-候选账本-NN.md`, the exclusions list, and
   the round summary: `python3 scripts/agent_cli.py ledger --workspace <path>
   --target <name> --round <N> --entries <json-file>`.
+- **Evidence hard rule:** every ledger row and every exclusion must carry
+  non-empty evidence (runtime output, source refs, or test results). The CLI
+  rejects entries with empty evidence — an exclusion with an empty "basis"
+  column is a harness error, not a valid record (Metabase C4 lesson,
+  2026-08-10).
+- **Round-end cleanup checklist:** before reporting the round as done, verify no
+  audit-started processes are still running (`ps aux | grep -iE "<target>|jar
+  name"`, `lsof` on used ports) and terminate any that remain. Record cleanup
+  in the round summary. A finished round must not leave orphan servers or
+  listeners behind.
 - Report to the user: confirmed count, excluded count, novelty judgments, and the
   next-step recommendation (verify on more versions, coordinate privately with the
   maintainer, or stop).
@@ -241,6 +276,16 @@ choice.
 
 ## 10. Troubleshooting
 
+- **Sub-agent appears stalled**: check its heartbeat file mtime, `ps aux` for
+  its child processes, and whether its workdir is growing. Long server
+  boots/diffs legitimately take minutes. Only after heartbeat stale >5 min AND
+  no children AND no growth may you declare a stall; then preserve its
+  artifacts, kill its orphans, and note the fallback in the round summary.
+- **source-map returns nothing for a non-Java target**: the CLI scans
+  Java+Clojure+Python+Go+JS etc. by default (`--globs all`). If you restricted
+  to Java (`--globs java`) or the project uses an unusual layout, re-run with
+  `--preset http --globs all`, or sweep with `rg` directly and record the
+  manual sweep in S1.
 - **GitHub rate limit**: symptom `GitHub API rate-limited` in S5. Fix: `export
   GITHUB_TOKEN="$(gh auth token)"` (or classic PAT, no scopes needed for public
   reads) and rerun S5.

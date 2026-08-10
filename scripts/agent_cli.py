@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -77,7 +78,11 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
 
 SOURCE_MAP_PRESETS = {
     "parsers": r"(parse\w*|read\w*|deserialize\w*|decode\w*|load\w*|convert\w*)\s*\(",
-    "http": r"(doGet|doPost|service|handleRequest|onRequest|DispatcherServlet|Controller|RequestMapping)\s*\(",
+    # Language-agnostic route surface: Java servlet/Spring, Clojure compojure
+    # (defendpoint/defroutes appear as `(api.macros/defendpoint :get "/x" ...)`
+    # so they are matched as bare words, not call forms), Python Flask,
+    # Go net/http, JS Express/Fastify.
+    "http": r"\b(doGet|doPost|service|handleRequest|onRequest|DispatcherServlet|Controller|RequestMapping|@app\.route|@router\.(get|post|put|delete|patch)|router\.(GET|POST|PUT|DELETE|PATCH|ANY)|app\.(get|post|put|delete|patch)\(|http\.HandleFunc|HandleFunc|add_route)\s*\(|(^|[^-\w])(defendpoint|defroutes|defroute|compojure)\b",
     "expression": r"(evaluate|eval|invoke|getValue|template|render|lookup|format)\s*\(",
     "io": r"(read\w*|write\w*|copy\w*|unzip|extract\w*|download\w*|openConnection|getInputStream|getOutputStream)\s*\(",
     "exec": r"(Runtime|ProcessBuilder|exec\w*|CommandLine|startProcess)\s*\(",
@@ -93,14 +98,18 @@ def cmd_source_map(args: argparse.Namespace) -> int:
               % (args.preset, ", ".join(sorted(SOURCE_MAP_PRESETS)))})
         return 2
     pattern = args.pattern or SOURCE_MAP_PRESETS.get(args.preset, SOURCE_MAP_PRESETS["parsers"])
+    globs = None if args.globs == "all" else ["*.java"]
     source_dirs = [d for d in ("src", "src/main/java") if (root / d).exists()] or ["."]
-    hits = se.grep_hits(pattern, source_dirs, root, max_lines=args.max_hits)
+    hits = se.grep_hits(pattern, source_dirs, root, max_lines=args.max_hits, globs=globs)
     entries = []
     for h in hits:
-        api = h["text"].split("(")[0].strip().split()[-1]
+        text = h["text"]
+        m = re.search(r"([A-Za-z_@][\w.@/:]*)\s*\(?", text)
+        api = m.group(1).rsplit(".", 1)[-1] if m else text.strip()[:40]
         entries.append({"file": h["file"], "line": h["line"], "text": h["text"], "api": api})
     _out({"root": str(root), "pattern": pattern, "count": len(entries),
-          "entries": entries[:args.max_hits]})
+          "entries": entries[:args.max_hits],
+          "globs": globs or se.DEFAULT_SOURCE_GLOBS})
     return 0
 
 
@@ -248,6 +257,26 @@ def cmd_cvss(args: argparse.Namespace) -> int:
 def cmd_ledger(args: argparse.Namespace) -> int:
     workspace = Path(args.workspace).resolve()
     entries = json.loads(Path(args.entries).read_text(encoding="utf-8"))
+    # Evidence hard rule (Metabase lesson, 2026-08-10): C4 was excluded with an
+    # EMPTY basis column. Every ledger row and every exclusion must carry
+    # non-empty evidence (runtime output, source refs, or test results).
+    def _evidence_text(r: Dict[str, Any]) -> str:
+        ev = r.get("evidence") or r.get("reason") or r.get("basis")
+        if isinstance(ev, list):
+            ev = " ".join(str(e) for e in ev)
+        return str(ev or "").strip()
+
+    missing = []
+    for r in list(entries.get("rows", [])) + list(entries.get("excluded", [])):
+        cid = r.get("candidate_id") or r.get("surface") or "?"
+        if not _evidence_text(r):
+            missing.append(cid)
+    if missing:
+        _out({"error": "entries missing evidence",
+              "candidates": missing,
+              "hint": "every ledger row and exclusion must carry non-empty "
+                      "evidence (runtime output, source refs, or test results)"})
+        return 2
     from agent.memory.ledger import write_round_artifacts
     out = write_round_artifacts(
         workspace, args.target, args.round,
@@ -272,6 +301,8 @@ def build_parser() -> argparse.ArgumentParser:
     sm.add_argument("--pattern", default=None)
     sm.add_argument("--preset", default=None, choices=sorted(SOURCE_MAP_PRESETS))
     sm.add_argument("--max-hits", type=int, default=200)
+    sm.add_argument("--globs", default="all", choices=["all", "java"],
+                    help="'all' scans Java+Clojure+Python+Go+JS/etc.; 'java' restricts to *.java")
     sm.set_defaults(fn=cmd_source_map)
 
     se_ = sub.add_parser("source-evidence", help="extract method/class snippet")

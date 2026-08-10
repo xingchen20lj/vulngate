@@ -37,6 +37,17 @@ DANGER_PATTERNS: List[Tuple[str, str]] = [
 
 MAX_FILE_BYTES = 1024 * 1024
 
+# Language-agnostic source scan. Java-only globs made S1 miss Clojure/Go/Python
+# route declarations (Metabase lesson, 2026-08-10): the host fell back to manual
+# rg sweeps because source-map returned nothing for .clj targets.
+DEFAULT_SOURCE_GLOBS: List[str] = [
+    "*.java", "*.kt", "*.scala",
+    "*.clj", "*.cljc", "*.cljs",
+    "*.py", "*.go", "*.rb",
+    "*.js", "*.jsx", "*.ts", "*.tsx",
+    "*.php", "*.rs", "*.cs", "*.c", "*.cpp", "*.h",
+]
+
 _CLASS_DECL = re.compile(
     r"^(public\s+|protected\s+|private\s+)?(final\s+|abstract\s+|sealed\s+)?"
     r"(class|interface|enum|record)\s+\w+")
@@ -63,15 +74,17 @@ def _read_lines(path: Path) -> Optional[List[str]]:
 
 
 def grep_hits(pattern: str, source_dirs: List[str], root: Path,
-              max_lines: int = 12) -> List[Dict[str, object]]:
+              max_lines: int = 12,
+              globs: Optional[List[str]] = None) -> List[Dict[str, object]]:
     """rg a regex across source dirs; return [{file, line, text}] (relative)."""
     from . import search as srch
+    globs = globs or DEFAULT_SOURCE_GLOBS
     hits: List[Dict[str, object]] = []
     for sd in source_dirs:
         d = _safe_resolve(root, sd)
         if not d or not d.exists():
             continue
-        for line in srch.rg(pattern, d, globs=["*.java"], max_count=max_lines):
+        for line in srch.rg(pattern, d, globs=globs, max_count=max_lines):
             parts = line.split(":", 2)
             if len(parts) < 3:
                 continue
