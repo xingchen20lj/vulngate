@@ -166,3 +166,35 @@ Web 框架优先看"不可信输入 → 表达式求值 / 对象绑定 / 模板�
    verify every claimed sub-path on the audited versions.
 5. End-to-end precondition tier (0 / single-feature / app-cooperation /
    extra-primitive) → CVSS consistency (G5).
+
+## 10. 通告驱动反查（Advisory → Fix-Diff → 攻击面）
+
+目标近期有安全通告（GHSA / CVE / 厂商公告）时，**修复 diff 是最准确的攻击面
+地图**：厂商修了什么，漏洞大概率就在那几行改动附近。此技术在 Metabase
+GHSA-vwf4-m7j8-wcjf 实战中直接定位到未公开根因（开放 Map + merge 残留 +
+honeysql raw），是"从通告到根因"的最高效路径。
+
+### 操作步骤
+
+1. **拿修复版本**：从 GHSA / release notes 读 affected / patched 版本区间；
+   下载或 clone patched tag（如 `git fetch origin tag v0.58.24`）。
+2. **diff 定位**：`git diff <受影响tag>..<修复tag> --stat`，把改动文件按
+   输入校验 / 路由 / schema / 反序列化 / 过滤 / 会话管理分类。
+3. **逐改动点反推**：修复代码即答案——看它**加了什么检查**（拒绝未知键、
+   类型校验、参数化、黑名单），反推漏洞触发条件与前置。
+4. **生成候选**：把修复点对应的旧版代码路径列为最高优先候选，照常走
+   S3 源码审计 + S4 运行时验证（G1 / G1b / G4 不变）。
+5. **边界与纪律**：
+   - 反查得到的候选仍必须运行时验证，禁止"修复 diff 存在 = 确认"；
+   - 该机制通常已被上游通告覆盖 → G3 一律按 same-family 起步，增量只主张
+     "精确根因 / 修复边界 / 旁路"，严禁声称 0day；
+   - 核对版本区间以 **GHSA 原文 affected/patched ranges** 为准，勿用博客
+     统一安全版代替逐通告边界（Metabase 教训：reset_password 洞修在
+     0.58.23，0.58.24 是同日另一通告 GHSA-r8h2-qpfx-mx59 的修复版，
+     两者不能混用）。
+
+### 适用场景
+
+- 目标近期出过安全通告（在野 / 0day 预警）；
+- 审计任务是"已修复漏洞的旁路 / 同族残留 / 修复不完整"；
+- 需要快速理解陌生代码库攻击面时，通告 diff 是性价比最高的入口。

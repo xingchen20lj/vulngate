@@ -78,6 +78,10 @@ Run stages in order. Persist every artifact under the target workspace:
   handling, expression evaluation, configuration loading, file/IO, log
   formatting, protocol decoding, command execution, template rendering, etc.
   Record default feature flags and version diff if a previous version exists.
+- **通告驱动反查（优先）**：若目标近期有安全通告（GHSA/CVE/厂商公告），先按
+  `docs/AUDIT-PLAYBOOK.md §10` 做 fix-diff 反查——拉 patched tag、diff 受影响
+  版本，把修复点对应的旧版代码路径列为最高优先攻击面。修复代码即根因答案；
+  反查产物仍必须过 S3 源码审计与 G4 运行时验证，且 G3 按 same-family 起步。
 - Ask the bundled CLI for source evidence:
   `python3 scripts/agent_cli.py source-map --target-dir <path> --preset <parsers|http|expression|io|exec|config|all>`
   (grep-based: entries, danger call sites, class instantiation, reflection).
@@ -123,6 +127,14 @@ Run stages in order. Persist every artifact under the target workspace:
   stacks, a CLI invocation for applications.
 - Matrix: `{versions} × {safe-mode on/off} × {precondition tiers}`. At least the
   default-config cell and the claimed-precondition cell.
+- **Shell/HTTP PoC 契约（Web 应用/服务，Metabase 实战沉淀）**：脚本放
+  `poc/<target>/round-NN/src/<candidate>.sh`，以 `bash` 执行（无需执行位）。
+  观察行：`HTTP_CODE=<状态码>`、`RESP_MATCH=<响应特征串>`、
+  `EVIDENCE=<副作用证据>`（标记文件/数据库行/日志行）、`GATE_BLOCKED=`、
+  `ERROR=`。单元环境变量：`VULNGATE_VERSION` / `VULNGATE_SAFE_MODE` /
+  `VULNGATE_PRECONDITION` / `VULNGATE_FEATURES`。确定性运行：
+  `agent_cli.py matrix --lang shell --manifest <json>`；与 Java 相同，回环强制、
+  非回环 URL/IP 静态扫描拒绝。
 - **Spawn one sub-agent per candidate** (up to 3 in parallel) with a bounded task:
   write the PoC under the workspace, compile, run the matrix, and return raw cell
   outputs plus any `harness_error`. The spawn message MUST state the boundary
@@ -152,8 +164,9 @@ Run stages in order. Persist every artifact under the target workspace:
   `python3 scripts/agent_cli.py matrix --workspace <path> --target <name> --round <N>
   --candidate <id>`
   (wraps `agent/tools/build.py`; Java-first, enforces loopback-only egress via
-  source scan). For non-Java PoCs the host runs them itself and drops the
-  observation lines into the same `cells.json` structure.
+  source scan). Shell/HTTP PoCs use `--lang shell` with the same cells.json schema;
+  the host can also run them itself and drop observation lines into the same
+  structure.
 - Gate **G4**: a candidate is “confirmed” only when a runtime cell produced the
   claimed effect (instantiation/JNDI/OOM/network marker). Static reasoning alone is
   never confirmation. Record every cell, including failures.
@@ -172,6 +185,12 @@ Run stages in order. Persist every artifact under the target workspace:
   available locally (e.g. downloaded during the audit), diff the affected
   classes/files and cite it in the novelty evidence. It bounds the fix
   (which versions are affected) and is stronger than a version-range guess.
+  (S1 的"通告驱动反查"复用同一 diff，方向相反：S1 用它找攻击面，S5 用它定边界。)
+- **版本区间精确核对（Metabase 教训）**：引用受影响/修复版本时，以 GHSA
+  原文 `vulnerable_version_range` / `first_patched_version` 为准，逐通告核对；
+  厂商博客的"统一安全版清单"可能取同日多个通告修复版的较晚者（如
+  reset_password 修在 0.58.23，0.58.24 属同日另一通告 GHSA-r8h2-qpfx-mx59），
+  不得混用。
 - Gate **G3**: any upstream open PR/issue or public disclosure covering the same
   mechanism → degrade to `same-family+incremental`, never “0day”. If queries failed
   (`unknown-query-failed`), stay conservative: do not upgrade novelty based on absence
@@ -242,7 +261,10 @@ your native collaboration tools for real parallelism:
   structured hits (repo/PR/issue/CVE/blog + URL). You apply G3.
 - Keep sub-agent tasks bounded and concrete. They return evidence, never verdicts.
 - If spawn is unavailable in the current environment, fall back to sequential
-  execution and note it in the round summary.
+  execution and note it in the round summary. **快速降级（Metabase 教训）**：
+  spawn 后子 Agent 在约 2 分钟内无任何实质产出（含空任务 / 仅问候语 /
+  心跳文件未出现），即判定 spawn 通道不可用，立即降级宿主顺序执行并记录，
+  不反复重试。
 
 ## 7. Safety and approval model
 
@@ -281,6 +303,9 @@ choice.
   boots/diffs legitimately take minutes. Only after heartbeat stale >5 min AND
   no children AND no growth may you declare a stall; then preserve its
   artifacts, kill its orphans, and note the fallback in the round summary.
+- **Sub-agent 收到空任务 / 只收到问候语**：spawn 通道在当前环境不可用时，
+  子 Agent 可能只回问候语或空结果。等待上限 2 分钟（含心跳文件检查），仍无
+  实质产出 → 判定通道不可用，立即降级宿主顺序执行并记录，不反复重试。
 - **source-map returns nothing for a non-Java target**: the CLI scans
   Java+Clojure+Python+Go+JS etc. by default (`--globs all`). If you restricted
   to Java (`--globs java`) or the project uses an unusual layout, re-run with

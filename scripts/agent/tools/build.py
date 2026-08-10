@@ -93,7 +93,7 @@ def parse_observations(stdout: str, stderr: str = "") -> Dict[str, str]:
                     "SHORTNAME", "PARSED", "INPUT_BYTES", "CELL_START",
                     "DEFAULT_READER_FEATURES", "SUPPORTS_AUTOTYPE",
                     "CACHE_POLLUTED", "TYPED_ARRAY", "PRE_POLLUTION_GATE",
-                    "ENV_ERROR"):
+                    "ENV_ERROR", "HTTP_CODE", "RESP_MATCH", "EVIDENCE"):
             if line.startswith(key + "="):
                 obs[key] = line[len(key) + 1:]
     if "ERROR" not in obs:
@@ -221,8 +221,129 @@ class JavaMatrixRunner:
         (d / "cells.json").write_text(json.dumps(cells, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+@dataclass
+class ShellPOCSpec:
+    candidate_id: str
+    script: str                      # relative path under poc/<target>/round-N/src/
+    cells: List[MatrixCell]
+    env: Dict[str, str] = field(default_factory=dict)
+    entry: str = ""
+    input_shape: str = ""
+    logic: str = ""
+    notes: str = ""
+
+
+class ShellMatrixRunner:
+    """Shell/HTTP PoC matrix runner for web apps, services and protocol tests.
+
+    Produces the same cells.json schema as JavaMatrixRunner so G4 sees one
+    observation contract. PoC scripts (bash) must print machine-readable lines:
+
+      HTTP_CODE=<status>        observed HTTP status code
+      RESP_MATCH=<marker>       expected marker found in response body/headers
+      EVIDENCE=<text>           side-effect proof (marker file / DB row / log line)
+      GATE_BLOCKED=<reason>     config/precondition blocked the path
+      ERROR=<exception>         runtime error observed
+
+    Loopback-only egress is enforced by the same static source scan used for
+    Java PoCs; any non-loopback URL/IP in the script is refused before run.
+    Cells receive VULNGATE_VERSION / VULNGATE_SAFE_MODE / VULNGATE_PRECONDITION
+    / VULNGATE_FEATURES via environment.
+    """
+
+    def __init__(self, workspace: Path, target: str, round_no: int,
+                 approval: Optional[ApprovalGate] = None):
+        self.workspace = workspace.resolve()
+        self.target = target
+        self.round_no = round_no
+        self.approval = approval or ApprovalGate()
+        self.runner = CommandRunner(workspace, approval)
+        self.src_dir = workspace / "poc" / target / ("round-%02d" % round_no) / "src"
+        self.matrix_dir = workspace / "state" / target / ("round-%02d" % round_no) / "S4" / "matrix-runs"
+
+    def run_manifest(self, specs: List[ShellPOCSpec]) -> Dict[str, List[Dict]]:
+        all_results: Dict[str, List[Dict]] = {}
+        for spec in specs:
+            results = [self.run_cell(spec, cell) for cell in spec.cells]
+            all_results[spec.candidate_id] = results
+            self._write_cells(spec.candidate_id, results)
+        return all_results
+
+    def run_cell(self, spec: ShellPOCSpec, cell: MatrixCell) -> Dict:
+        script = self.src_dir / spec.script
+        if not script.exists():
+            return {
+                "candidate_id": spec.candidate_id,
+                "poc_script": spec.script,
+                "version": cell.version,
+                "safe_mode": cell.safe_mode,
+                "precondition": cell.precondition,
+                "harness_error": "script missing: %s (stage .sh PoCs into %s)" % (script, self.src_dir),
+                "observations": {},
+                "lang": "shell",
+            }
+        egress = scan_source_egress(script.read_text(encoding="utf-8", errors="replace"), str(script))
+        if egress:
+            detail = "PoC 脚本含非回环网络目标: %s" % "; ".join(sorted(set(egress))[:6])
+            self.approval.request("external_egress", detail)
+            return {
+                "candidate_id": spec.candidate_id,
+                "poc_script": spec.script,
+                "version": cell.version,
+                "safe_mode": cell.safe_mode,
+                "precondition": cell.precondition,
+                "observations": {"GATE_BLOCKED": "egress-denied"},
+                "stderr": "EGRESS_DENIED " + detail,
+                "lang": "shell",
+            }
+        env_extra = {
+            "VULNGATE_VERSION": cell.version,
+            "VULNGATE_SAFE_MODE": "true" if cell.safe_mode else "false",
+            "VULNGATE_PRECONDITION": cell.precondition,
+            "VULNGATE_FEATURES": ",".join(cell.features),
+        }
+        env_extra.update(spec.env)
+        cmd = ["bash", str(script)] + list(cell.args)
+        result = self.runner.run(
+            cmd,
+            cwd=self.src_dir,
+            env_extra=env_extra,
+            operation="loopback_connect",
+            operation_detail="shell/HTTP PoC %s (targets limited to 127.0.0.1)" % spec.candidate_id,
+            timeout=cell.timeout,
+        )
+        obs = parse_observations(result.stdout, result.stderr)
+        return {
+            "candidate_id": spec.candidate_id,
+            "poc_script": spec.script,
+            "version": cell.version,
+            "safe_mode": cell.safe_mode,
+            "features": cell.features,
+            "precondition": cell.precondition,
+            "returncode": result.returncode,
+            "timed_out": result.timed_out,
+            "duration_ms": result.duration_ms,
+            "observations": obs,
+            "stdout": result.stdout,
+            "stderr": result.stderr[-4000:],
+            "cmd": " ".join(cmd),
+            "lang": "shell",
+        }
+
+    def _write_cells(self, candidate_id: str, cells: List[Dict]) -> None:
+        d = self.matrix_dir / candidate_id
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "cells.json").write_text(json.dumps(cells, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+_FALSY_MARKERS = ("", "true", "yes", "ok", "none", "null", "0", "false")
+
+
 def summarize_candidate(cells: List[Dict]) -> Dict:
     """Derive runtime facts from a candidate's cell results (data-driven, no hard-coding)."""
+    harness_errors = [c.get("harness_error", "") for c in cells if c.get("harness_error")]
+    if harness_errors:
+        return {"harness_error": harness_errors[0], "cells_ran": len(cells)}
     compile_errors = [c.get("compile_error", "") for c in cells if c.get("compile_error")]
     if compile_errors:
         return {"compile_error": compile_errors[0], "cells_ran": len(cells)}
@@ -233,6 +354,7 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
     parsed = []
     leaked = []
     env_errors = []
+    http_evidence = []
 
     def truthy(v: str) -> bool:
         # LLM-authored PoCs may emit INSTANTIATED=false / GATE_BLOCKED=none /
@@ -267,6 +389,22 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
             env_errors.append({"version": c["version"], "safe": c["safe_mode"],
                                "precondition": c["precondition"],
                                "error": obs["ENV_ERROR"]})
+        # HTTP-layer evidence (web apps): HTTP_CODE with a digit status, and/or
+        # RESP_MATCH / EVIDENCE with a concrete marker (not a placeholder).
+        code = str(obs.get("HTTP_CODE", "")).strip()
+        match = str(obs.get("RESP_MATCH", "")).strip()
+        ev = str(obs.get("EVIDENCE", "")).strip()
+        if code.isdigit() or (match and match.lower() not in _FALSY_MARKERS) or \
+                (ev and ev.lower() not in _FALSY_MARKERS):
+            rec = {"version": c["version"], "safe": c["safe_mode"],
+                   "precondition": c["precondition"]}
+            if code.isdigit():
+                rec["http_code"] = int(code)
+            if match and match.lower() not in _FALSY_MARKERS:
+                rec["resp_match"] = match[:200]
+            if ev and ev.lower() not in _FALSY_MARKERS:
+                rec["evidence"] = ev[:200]
+            http_evidence.append(rec)
     return {
         "instantiated": instantiated,
         "errors": errors,
@@ -275,4 +413,5 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
         "parsed": parsed,
         "leaked": leaked,
         "env_errors": env_errors,
+        "http_evidence": http_evidence,
     }

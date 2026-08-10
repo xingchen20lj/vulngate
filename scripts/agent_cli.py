@@ -39,6 +39,8 @@ from agent.tools.build import (  # noqa: E402
     JavaMatrixRunner,
     MatrixCell,
     POCSpec,
+    ShellMatrixRunner,
+    ShellPOCSpec,
     summarize_candidate,
 )
 from agent.tools.cvss import base_score, check_precondition_consistency  # noqa: E402
@@ -159,25 +161,46 @@ def _poc_spec(s: Dict[str, Any]) -> POCSpec:
     )
 
 
+def _shell_poc_spec(s: Dict[str, Any]) -> ShellPOCSpec:
+    return ShellPOCSpec(
+        candidate_id=str(s["candidate_id"]),
+        script=str(s["script"]),
+        cells=[_matrix_cell(c) for c in s.get("cells", [])],
+        env=dict(s.get("env", {})),
+        entry=str(s.get("entry", "")),
+        input_shape=str(s.get("input_shape", "")),
+        logic=str(s.get("logic", "")),
+        notes=str(s.get("notes", "")),
+    )
+
+
 def cmd_matrix(args: argparse.Namespace) -> int:
     workspace = Path(args.workspace).resolve()
     manifest_path = Path(args.manifest).resolve() if args.manifest else \
         workspace / "state" / args.target / ("round-%02d" % args.round) / "S4" / "manifest.json"
     if not manifest_path.exists():
         _out({"error": "manifest not found", "path": str(manifest_path),
-              "hint": "provide --manifest with {specs:[...], jars:{version:[paths]}}"})
+              "hint": "provide --manifest with {specs:[...], jars:{version:[paths]}} "
+                      "(shell PoCs: --lang shell with {specs:[{candidate_id,script,cells}]})"})
         return 2
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    specs = [_poc_spec(s) for s in manifest.get("specs", [])]
-    jars = {v: [Path(p) for p in ps] for v, ps in manifest.get("jars", {}).items()}
-    if not specs:
+    raw_specs = manifest.get("specs", [])
+    if not raw_specs:
         _out({"error": "manifest has no specs"})
         return 2
-    runner = JavaMatrixRunner(workspace, args.target, args.round)
-    results = runner.run_manifest(specs, jars)
+    if args.lang == "shell":
+        specs = [_shell_poc_spec(s) for s in raw_specs]
+        runner = ShellMatrixRunner(workspace, args.target, args.round)
+        results = runner.run_manifest(specs)
+    else:
+        specs = [_poc_spec(s) for s in raw_specs]
+        jars = {v: [Path(p) for p in ps] for v, ps in manifest.get("jars", {}).items()}
+        runner = JavaMatrixRunner(workspace, args.target, args.round)
+        results = runner.run_manifest(specs, jars)
     summary = {cid: summarize_candidate(cells) for cid, cells in results.items()}
     _out({"target": args.target, "round": args.round,
-          "candidates": summary, "cells_written_to": str(runner.matrix_dir)})
+          "lang": args.lang, "candidates": summary,
+          "cells_written_to": str(runner.matrix_dir)})
     return 0
 
 
@@ -318,6 +341,9 @@ def build_parser() -> argparse.ArgumentParser:
     mx.add_argument("--target", required=True)
     mx.add_argument("--round", type=int, required=True)
     mx.add_argument("--manifest", default=None)
+    mx.add_argument("--lang", default="java", choices=["java", "shell"],
+                    help="'java' compiles/runs Java PoCs; 'shell' runs bash PoCs "
+                         "(web apps/services) with HTTP_CODE/RESP_MATCH/EVIDENCE contract")
     mx.set_defaults(fn=cmd_matrix)
 
     nv = sub.add_parser("novelty", help="novelty evaluation (live or from evidence)")

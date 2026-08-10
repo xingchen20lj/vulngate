@@ -5,6 +5,32 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-08-10
+
+### Added
+
+- **通告驱动反查（fix-diff 反查）**：AUDIT-PLAYBOOK 新增 §10——目标近期有安全通告
+  时，先拉 patched tag、diff 受影响版本，把修复点对应的旧版路径列为最高优先
+  攻击面（Metabase GHSA-vwf4-m7j8-wcjf 实战制胜技）。SKILL S1 同步为优先步骤，
+  G3 按 same-family 起步。
+- **Shell/HTTP PoC 矩阵运行器**：`build.py` 新增 `ShellMatrixRunner`（bash PoC，
+  观察契约 `HTTP_CODE` / `RESP_MATCH` / `EVIDENCE` / `GATE_BLOCKED` / `ERROR`，
+  单元环境变量 `VULNGATE_VERSION/SAFE_MODE/PRECONDITION/FEATURES`），
+  `agent_cli.py matrix --lang shell` 与 `stages.run_s4` 双运行器接线；
+  回环强制与 Java 一致（非回环 URL/IP 静态扫描拒绝）。
+- **G4 HTTP 证据维度**：`summarize_candidate` 新增 `http_evidence`
+  （http_code / resp_match / evidence），Web 应用候选可直接用响应侧证据判定。
+
+### Fixed
+
+- **版本区间精确核对（Metabase 教训）**：SKILL S5 要求以 GHSA 原文
+  `vulnerable_version_range` / `first_patched_version` 为准，逐通告核对；
+  博客"统一安全版清单"可能取同日多通告修复版的较晚者（reset_password 修在
+  0.58.23，0.58.24 属另一通告），不得混用。
+- **spawn 快速降级（Metabase 教训）**：SKILL §6/§10 明确 spawn 后约 2 分钟内
+  子 Agent 无实质产出（空任务 / 仅问候语 / 心跳未出现）即判定通道不可用，
+  立即降级宿主顺序执行并记录，不反复重试。
+
 ## [0.2.2] - 2026-08-10
 
 ### Fixed (Metabase round-01 lessons)

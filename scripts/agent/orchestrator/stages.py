@@ -14,7 +14,8 @@ from ..memory.state import CheckpointStore
 from ..sandbox.approval import ApprovalGate
 from ..sandbox.runner import CommandRunner
 from ..tools import search as srch
-from ..tools.build import JavaMatrixRunner, MatrixCell, POCSpec, summarize_candidate
+from ..tools.build import (JavaMatrixRunner, MatrixCell, POCSpec,
+                           ShellMatrixRunner, ShellPOCSpec, summarize_candidate)
 from ..tools.conclusion import derive_conclusion
 from ..tools.cvss import base_score
 from ..tools.source_evidence import DANGER_PATTERNS, grep_hits
@@ -181,6 +182,8 @@ def _poc_specs(ctx: StageContext) -> List[POCSpec]:
     specs = []
     for cand in ctx.config.candidates:
         for poc in cand.get("pocs", []):
+            if "script" in poc:
+                continue  # shell PoCs are collected separately
             cells = [MatrixCell(
                 version=c["version"], safe_mode=c["safe_mode"],
                 features=c.get("features", []), precondition=c.get("precondition", "none"),
@@ -202,6 +205,30 @@ def _poc_specs(ctx: StageContext) -> List[POCSpec]:
     return specs
 
 
+def _shell_poc_specs(ctx: StageContext) -> List[ShellPOCSpec]:
+    specs = []
+    for cand in ctx.config.candidates:
+        for poc in cand.get("pocs", []):
+            if "script" not in poc:
+                continue
+            cells = [MatrixCell(
+                version=c["version"], safe_mode=c["safe_mode"],
+                features=c.get("features", []), precondition=c.get("precondition", "none"),
+                args=c.get("args", []), jvm=c.get("jvm", {}),
+                timeout=c.get("timeout"),
+            ) for c in poc.get("cells", [])]
+            specs.append(ShellPOCSpec(
+                candidate_id=cand["candidate_id"],
+                script=poc["script"],
+                cells=cells,
+                env=dict(poc.get("env", {})),
+                entry=cand.get("entry", ""),
+                input_shape=cand.get("input_shape", ""),
+                logic=cand.get("logic", ""),
+            ))
+    return specs
+
+
 def _stage_pocs(ctx: StageContext) -> None:
     """Copy PoC sources from config.poc_src_dir into the round src dir (idempotent)."""
     src_round = ctx.workspace / "poc" / ctx.target / ("round-%02d" % ctx.round_no) / "src"
@@ -211,7 +238,7 @@ def _stage_pocs(ctx: StageContext) -> None:
     poc_dir = ctx.workspace / ctx.config.poc_src_dir
     if not poc_dir.exists():
         return
-    for f in sorted(poc_dir.glob("*.java")):
+    for f in sorted(poc_dir.glob("*.java")) + sorted(poc_dir.glob("*.sh")):
         target = src_round / f.name
         if not target.exists():
             target.write_text(f.read_text(encoding="utf-8"), encoding="utf-8")
@@ -221,9 +248,15 @@ def run_s4(ctx: StageContext) -> Dict[str, Any]:
     """Minimal PoC + verification matrix: version x safe-mode x precondition."""
     _stage_pocs(ctx)
     jars_by_version = ctx.config.resolve_jars(ctx.workspace)
-    matrix_runner = JavaMatrixRunner(ctx.workspace, ctx.target, ctx.round_no, ctx.approval)
-    specs = _poc_specs(ctx)
-    results = matrix_runner.run_manifest(specs, jars_by_version)
+    results = {}
+    java_specs = _poc_specs(ctx)
+    if java_specs:
+        matrix_runner = JavaMatrixRunner(ctx.workspace, ctx.target, ctx.round_no, ctx.approval)
+        results.update(matrix_runner.run_manifest(java_specs, jars_by_version))
+    shell_specs = _shell_poc_specs(ctx)
+    if shell_specs:
+        shell_runner = ShellMatrixRunner(ctx.workspace, ctx.target, ctx.round_no, ctx.approval)
+        results.update(shell_runner.run_manifest(shell_specs))
     summaries = {}
     for cand in ctx.config.candidates:
         cid = cand["candidate_id"]
