@@ -5,6 +5,30 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] - 2026-08-10
+
+### Added
+
+- **autonomous 目标类型感知**（Metabase v0.63.2 实战暴露的三大根因修复）：
+  - S1/S2/S3/S5 提示词按目标类型切换：web-app 用 Web 安全研究员提示词
+    （路由鉴权 / SQLi / SSRF / 模板注入 / 信息泄露 / 业务逻辑），不再被
+    "Java 反序列化"人设带偏；
+  - S1 攻击面扫描对 web 目标走 HTTP 路由清单（复用 source-map http preset，
+    识别 Compojure / Spring / Flask / Express 等）；
+  - S4 对 web 目标接入 ShellMatrixRunner：LLM 生成 bash HTTP PoC，观察契约
+    HTTP_CODE / RESP_MATCH / EVIDENCE / GATE_BLOCKED，目标 URL 经
+    `VULNGATE_TARGET_URL` 注入，含修复轮；
+  - `prepare_target` 支持 env.md 声明 `target_type` / `target_url`
+    （可按版本），web 目标不再强制要求 jar。
+- **结论规则 HTTP 证据路径**：`derive_conclusion` 新增 http_evidence 确认
+  （带内容分隔符的 RESP_MATCH / EVIDENCE 视为运行时证据），Web 候选可据此
+  判定"确认"。
+
+### Changed
+
+- `SOURCE_MAP_PRESETS` 下沉到 `agent/tools/source_evidence.py`，CLI 与
+  autonomous 共用同一份入口清单正则。
+
 ## [0.2.4] - 2026-08-10
 
 ### Fixed

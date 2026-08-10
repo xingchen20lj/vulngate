@@ -41,7 +41,8 @@ from ..memory.ledger import render_finding_md, write_round_artifacts
 from ..orchestrator.config import TargetConfig
 from ..orchestrator.gates import g3_novelty
 from ..sandbox.approval import ApprovalGate
-from ..tools.build import JavaMatrixRunner, MatrixCell, POCSpec, summarize_candidate
+from ..tools.build import (JavaMatrixRunner, MatrixCell, POCSpec,
+                           ShellMatrixRunner, ShellPOCSpec, summarize_candidate)
 from ..tools.conclusion import (DENY_CLASS_HINTS, derive_conclusion,
                                 validate_confirmation)
 from ..tools.cvss import base_score
@@ -50,7 +51,8 @@ from ..tools.novelty import (Disclosure, NoveltyChecker, UpstreamRef,
                              mechanism_audit_llm)
 from ..tools.public_scan import scan_all
 from ..tools.seeds import load_seeds, seed_reference_block
-from ..tools.source_evidence import DANGER_PATTERNS, candidate_block, grep_hits, surface_block
+from ..tools.source_evidence import (DANGER_PATTERNS, SOURCE_MAP_PRESETS,
+                                     candidate_block, grep_hits, surface_block)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -66,6 +68,77 @@ SYSTEM_POC = (
     "main 必须至少输出一行机器可读观测（ERROR=/GATE_BLOCKED=/INSTANTIATED=/LEAKED= 之一，"
     "基于真实运行结果），禁止空输出。"
 )
+
+SYSTEM_SECURITY_WEB = (
+    "你是资深 Web 应用安全研究员，擅长 Web 框架的路由/鉴权、SQL 注入、SSRF、"
+    "模板注入、命令注入、信息泄露与业务逻辑漏洞挖掘。"
+    "所有结论必须基于可运行时验证的假设；严禁声称未经验证的 0day。"
+    "输出严格 JSON，不要 Markdown 围栏。"
+)
+
+SYSTEM_POC_WEB = (
+    "你是资深 Web 安全 PoC 作者。直接输出最终 bash 脚本（HTTP PoC），"
+    "不要输出思考过程，不要解释，无 Markdown 围栏。"
+    "脚本必须打印机器可读观测行（基于真实运行结果，至少一行）：\n"
+    "HTTP_CODE=<状态码>\nRESP_MATCH=<响应体/头中的特征串>\n"
+    "EVIDENCE=<副作用证据，如写入成功的标记/会话接管邮箱>\n"
+    "GATE_BLOCKED=<原因>\nERROR=<异常>\n"
+    "目标 base URL 必须从环境变量 VULNGATE_TARGET_URL 读取（脚本内使用该变量拼接路径，"
+    "禁止硬编码其他主机；网络目标只允许 127.0.0.1/localhost）。"
+    "允许使用 curl 与 python3。禁止输出解释性文本。"
+)
+
+
+def _is_web_target(target_dir: Path) -> bool:
+    """Heuristic target-type detection (observable facts only)."""
+    markers = ("compojure", "ring/ring", "javax.servlet", "jakarta.servlet",
+               "spring-boot", "SpringBootApplication", "flask", "django",
+               "express", "dispatcher", "defroutes", "defendpoint")
+    env_md = target_dir / "env.md"
+    if env_md.exists():
+        text = env_md.read_text(encoding="utf-8", errors="replace")
+        for line in text.splitlines():
+            if line.strip().lower().startswith("target_type:"):
+                tt = line.split(":", 1)[1].strip().lower()
+                return tt in ("web-app", "webapp", "web", "application")
+    try:
+        hits = subprocess.run(
+            ["rg", "-l", "-m", "1", "|".join(markers), str(target_dir)],
+            capture_output=True, text=True, timeout=30).stdout
+        return bool(hits.strip())
+    except Exception:
+        return False
+
+
+def scan_http_entries(source_dirs: List[Path]) -> List[Dict[str, Any]]:
+    """Web-app entry inventory: grep route/controller declarations."""
+    pat = SOURCE_MAP_PRESETS.get("http", r"defendpoint|defroutes|doGet|doPost")
+    entries: List[Dict[str, Any]] = []
+    seen = set()
+    for sd in source_dirs:
+        if not sd.exists():
+            continue
+        for hit in grep_hits(pat, [sd.as_posix()], sd.parent, max_lines=120):
+            key = (hit["file"], hit["line"])
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append({
+                "api": "http-route",
+                "input_shape": "http-request",
+                "file_line": "%s:%d" % (hit["file"], hit["line"]),
+                "untrusted": True,
+                "text": hit["text"],
+            })
+    return entries[:200]
+
+
+def _sec_prompt(ctx: "AutoCtx") -> str:
+    return SYSTEM_SECURITY_WEB if ctx.cfg.target_type == "web-app" else SYSTEM_SECURITY
+
+
+def _poc_prompt(ctx: "AutoCtx") -> str:
+    return SYSTEM_POC_WEB if ctx.cfg.target_type == "web-app" else SYSTEM_POC
 
 ENTRY_API_PATTERNS = [
     (r"\breadValue\s*\(", "json deserialization entry (ObjectMapper)"),
@@ -135,6 +208,7 @@ def prepare_target(root: Path, name: str, target_dir: Path) -> TargetConfig:
     """Copy a new target into targets/<name>/ and build a config skeleton."""
     target_dir = target_dir.resolve()
     dest = root / "targets" / name
+    is_web = _is_web_target(target_dir)
     if not dest.exists():
         dest.mkdir(parents=True)
         subprocess.run(
@@ -153,22 +227,42 @@ def prepare_target(root: Path, name: str, target_dir: Path) -> TargetConfig:
         lib.mkdir(parents=True, exist_ok=True)
         for j in jar_srcs:
             shutil.copy2(j, lib / j.name)
-    source_dirs = sorted(
-        d.relative_to(dest).as_posix()
-        for d in dest.iterdir() if (d / "src" / "main" / "java").exists())
+    if is_web:
+        # Web-app layouts vary (Clojure src/, Maven src/main/java, ...):
+        # prefer a top-level src/ dir, else the copy root.
+        web_dirs = [d for d in dest.iterdir() if d.is_dir() and d.name == "src"]
+        source_dirs = [d.relative_to(dest).as_posix() for d in web_dirs] or ["."]
+        entries = scan_http_entries([dest / d for d in source_dirs])
+    else:
+        source_dirs = sorted(
+            d.relative_to(dest).as_posix()
+            for d in dest.iterdir() if (d / "src" / "main" / "java").exists())
+        entries = scan_entries([dest / d for d in source_dirs])
     jars = sorted(
         p.as_posix() for p in dest.rglob("*.jar")
         if "sources" not in p.name and "javadoc" not in p.name)
-    if not jars:
+    if not jars and not is_web:
         raise SystemExit(
             "no jars found under %s: build first (mvn package / ./mvnw -DskipTests package),\n"
             "then re-run; jars under target/ or lib/ are auto-copied into lib/" % dest)
-    entries = scan_entries([dest / d for d in source_dirs])
+    target_urls: Dict[str, str] = {}
+    env_md = target_dir / "env.md"
+    if env_md.exists():
+        for line in env_md.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line.lower().startswith("target_url:"):
+                target_urls["local"] = line.split(":", 1)[1].strip()
+            elif line.lower().startswith("target_url."):
+                ver, _, url = line[11:].partition(":")
+                if url.strip():
+                    target_urls[ver.strip()] = url.strip()
     cfg = {
         "name": name,
         "discovery_date": date.today().isoformat(),
+        "target_type": "web-app" if is_web else "library",
+        "target_urls": target_urls,
         "upstream_repo": "",
-        "jars": [{"version": "local", "path": jars[0]}],
+        "jars": [{"version": "local", "path": jars[0]}] if jars else [],
         "deps": [],
         "source_dirs": source_dirs,
         "entry_points": entries,
@@ -240,17 +334,27 @@ def learn_api_hint(ctx: AutoCtx) -> str:
     srcs = ", ".join(ctx.cfg.source_dirs)
     src_block = surface_block(ctx.cfg.entry_points, ctx.cfg.source_dirs,
                               ctx.root, max_chars=5000)
-    user = (
-        "目标库：%s\n源码目录：%s\n入口清单：\n%s\n\n"
-        "以下是入口类源码片段与危险模式命中摘要（真实源码证据，文件+行号）：\n%s\n\n"
-        "请基于上述源码阅读入口类（如 ObjectMapper/JsonMapper/解析器），输出 api_hint："
-        '一句话说明正确包名、反序列化入口 API 签名、默认安全开关'
-        '（如多态类型默认关闭、深度/长度约束），并警告易混的旧版本 API。'
-        "只输出 JSON：{\"api_hint\": \"...\"}"
-        % (ctx.cfg.name, srcs, _fmt_entries(ctx.cfg.entry_points), src_block or "（无源码片段）")
-    )
+    if ctx.cfg.target_type == "web-app":
+        user = (
+            "目标应用：%s\n源码目录：%s\nHTTP 入口清单：\n%s\n\n"
+            "以下为路由/处理器源码片段与危险模式命中摘要（真实源码证据，文件+行号）：\n%s\n\n"
+            "请基于上述源码输出 api_hint：一句话说明 Web 框架与路由形态（如 Compojure/Ring）、"
+            "鉴权中间件、默认安全开关（如 +auth 挂载范围、CSRF、限流），"
+            "并列出值得优先审计的未认证端点前缀。只输出 JSON：{\"api_hint\": \"...\"}"
+            % (ctx.cfg.name, srcs, _fmt_entries(ctx.cfg.entry_points), src_block or "（无源码片段）")
+        )
+    else:
+        user = (
+            "目标库：%s\n源码目录：%s\n入口清单：\n%s\n\n"
+            "以下是入口类源码片段与危险模式命中摘要（真实源码证据，文件+行号）：\n%s\n\n"
+            "请基于上述源码阅读入口类（如 ObjectMapper/JsonMapper/解析器），输出 api_hint："
+            '一句话说明正确包名、反序列化入口 API 签名、默认安全开关'
+            '（如多态类型默认关闭、深度/长度约束），并警告易混的旧版本 API。'
+            "只输出 JSON：{\"api_hint\": \"...\"}"
+            % (ctx.cfg.name, srcs, _fmt_entries(ctx.cfg.entry_points), src_block or "（无源码片段）")
+        )
     try:
-        data = ctx.llm.ask_json(SYSTEM_SECURITY, user, max_tokens=1000)
+        data = ctx.llm.ask_json(_sec_prompt(ctx), user, max_tokens=1000)
         hint = (data.get("api_hint") or "").strip()
     except ValueError as exc:
         print("[S1.5] api_hint learning failed: %s" % exc)
@@ -282,6 +386,22 @@ def propose_candidates(ctx: AutoCtx, round_no: int,
                 c.get("candidate_id", "?"), c.get("surface", ""),
                 "; ".join(str(x) for x in (c.get("observations") or [])[:3]) or "无")
             for c in carryover[:8])
+    if ctx.cfg.target_type == "web-app":
+        guidance = (
+            "Web 应用攻击面：路由鉴权绕过 / SQL 注入 / SSRF / 模板注入 / "
+            "命令注入 / 信息泄露 / 业务逻辑。"
+            "前置分级必须引用路由与中间件的默认鉴权/校验：入口有 +auth 或权限中间件时，"
+            'precondition_tier_hint 不得为 "0"，preconditions 必须写明所需调用方配置。'
+        )
+        input_shape_hint = 'input_shape("json"|"query"|"path"|"body"|"multipart")'
+    else:
+        guidance = (
+            "反序列化/解析边界/类型分发/DoS。"
+            "前置分级必须引用 API 提示中的默认安全开关："
+            '提示声明默认拦截（如 registrationRequired=true / 默认黑名单 / autoType 关闭）时，'
+            'precondition_tier_hint 不得为 "0"，preconditions 必须写明所需的调用方配置。'
+        )
+        input_shape_hint = "input_shape(text/json|binary/jsonb|path)"
     user = (
         "目标库：%s（版本 %s）\n"
         "API 提示（必须作为默认配置可达性的唯一依据，禁止凭模型记忆推断）：\n%s\n\n"
@@ -289,28 +409,25 @@ def propose_candidates(ctx: AutoCtx, round_no: int,
         "真实源码证据（危险模式命中 + 入口类片段，供提出候选时引用文件/行号）：\n%s\n\n"
         "上一轮已提出/验证的候选（新候选必须与它们不同——不同攻击面、不同触发点、"
         "不同输入形态；严禁重复）：\n%s\n\n"
-        "请提出最多 %d 个最值得验证的攻击候选（反序列化/解析边界/类型分发/DoS）。"
-        "前置分级必须引用 API 提示中的默认安全开关："
-        '提示声明默认拦截（如 registrationRequired=true / 默认黑名单 / autoType 关闭）时，'
-        'precondition_tier_hint 不得为 "0"，preconditions 必须写明所需的调用方配置。\n'
+        "请提出最多 %d 个最值得验证的攻击候选（%s）。\n"
         "每个候选的 logic 必须引用源码证据中的文件/行号（如 "
-        "`core/.../ObjectReaderProvider.java:789 哈希命中后无文本校验`），"
+        "`src/metabase/session/api.clj:229 schema 未封闭`），"
         "禁止只写入口 API 名而无代码依据。\n"
         "每个候选字段："
-        'candidate_id(如 A1), surface(一句话), entry(入口API), input_shape(text/json|binary/jsonb|path), '
+        'candidate_id(如 A1), surface(一句话), entry(入口API), input_shape(%s), '
         'logic(攻击逻辑), hypothesis, precondition_tier_hint("0"|"single-feature"|"application-type"|"extra-primitive"), '
         'preconditions(数组,如 ["无"] 或 ["调用方开启 SupportAutoType"]), '
-        'entry_feature("SupportAutoType" 或 ""), poc_class(类名), jvm(对象,如 {"Xmx":"256m"}), '
+        'entry_feature(默认开关名或 ""), poc_class(Java 类名; Web 候选填 ""), jvm(对象,如 {"Xmx":"256m"}), '
         'target_classes(数组，预期实例化的目标类全限定名，如 ["com.example.Exploit"]；'
         '类型混淆/DoS 类候选可为 []), '
         'novelty_keywords(数组,上游检索关键词), cvss_vector(可选)。\n'
         "只输出 JSON：{\"candidates\":[...]}"
         % (ctx.cfg.name, versions, ctx.cfg.api_hint or "（无）",
            _fmt_entries(ctx.cfg.entry_points), src_block or "（无源码片段）",
-           carry_text or "（无，首轮）", ctx.max_candidates)
+           carry_text or "（无，首轮）", ctx.max_candidates, guidance, input_shape_hint)
     )
     try:
-        data = ctx.llm.ask_json(SYSTEM_SECURITY, user, max_tokens=4000)
+        data = ctx.llm.ask_json(_sec_prompt(ctx), user, max_tokens=4000)
     except ValueError as exc:
         print("[S2] LLM proposal failed: %s" % exc)
         return []
@@ -356,7 +473,7 @@ def audit_candidate(ctx: AutoCtx, cand: Dict[str, Any]) -> Dict[str, Any]:
            src_block or "（未定位到源码片段，请在审计笔记中注明）")
     )
     try:
-        return ctx.llm.ask_json(SYSTEM_SECURITY, user, max_tokens=2000)
+        return ctx.llm.ask_json(_sec_prompt(ctx), user, max_tokens=2000)
     except ValueError as exc:
         print("[S3] LLM audit failed for %s: %s" % (cand.get("candidate_id"), exc))
         return {"gate_status": "unknown", "gate_kind": "unknown",
@@ -463,6 +580,130 @@ def extract_java_code(text: str) -> str:
     return text
 
 
+def extract_shell_code(text: str) -> str:
+    """Extract bash source from an LLM reply (fence or leading code block)."""
+    text = text.strip()
+    for fence in ("```bash", "```sh", "```shell"):
+        m = re.search(re.escape(fence) + r"\s*(.*?)```", text, re.S)
+        if m:
+            return m.group(1).strip()
+    m = re.search(r"```\s*(.*?)```", text, re.S)
+    if m:
+        return m.group(1).strip()
+    start = re.search(r"(?:#!/bin/(?:ba)?sh|#!/usr/bin/env bash|set -[a-z])", text)
+    if start:
+        return text[start.start():].strip()
+    return text
+
+
+def generate_shell_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
+    """S4a-web: LLM writes a bash HTTP PoC (observation contract in prompt)."""
+    versions = ", ".join(sorted({v for v in ctx.cfg.target_urls}))
+    pre = "; ".join(cand.get("preconditions") or ["无"])
+    src_block = candidate_block(cand, ctx.cfg.entry_points, ctx.cfg.source_dirs,
+                                ctx.root, max_chars=6000)
+    user = (
+        "候选：%s\n攻击面：%s\n入口：%s\n逻辑：%s\n前置条件：%s\n"
+        "可用目标版本(base URL 来自 env.md)：%s\n\n"
+        "候选相关源码片段（真实源码证据，按真实端点与参数写 PoC，禁止凭记忆猜 API）：\n%s\n\n"
+        "请输出单个 bash 脚本（HTTP PoC），最小可运行：\n"
+        "- base URL 从环境变量 VULNGATE_TARGET_URL 读取（脚本内拼接路径）；\n"
+        "- 按候选逻辑构造请求（curl 或 python3 urllib），真实发送并检查响应；\n"
+        "- 必须打印机器可读观测行（基于真实运行结果）：\n"
+        "  HTTP_CODE=<状态码>\n  RESP_MATCH=<响应中的特征串>\n"
+        "  EVIDENCE=<副作用证据，如会话接管后 /api/user/current 返回的管理员身份>\n"
+        "  GATE_BLOCKED=<未触发的原因>\n  ERROR=<异常>\n"
+        "- 只允许访问 VULNGATE_TARGET_URL 指向的主机（回环 127.0.0.1）；禁止外联；\n"
+        "- 禁止解释性输出，只输出脚本本身。"
+        % (cand["candidate_id"], cand.get("surface"), cand.get("entry"),
+           cand.get("logic"), pre, versions or "（未配置，需 env.md 提供 target_url）",
+           src_block or "（未定位到源码片段）")
+    )
+    text = ctx.llm.ask(_poc_prompt(ctx), user, max_tokens=8000, reasoning_effort="low")
+    return extract_shell_code(text)
+
+
+def repair_shell_poc(ctx: AutoCtx, cand: Dict[str, Any], script_text: str,
+                     feedback: str) -> str:
+    """S4b-web: one LLM repair pass with the actual shell cell output."""
+    user = (
+        "你上次为候选 %s 生成的 Web PoC 未产生有效观测，反馈如下：\n\n%s\n\n"
+        "候选攻击面（必须针对这个攻击面重写，不要另起炉灶）：\n%s\n"
+        "攻击逻辑：%s\n"
+        "请只输出修正后的完整 bash 脚本：base URL 从 VULNGATE_TARGET_URL 读取，"
+        "按候选逻辑真实发送请求并检查响应，保持机器可读观测行 "
+        "（HTTP_CODE= / RESP_MATCH= / EVIDENCE= / GATE_BLOCKED= / ERROR=），"
+        "只允许访问 127.0.0.1/localhost，无解释性文本。"
+        % (cand["candidate_id"], feedback[-3000:],
+           cand.get("surface", ""), cand.get("logic", ""))
+    )
+    text = ctx.llm.ask(_poc_prompt(ctx), user, max_tokens=8000, reasoning_effort="low")
+    return extract_shell_code(text)
+
+
+def _verify_web_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
+                          audit: Dict[str, Any]) -> Dict[str, Any]:
+    """S4-web: shell PoC matrix against running target URLs (ShellMatrixRunner)."""
+    cid = cand["candidate_id"]
+    urls = dict(ctx.cfg.target_urls)
+    if not urls:
+        return {"candidate": cand, "audit": audit,
+                "summary": {"harness_error":
+                            "web-app 需要 env.md 提供 target_url（如 "
+                            "`target_url: http://127.0.0.1:8080` 或按版本 "
+                            "`target_url.<version>: ...`）"},
+                "conclusion": "待验证", "spec": None}
+    src_dir = ctx.root / "poc" / ctx.cfg.name / ("round-%02d" % round_no) / "src"
+    src_dir.mkdir(parents=True, exist_ok=True)
+    script_name = "Poc%s.sh" % (re.sub(r"[^A-Za-z0-9]", "", cid) or "X")
+    script_text = generate_shell_poc(ctx, cand)
+    if not script_text.strip():
+        return {"candidate": cand, "audit": audit,
+                "summary": {"harness_error": "LLM returned empty shell PoC"},
+                "conclusion": "待验证", "spec": None}
+    script_file = src_dir / script_name
+    script_file.write_text(script_text, encoding="utf-8")
+    cells = [MatrixCell(version=v, safe_mode=False, precondition="none")
+             for v in sorted(urls)]
+    spec = ShellPOCSpec(candidate_id=cid, script=script_name, cells=cells,
+                        urls=urls, entry=cand.get("entry", ""),
+                        input_shape=cand.get("input_shape", ""),
+                        logic=cand.get("logic", ""))
+    approval = ApprovalGate(
+        log_path=ctx.root / "state" / ctx.cfg.name
+        / ("round-%02d" % round_no) / "approval-log.jsonl")
+    runner = ShellMatrixRunner(ctx.root, ctx.cfg.name, round_no, approval=approval)
+    try:
+        results = runner.run_manifest([spec])
+        cells = results.get(cid, [])
+        summary = summarize_candidate(cells)
+        summary["cells_ran"] = len(cells)
+        for _repair_round in range(2):
+            needs_repair = (not summary.get("http_evidence")
+                            and not summary.get("gate_blocked")
+                            and not summary.get("errors"))
+            if not needs_repair:
+                break
+            print("  %s: no evidence, asking LLM to repair (round %d)..." % (
+                cid, _repair_round + 1))
+            feedback = "\n".join(
+                "cell %s: %s" % (c.get("version"), (c.get("stdout") or "")[-800:])
+                for c in cells[:2]) or "no output"
+            fixed = repair_shell_poc(ctx, cand, script_text, feedback)
+            if not fixed.strip():
+                break
+            script_file.write_text(fixed, encoding="utf-8")
+            results = runner.run_manifest([spec])
+            cells = results.get(cid, [])
+            summary = summarize_candidate(cells)
+            summary["cells_ran"] = len(cells)
+    except Exception as exc:
+        summary = {"harness_error": "%s: %s" % (type(exc).__name__, exc)}
+    conclusion = _derive(summary, cand, cells)
+    return {"candidate": cand, "audit": audit, "summary": summary,
+            "conclusion": conclusion, "spec": spec}
+
+
 def poc_consistency(cand: Dict[str, Any], src_text: str) -> List[str]:
     """Reject vacuous LLM PoCs that ignore the candidate's declared attack:
     a PoC that declares target_classes must reference that class and
@@ -513,6 +754,8 @@ def verify_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
     fz = cand.get("fuzz_spec")
     if fz:
         return _verify_fuzz_candidate(ctx, round_no, cand, audit, fz)
+    if ctx.cfg.target_type == "web-app":
+        return _verify_web_candidate(ctx, round_no, cand, audit)
     src_dir = ctx.root / "poc" / ctx.cfg.name / ("round-%02d" % round_no) / "src"
     src_dir.mkdir(parents=True, exist_ok=True)
     spec_extra: List[str] = []
@@ -779,7 +1022,7 @@ def mechanism_audit(ctx: AutoCtx, cand: Dict[str, Any], refs: List[UpstreamRef],
     """
     repo = getattr(ctx.cfg, "upstream_repo", None) or ""
     return mechanism_audit_llm(
-        ctx.llm, SYSTEM_SECURITY, cand, refs, checker,
+        ctx.llm, _sec_prompt(ctx), cand, refs, checker,
         ctx.cfg.discovery_date, repo, offline=ctx.offline)
 
 
@@ -1086,7 +1329,7 @@ def _propose_next(ctx: AutoCtx, candidates: List[Dict[str, Any]],
         % (prev, observations)
     )
     try:
-        data = ctx.llm.ask_json(SYSTEM_SECURITY, user, max_tokens=3000)
+        data = ctx.llm.ask_json(_sec_prompt(ctx), user, max_tokens=3000)
         return (data.get("candidates") or [])[: ctx.max_candidates]
     except BudgetExceeded:
         return []

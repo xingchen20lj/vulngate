@@ -35,6 +35,20 @@ DANGER_PATTERNS: List[Tuple[str, str]] = [
     (r"getResourceAsStream|getResource\s*\(", "resource-load"),
 ]
 
+SOURCE_MAP_PRESETS: Dict[str, str] = {
+    "parsers": r"(parse\w*|read\w*|deserialize\w*|decode\w*|load\w*|convert\w*)\s*\(",
+    # Language-agnostic route surface: Java servlet/Spring, Clojure compojure
+    # (defendpoint/defroutes appear as `(api.macros/defendpoint :get "/x" ...)`
+    # so they are matched as bare words, not call forms), Python Flask,
+    # Go net/http, JS Express/Fastify.
+    "http": r"\b(doGet|doPost|service|handleRequest|onRequest|DispatcherServlet|Controller|RequestMapping|@app\.route|@router\.(get|post|put|delete|patch)|router\.(GET|POST|PUT|DELETE|PATCH|ANY)|app\.(get|post|put|delete|patch)\(|http\.HandleFunc|HandleFunc|add_route)\s*\(|(^|[^-\w])(defendpoint|defroutes|defroute|compojure)\b",
+    "expression": r"(evaluate|eval|invoke|getValue|template|render|lookup|format)\s*\(",
+    "io": r"(read\w*|write\w*|copy\w*|unzip|extract\w*|download\w*|openConnection|getInputStream|getOutputStream)\s*\(",
+    "exec": r"(Runtime|ProcessBuilder|exec\w*|CommandLine|startProcess)\s*\(",
+    "config": r"(load\w*|parse\w*|readConfig|getProperty|Properties|Yaml|Xml)\s*\(",
+    "all": r"(parse\w*|read\w*|deserialize\w*|decode\w*|load\w*|convert\w*|doGet|doPost|service|evaluate|eval|invoke|lookup|format|exec\w*|openConnection|getInputStream)\s*\(",
+}
+
 MAX_FILE_BYTES = 1024 * 1024
 
 # Language-agnostic source scan. Java-only globs made S1 miss Clojure/Go/Python

@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional
 class TargetConfig:
     name: str
     discovery_date: str
+    target_type: str = "library"  # library | web-app | middleware | logging | expression | message-rpc
+    target_urls: Dict[str, str] = field(default_factory=dict)  # version -> base URL (web-app S4)
     upstream_repo: Optional[str] = None
     api_hint: str = ""
     add_exports: List[str] = field(default_factory=list)

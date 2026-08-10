@@ -32,7 +32,11 @@ Two operating modes:
 - **Mode B — Autonomous CLI:** `scripts/run_pipeline.sh --name <target> --target-dir
   <path> --round <N> ...` drives the whole loop with the configured LLM API
   (`DEEPSEEK_API_KEY` or `OPENAI_API_KEY`). Use when the user explicitly wants a
-  hands-off run.
+  hands-off run. 目标类型感知（0.2.5）：autonomous 会按目标类型选择提示词与
+  S1 扫描（web-app 走 HTTP 路由清单 + Web 研究员提示词 + Shell/HTTP 矩阵）；
+  Web 目标需在 env.md 声明 `target_type: web-app` 与
+  `target_url: http://127.0.0.1:<port>`（或按版本 `target_url.<version>: ...`），
+  web 模式不强制要求 jar。
 
 ## 2. Locating the plugin root
 
@@ -316,6 +320,10 @@ choice.
   reads) and rerun S5.
 - **No jars found**: build the target first (`mvn package` / `gradle build`) or point
   `--target-dir` at a directory containing jars.
+- **Web 目标报 "no jars found" 或 "web-app 需要 target_url"**：在源码根目录写
+  `env.md`，声明 `target_type: web-app` 与 `target_url: http://127.0.0.1:<port>`
+  （运行中的目标实例；可按版本加 `target_url.<version>: ...`）。autonomous
+  web 模式不需要 jar，S4 用 Shell/HTTP 矩阵直连该 URL。
 - **PoC won't compile**: check JDK version, module exports (`--add-exports` /
   `--add-opens`), and classpath. Record the exact harness error in the cell.
 - **Spawn unavailable**: fall back to sequential; note it in the round summary.

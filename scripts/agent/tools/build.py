@@ -227,6 +227,7 @@ class ShellPOCSpec:
     script: str                      # relative path under poc/<target>/round-N/src/
     cells: List[MatrixCell]
     env: Dict[str, str] = field(default_factory=dict)
+    urls: Dict[str, str] = field(default_factory=dict)  # version -> base URL (web-app matrix)
     entry: str = ""
     input_shape: str = ""
     logic: str = ""
@@ -301,6 +302,7 @@ class ShellMatrixRunner:
             "VULNGATE_SAFE_MODE": "true" if cell.safe_mode else "false",
             "VULNGATE_PRECONDITION": cell.precondition,
             "VULNGATE_FEATURES": ",".join(cell.features),
+            "VULNGATE_TARGET_URL": spec.urls.get(cell.version, spec.env.get("VULNGATE_TARGET_URL", "")),
         }
         env_extra.update(spec.env)
         cmd = ["bash", str(script)] + list(cell.args)

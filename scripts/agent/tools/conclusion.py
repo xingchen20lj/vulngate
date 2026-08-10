@@ -136,6 +136,24 @@ def derive_conclusion(summary: Dict[str, Any],
             summary["validation_issues"] = issues
             return "排除"
         return "确认"
+    if summary.get("http_evidence"):
+        # Web-app evidence (ShellMatrixRunner): a cell with a concrete
+        # RESP_MATCH / EVIDENCE marker proves the HTTP side-effect (e.g.
+        # session takeover -> /api/user/current 200 with admin identity).
+        strong_http = [r for r in summary["http_evidence"]
+                       if r.get("resp_match") or r.get("evidence")]
+        if strong_http:
+            bad = []
+            for r in strong_http:
+                val = str(r.get("resp_match") or r.get("evidence") or "")
+                if not re.search(r"[\s:/\=\;\{\}\@\.\-\u4e00-\u9fff]", val):
+                    bad.append(val)
+            if bad:
+                summary["validation_issues"] = [
+                    "HTTP evidence value lacks content separators (hardcoded?): %s"
+                    % "; ".join(bad[:2])]
+                return "排除"
+            return "确认"
     if any(_is_runtime_evidence(e) for e in errs):
         # OOM must be input amplification: a huge input that OOMs by itself
         # (e.g. a 200MB JSON array) is trivial large-input DoS, not a library
