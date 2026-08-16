@@ -5,6 +5,18 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.8] - 2026-08-16
+
+### Added
+
+- **依赖漏洞体检（开发者自审计模式）**：`agent_cli.py deps --target <dir>
+  [--out report.md]` —— 自动发现 pom.xml / requirements*.txt / pyproject.toml /
+  package.json / go.mod / Gemfile / Cargo.toml / composer.json / build.gradle，
+  解析依赖清单，逐条查询 OSV 已知漏洞，输出每条漏洞的严重级与**修复版本建议**
+  （优先取语义化版本而非 commit hash）；查询失败如实记录 `query_notes` 不中断。
+- **QUICKSTART §1 开发者自审计**：先跑依赖体检、再走 S1→S8 的自查流程说明；
+  SKILL.md 中文速览新增自审计模式入口。
+
 ## [0.2.7] - 2026-08-16
 
 ### Added

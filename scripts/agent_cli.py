@@ -14,6 +14,7 @@ Usage:
   agent_cli.py novelty --evidence <json>
   agent_cli.py cvss --vector <CVSS:3.1/...> [--tier <tier>] [--implicit-default-on]
   agent_cli.py ledger --workspace <dir> --target <name> --round <N> --entries <json>
+  agent_cli.py deps --target <dir> [--out <report.md>] [--offline] [--cache <dir>]
 """
 
 from __future__ import annotations
@@ -297,6 +298,38 @@ def cmd_ledger(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_deps(args: argparse.Namespace) -> int:
+    from agent.tools.deps import (collect_dependencies, render_markdown,
+                                  scan_dependencies)
+    root = Path(args.target)
+    if not root.is_dir():
+        _out({"error": "target dir not found: %s" % root})
+        return 2
+    cache = Path(args.cache) if args.cache else None
+    deps = collect_dependencies(root)
+    findings, notes = scan_dependencies(deps, cache_dir=cache,
+                                        offline=args.offline)
+    md = render_markdown(findings, notes, str(root))
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(md, encoding="utf-8")
+    _out({
+        "target": str(root),
+        "manifests_scanned": len({d.manifest for d in deps}),
+        "deps_scanned": len(deps),
+        "vulns_found": len(findings),
+        "query_notes": notes,
+        "report": args.out or None,
+        "top": [{"dep": f.dependency.name,
+                 "version": f.dependency.version,
+                 "vuln": f.vuln_id,
+                 "severity": f.severity,
+                 "fixed_version": f.fixed_version} for f in findings[:30]],
+    })
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Zero-Day Agent plugin CLI (deterministic helpers)")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -352,6 +385,13 @@ def build_parser() -> argparse.ArgumentParser:
     lg.add_argument("--round", type=int, required=True)
     lg.add_argument("--entries", required=True)
     lg.set_defaults(fn=cmd_ledger)
+
+    dp = sub.add_parser("deps", help="dependency CVE scan (OSV) + fix suggestions")
+    dp.add_argument("--target", required=True)
+    dp.add_argument("--out", default=None)
+    dp.add_argument("--offline", action="store_true")
+    dp.add_argument("--cache", default=None)
+    dp.set_defaults(fn=cmd_deps)
     return p
 
 

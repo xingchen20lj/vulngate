@@ -13,7 +13,21 @@ Codex 宿主默认 `multi_agent_mode=explicitRequestOnly`：只有"用户或技�
 
 加上这句后，模型不会再因系统层保守策略而跳过并行。
 
-## 1. 安装
+## 1. 开发者自审计（先查依赖，再查代码）
+
+写产品代码想自查安全，两步：
+
+```bash
+# 1) 依赖体检：已知漏洞 + 修复版本（支持 pom.xml / requirements*.txt /
+#    pyproject.toml / package.json / go.mod / Gemfile / Cargo.toml 等）
+python3 scripts/agent_cli.py deps --target ./my-project --out deps-report.md
+
+# 2) 让插件对自研代码跑 S1→S8（可让主 Agent 跳过 S5 Novelty）
+```
+
+`deps` 数据源为 OSV（api.osv.dev），查询失败会如实标注 `query_notes` 而不中断。
+
+## 2. 安装
 
 ```bash
 git clone https://github.com/xingchen20lj/vulngate.git
@@ -28,7 +42,7 @@ JDK 8+、`rg`。
 
 > **必须新建线程。** 插件技能在线程启动时加载——安装后请打开新的 Codex 线程。
 
-## 2. 准备目标
+## 3. 准备目标
 
 任何包含源码和/或 jar 的目录都可以。以 Java 目标为例：
 
@@ -40,7 +54,7 @@ mvn package        # 若库发布二进制，生成 target/*.jar
 建议在源码旁写一份 `env.md` 记录环境信息（版本、JDK、安全开关、默认
 Feature）——它决定了每一条发现的前置分级。
 
-## 3. 运行管线（宿主原生模式）
+## 4. 运行管线（宿主原生模式）
 
 新建一个 **新** Codex 线程，然后说：
 
@@ -59,7 +73,7 @@ Feature）——它决定了每一条发现的前置分级。
 
 结果落在 `state/<target>/`、`reports/<target>/`、`ledger/<target>/` 下。
 
-## 4. 运行管线（自主模式）
+## 5. 运行管线（自主模式）
 
 需要无人值守运行，并愿意使用自己的 LLM API Key 时：
 
@@ -73,7 +87,7 @@ export DEEPSEEK_API_KEY=...        # 或 OPENAI_API_KEY
   --lang zh
 ```
 
-## 5. 确定性助手
+## 6. 确定性助手
 
 宿主智能体会代为调用这些命令，您也可以直接使用：
 
@@ -85,7 +99,7 @@ PYTHONPATH="$PWD/scripts" python3 scripts/agent_cli.py \
   cvss --vector "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H" --tier 0
 ```
 
-## 6. 常见问题
+## 7. 常见问题
 
 - **S5 遇到 GitHub 限流**：`export GITHUB_TOKEN="$(gh auth token)"` 后重跑。
 - **找不到 jar**：先构建目标，或把 `--target-dir` 指向包含 jar 的目录。

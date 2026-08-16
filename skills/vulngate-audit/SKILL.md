@@ -11,6 +11,10 @@ description: "Drive the VulnGate S1→S8 source-audit pipeline natively in Codex
 - 流程：S1 攻击面 → S2 候选 → S3 源码审计 → S4 PoC 矩阵 → S5 Novelty → S6 CVSS → S7 发现文档 → S8 账本。
 - 适用范围：**任意类型源码**（库 / Web 框架 / 中间件 / 日志库 / 表达式引擎 /
   RPC 消息栈 / 应用）。目标类型对应的攻击面清单见 `docs/AUDIT-PLAYBOOK.md`。
+- **开发者自审计模式（0.2.8+）**：对"自己产品的代码"先跑依赖体检再走代码审计。
+  依赖体检 = `agent_cli.py deps --target <目录> [--out <report.md>]`（OSV 查询，
+  输出每条已知漏洞 + 修复版本建议）；随后按需走 S1→S8 查自研代码问题
+  （可跳过 S5 Novelty——私有代码无上游 issue 可比对）。
 - 硬闸门 G0–G5：没有运行时 PoC 输出，不许说“确认”；上游公开命中，一律降级“同族+增量”，严禁声称 0day。
 - S4/S5 用宿主原生 spawn 并行（每个候选一个子 Agent 跑矩阵/查上游），子 Agent 只回传原始证据，结论由你定。
 - 安全边界：JNDI/HTTP 副作用仅回环 127.0.0.1；修复公开前不发布任何内容；网络外发需用户批准。
