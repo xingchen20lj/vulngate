@@ -5,6 +5,17 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.7] - 2026-08-16
+
+### Added
+
+- **子 Agent 并行纪律（强制）**：SKILL.md 新增 §0 —— 明确"技能即为
+  explicitRequestOnly 的明确要求"：S4/S5 必须 spawn（每候选一个、≤3 并行）、
+  spawn 前自检、仅工具明确报错才降级并记录原因、禁止虚构"通道不可用"。
+- **QUICKSTART 显式授权提示词**：文档新增 §0，给用户可直接粘贴的提示词模板
+  （"S4/S5 必须使用 spawn 子 Agent 并行…"），解决宿主默认保守策略导致的
+  子 Agent 不生效问题（08-10 实战暴露）。
+
 ## [0.2.6] - 2026-08-16
 
 ### Added

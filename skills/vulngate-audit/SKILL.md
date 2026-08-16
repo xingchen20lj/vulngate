@@ -15,6 +15,23 @@ description: "Drive the VulnGate S1→S8 source-audit pipeline natively in Codex
 - S4/S5 用宿主原生 spawn 并行（每个候选一个子 Agent 跑矩阵/查上游），子 Agent 只回传原始证据，结论由你定。
 - 安全边界：JNDI/HTTP 副作用仅回环 127.0.0.1；修复公开前不发布任何内容；网络外发需用户批准。
 
+## 0. 子 Agent 并行纪律（强制，非可选项）
+
+Codex 宿主可能注入 `multi_agent_mode=explicitRequestOnly`（"除非用户或技能明确要求，
+否则不 spawn 子 Agent"）。**本技能即为明确要求**，因此：
+
+1. **S4 每个候选 spawn 一个子 Agent** 跑 PoC 矩阵；**S5 spawn 一个子 Agent** 收集
+   上游 tracker + 公开披露证据。并行上限 3 个（并发槽 = 主 Agent + 3），禁止一次
+   spawn 超过 3 个。
+2. **S4 开始前先自检**：通过 `list_agents` 确认 spawn 工具可用。可用则**必须使用**，
+   不得仅因"保守/省事"而全程顺序执行。
+3. 只有 spawn 工具**明确报错**（`agent thread limit reached` / 工具不存在 / 投递失败）
+   才允许降级宿主顺序执行，且必须在轮次汇总记录"降级原因 + 尝试次数"。
+4. 子 Agent 只回传原始证据，不给结论；按 §4 S4 心跳规则判断停滞，不得仅凭消息静默
+   判定"子 Agent 停滞/通道不可用"。
+5. 若因用户提示词显式要求而选择不 spawn，在轮次汇总说明原因；**禁止虚构
+   "spawn 通道不可用"** 作为不执行的借口。
+
 ## 1. Role model
 
 You (the host Codex agent) are the **main agent** of the research loop. The bundled
