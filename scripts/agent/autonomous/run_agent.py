@@ -256,11 +256,19 @@ def prepare_target(root: Path, name: str, target_dir: Path) -> TargetConfig:
                 ver, _, url = line[11:].partition(":")
                 if url.strip():
                     target_urls[ver.strip()] = url.strip()
+    scope_constraints = ""
+    for scope_name in ("scope.md", "SECURITY-SCOPE.md", "SECURITY.md"):
+        scope_file = target_dir / scope_name
+        if scope_file.exists():
+            scope_constraints = scope_file.read_text(
+                encoding="utf-8", errors="replace").strip()
+            break
     cfg = {
         "name": name,
         "discovery_date": date.today().isoformat(),
         "target_type": "web-app" if is_web else "library",
         "target_urls": target_urls,
+        "scope_constraints": scope_constraints,
         "upstream_repo": "",
         "jars": [{"version": "local", "path": jars[0]}] if jars else [],
         "deps": [],
@@ -325,6 +333,16 @@ def _fmt_entries(entries: List[Dict[str, Any]]) -> str:
         for e in entries[:20])
 
 
+def _scope_block(ctx: "AutoCtx", limit: int = 4000) -> str:
+    """Inject the target project's authoritative security-boundary rules
+    (e.g. SECURITY.md) so candidate generation/audit respects its scope."""
+    text = (ctx.cfg.scope_constraints or "").strip()
+    if not text:
+        return ""
+    return ("\n\n[目标项目安全边界 —— 官方 SECURITY 文档/范围规则，"
+            "必须作为候选筛选与审计的硬约束]\n%s" % text[:limit])
+
+
 def learn_api_hint(ctx: AutoCtx) -> str:
     """S1.5: LLM reads the target's entry classes and writes an API hint
     (package names, entry signatures, default security switches) so later
@@ -341,7 +359,9 @@ def learn_api_hint(ctx: AutoCtx) -> str:
             "请基于上述源码输出 api_hint：一句话说明 Web 框架与路由形态（如 Compojure/Ring）、"
             "鉴权中间件、默认安全开关（如 +auth 挂载范围、CSRF、限流），"
             "并列出值得优先审计的未认证端点前缀。只输出 JSON：{\"api_hint\": \"...\"}"
-            % (ctx.cfg.name, srcs, _fmt_entries(ctx.cfg.entry_points), src_block or "（无源码片段）")
+            "%s"
+            % (ctx.cfg.name, srcs, _fmt_entries(ctx.cfg.entry_points),
+               src_block or "（无源码片段）", _scope_block(ctx, 2500))
         )
     else:
         user = (
@@ -407,6 +427,7 @@ def propose_candidates(ctx: AutoCtx, round_no: int,
         "API 提示（必须作为默认配置可达性的唯一依据，禁止凭模型记忆推断）：\n%s\n\n"
         "入口清单：\n%s\n\n"
         "真实源码证据（危险模式命中 + 入口类片段，供提出候选时引用文件/行号）：\n%s\n\n"
+        "%s"
         "上一轮已提出/验证的候选（新候选必须与它们不同——不同攻击面、不同触发点、"
         "不同输入形态；严禁重复）：\n%s\n\n"
         "请提出最多 %d 个最值得验证的攻击候选（%s）。\n"
@@ -424,7 +445,8 @@ def propose_candidates(ctx: AutoCtx, round_no: int,
         "只输出 JSON：{\"candidates\":[...]}"
         % (ctx.cfg.name, versions, ctx.cfg.api_hint or "（无）",
            _fmt_entries(ctx.cfg.entry_points), src_block or "（无源码片段）",
-           carry_text or "（无，首轮）", ctx.max_candidates, guidance, input_shape_hint)
+           _scope_block(ctx), carry_text or "（无，首轮）",
+           ctx.max_candidates, guidance, input_shape_hint)
     )
     try:
         data = ctx.llm.ask_json(_sec_prompt(ctx), user, max_tokens=4000)
@@ -465,12 +487,14 @@ def audit_candidate(ctx: AutoCtx, cand: Dict[str, Any]) -> Dict[str, Any]:
         "候选：%s\n入口：%s\n逻辑：%s\n\n"
         "源码目录：%s\n\n"
         "候选相关源码片段（真实源码证据，文件+行号；以这些为准，不得臆测）：\n%s\n\n"
+        "%s"
         "请静态审计并输出："
         '{"gate_status":是否被安全门控阻断, "gate_kind":如 feature-gate/cache-lookup/missing-bound-check, '
         '"gate_location":代码位置, "default_config_reachable":true|false, '
         '"code_location":[行内引用], "audit_notes":审计笔记}'
         % (cand["candidate_id"], cand.get("entry"), cand.get("logic"), srcs,
-           src_block or "（未定位到源码片段，请在审计笔记中注明）")
+           src_block or "（未定位到源码片段，请在审计笔记中注明）",
+           _scope_block(ctx, 2500))
     )
     try:
         return ctx.llm.ask_json(_sec_prompt(ctx), user, max_tokens=2000)

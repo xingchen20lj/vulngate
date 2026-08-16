@@ -40,8 +40,10 @@ SOURCE_MAP_PRESETS: Dict[str, str] = {
     # Language-agnostic route surface: Java servlet/Spring, Clojure compojure
     # (defendpoint/defroutes appear as `(api.macros/defendpoint :get "/x" ...)`
     # so they are matched as bare words, not call forms), Python Flask,
-    # Go net/http, JS Express/Fastify.
-    "http": r"\b(doGet|doPost|service|handleRequest|onRequest|DispatcherServlet|Controller|RequestMapping|@app\.route|@router\.(get|post|put|delete|patch)|router\.(GET|POST|PUT|DELETE|PATCH|ANY)|app\.(get|post|put|delete|patch)\(|http\.HandleFunc|HandleFunc|add_route)\s*\(|(^|[^-\w])(defendpoint|defroutes|defroute|compojure)\b",
+    # Go net/http, JS Express/Fastify. Flask/Flask-AppBuilder:
+    # @bp.route("/x"), @expose("/x"), @app.get(...), app.add_url_rule(...).
+    # `@`-prefixed decorators must not be anchored by \b (non-word char).
+    "http": r"(?:@[\w.]+\.route|@expose|@[\w.]+\.(?:get|post|put|delete|patch))\s*\(|\b(?:doGet|doPost|service|handleRequest|onRequest|DispatcherServlet|Controller|RequestMapping|router\.(?:GET|POST|PUT|DELETE|PATCH|ANY)|app\.(?:get|post|put|delete|patch)|http\.HandleFunc|HandleFunc|add_route|add_url_rule)\s*\(|(?:^|[^-\w])(?:defendpoint|defroutes|defroute|compojure)\b",
     "expression": r"(evaluate|eval|invoke|getValue|template|render|lookup|format)\s*\(",
     "io": r"(read\w*|write\w*|copy\w*|unzip|extract\w*|download\w*|openConnection|getInputStream|getOutputStream)\s*\(",
     "exec": r"(Runtime|ProcessBuilder|exec\w*|CommandLine|startProcess)\s*\(",

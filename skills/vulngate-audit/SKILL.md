@@ -37,6 +37,11 @@ Two operating modes:
   Web 目标需在 env.md 声明 `target_type: web-app` 与
   `target_url: http://127.0.0.1:<port>`（或按版本 `target_url.<version>: ...`），
   web 模式不强制要求 jar。
+- **范围约束（0.2.6+）**：目标目录可放 `scope.md`（或 `SECURITY-SCOPE.md`/
+  `SECURITY.md`），内容为该项目官方的漏洞范围边界（如 Apache 的 SECURITY.md
+  蒸馏版）。autonomous 的 S2/S3 会把它注入候选生成/审计提示词作为硬约束；
+  原生 Mode A 也应先读它，把"范围外"（如 Admin 受信能力、operator 部署决策）
+  直接排除，不验证、不记录。
 
 ## 2. Locating the plugin root
 

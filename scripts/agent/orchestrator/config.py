@@ -14,6 +14,7 @@ class TargetConfig:
     discovery_date: str
     target_type: str = "library"  # library | web-app | middleware | logging | expression | message-rpc
     target_urls: Dict[str, str] = field(default_factory=dict)  # version -> base URL (web-app S4)
+    scope_constraints: str = ""  # project SECURITY.md scope rules, injected into S2/S3 prompts
     upstream_repo: Optional[str] = None
     api_hint: str = ""
     add_exports: List[str] = field(default_factory=list)

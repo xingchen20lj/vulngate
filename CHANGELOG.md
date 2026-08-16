@@ -5,6 +5,20 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.6] - 2026-08-16
+
+### Added
+
+- **目标安全边界注入（scope.md）**：autonomous 的 `prepare_target` 自动读取
+  目标目录下的 `scope.md` / `SECURITY-SCOPE.md` / `SECURITY.md`，写入
+  `TargetConfig.scope_constraints`；S1.5/S2/S3 提示词注入该约束块，把
+  "范围外"（Admin 受信能力、operator 部署决策、纯 DoS、低影响泄露等）作为
+  候选生成的硬过滤器，防止 LLM 把设计能力当漏洞提出来。
+- **Flask/Flask-AppBuilder 路由识别**：`SOURCE_MAP_PRESETS["http"]` 新增
+  `@<name>.route`、`@expose(...)`、`@<name>.(get|post|put|delete|patch)`、
+  `add_url_rule` 形态（Superset 实战暴露：旧正则只匹配 Clojure/Spring，
+  Python 路由入口清单为空）。
+
 ## [0.2.5] - 2026-08-10
 
 ### Added

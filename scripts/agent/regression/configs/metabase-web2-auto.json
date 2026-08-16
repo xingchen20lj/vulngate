@@ -1,0 +1,864 @@
+{
+  "name": "metabase-web2",
+  "discovery_date": "2026-08-10",
+  "target_type": "web-app",
+  "target_urls": {
+    "local": "http://127.0.0.1:3380",
+    "0.63.2": "http://127.0.0.1:3380"
+  },
+  "upstream_repo": "",
+  "jars": [
+    {
+      "version": "local",
+      "path": "/Volumes/DATA1T/vulngate/scripts/targets/metabase-web2/lib/metabase.jar"
+    }
+  ],
+  "deps": [],
+  "source_dirs": [
+    "src"
+  ],
+  "entry_points": [
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/session/api.clj:184",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/session/api.clj:217",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :delete \"/\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/session/api.clj:300",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/forgot_password\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/session/api.clj:338",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/reset_password\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/session/api.clj:376",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/password_reset_token_valid\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/session/api.clj:391",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/properties\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/session/api.clj:404",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/google_auth\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/session/api.clj:443",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/password-check\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/session/api.clj:456",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/mfa/verify\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/session/api.clj:498",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/mfa/send-email-otp\" :- [:map [:success [:= true]]]"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/api_routes/routes.clj:3",
+      "untrusted": true,
+      "text": "   [compojure.route :as route]"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/util/malli/schema.clj:276",
+      "untrusted": true,
+      "text": "  Used by [[metabase.api.common/defendpoint]] to coerce the value for this schema to a boolean."
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/analytics/api/proxy.clj:24",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/testing_api/api.clj:62",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/snapshot/:name\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/testing_api/api.clj:138",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/restore/:name\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/testing_api/api.clj:153",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/echo\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/testing_api/api.clj:169",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/set-time\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/testing_api/api.clj:190",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/echo\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/testing_api/api.clj:206",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/mark-stale\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/testing_api/api.clj:230",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/stats\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/testing_api/api.clj:253",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/reset-throttlers\" :- [:map [:success [:= true]]]"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/testing_api/api.clj:267",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/refresh-caches\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/testing_api/api.clj:272",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/query\" :- ::lib.schema/query"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/testing_api/api.clj:299",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/security-advisories\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/testing_api/api.clj:308",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/native-query\" :- ::lib.schema/query"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/testing_api/api.clj:531",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/metabot/seed-ai-usage\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/testing_api/api.clj:551",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :delete \"/metabot/seed-ai-usage\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/testing_api/api.clj:563",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/metabot/seed-usage-auditing\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:89",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:143",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:542",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/:from-dashboard-id/copy\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:611",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/public\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:623",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/embeddable\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:637",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/:id\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:649",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/:id/pdf\" :- :any"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:696",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/:id/items\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:753",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :delete \"/:id\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:1150",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :put \"/:id\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:1163",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :put \"/:id/cards\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:1197",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/:id/query_metadata\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:1217",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/:dashboard-id/public_link\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:1244",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :delete \"/:dashboard-id/public_link\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:1263",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/:id/related\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:1275",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/save/collection/:parent-collection-id\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:1290",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/save\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:1310",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/:id/params/:param-key/values\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:1329",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/:id/params/:param-key/search/:query\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:1353",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/:id/params/:param-key/remapping\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:1370",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/params/valid-filter-fields\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:1408",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/:dashboard-id/dashcard/:dashcard-id/execute\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:1424",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/:dashboard-id/dashcard/:dashcard-id/execute\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:1445",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/:dashboard-id/dashcard/:dashcard-id/card/:card-id/query\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:1467",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/:dashboard-id/dashcard/:dashcard-id/card/:card-id/query/:export-format\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/dashboards_rest/api.clj:1513",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/pivot/:dashboard-id/dashcard/:dashcard-id/card/:card-id/query\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/analytics/api.clj:15",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/anonymous-stats\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/analytics/api.clj:29",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/internal\" :- :nil"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/comments/api.clj:98",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/comments/api.clj:164",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/comments/api.clj:200",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :put \"/:comment-id\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/comments/api.clj:234",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :delete \"/:comment-id\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/comments/api.clj:258",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/:comment-id/reaction\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/comments/api.clj:275",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/mentions\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/mcp/tools.clj:2",
+      "untrusted": true,
+      "text": "  \"MCP tool dispatch. Generates tool definitions from defendpoint metadata and delegates"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/mcp/tools.clj:10",
+      "untrusted": true,
+      "text": "   [metabase.api.macros.defendpoint.tools-manifest :as tools-manifest]"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/mcp/tools.clj:31",
+      "untrusted": true,
+      "text": ";; on the defendpoint. Owning the override here keeps `agent-api` ignorant of MCP: the endpoint"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/mcp/tools.clj:239",
+      "untrusted": true,
+      "text": "  \"Flatten a defendpoint schema-error map — humanized by `malli.error`, whose leaves"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/mcp/tools.clj:492",
+      "untrusted": true,
+      "text": "   `defendpoint` middleware. UI tool response-fns receive `{:session-id session-id}`"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/geojson/api.clj:133",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/:key\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/geojson/api.clj:156",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/api_keys/api.clj:39",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/api_keys/api.clj:54",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/count\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/api_keys/api.clj:64",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :put \"/:id\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/api_keys/api.clj:79",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :put \"/:id/regenerate\" :- [:map"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/api_keys/api.clj:99",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/api_keys/api.clj:110",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :delete \"/:id\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/permissions_rest/api.clj:28",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/graph\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/permissions_rest/api.clj:38",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/graph/db/:db-id\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/permissions_rest/api.clj:49",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/graph/group/:group-id\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/permissions_rest/api.clj:72",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :put \"/graph\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/permissions_rest/api.clj:163",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/group\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/permissions_rest/api.clj:211",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/group/:id\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/permissions_rest/api.clj:225",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/group\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/permissions_rest/api.clj:245",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :put \"/group/:group-id\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/permissions_rest/api.clj:268",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :delete \"/group/:group-id\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/permissions_rest/api.clj:285",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/membership\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/permissions_rest/api.clj:311",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/membership\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/permissions_rest/api.clj:337",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :put \"/membership/:id\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/permissions_rest/api.clj:362",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :put \"/membership/:group-id/clear\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/permissions_rest/api.clj:376",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :delete \"/membership/:id\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/mcp/core.clj:38",
+      "untrusted": true,
+      "text": "   defendpoint metadata, plus scopes from MCP UI resources (e.g. visualize_query).\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/mcp/callback_api.clj:24",
+      "untrusted": true,
+      "text": "   exception on failure so defendpoint surfaces the right status code.\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/mcp/callback_api.clj:59",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/drills\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/mcp/callback_api.clj:71",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/feedback\" :- [:map"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/mcp/api.clj:7",
+      "untrusted": true,
+      "text": "   [compojure.response :as compojure.response]"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/mcp/api.clj:302",
+      "untrusted": true,
+      "text": "        (compojure.response/send* resp request respond raise)))))"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/agent_api/api.clj:133",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/v1/ping\" :- [:map [:message :string]]"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/agent_api/api.clj:158",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/v1/search\" :- ::search-response"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/agent_api/api.clj:242",
+      "untrusted": true,
+      "text": "  table, ambiguous FK, etc.); we let those propagate so [[api.macros/defendpoint]] surfaces"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/agent_api/api.clj:254",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/v2/construct-query\" :- ::construct-query-response"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/agent_api/api.clj:320",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/v1/construct-native-query\" :- ::construct-query-response"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/agent_api/api.clj:574",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/v2/query\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/agent_api/api.clj:650",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/v1/execute\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/agent_api/api.clj:688",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/v1/execute-sql\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/agent_api/api.clj:743",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/v1/read-resource\" :- ::read-resource-response"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/agent_api/api.clj:946",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/v1/question\" :- ::create-question-response"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/agent_api/api.clj:1011",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/v1/metric\" :- ::create-metric-response"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/agent_api/api.clj:1067",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :put \"/v1/metric/:id\" :- ::update-metric-response"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/agent_api/api.clj:1121",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :put \"/v1/question/:id\" :- ::update-question-response"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/agent_api/api.clj:1152",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/v1/question/:id/query\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/agent_api/api.clj:1199",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/v1/dashboard\" :- ::create-dashboard-response"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/agent_api/api.clj:1397",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :put \"/v1/dashboard/:id\" :- ::update-dashboard-response"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/agent_api/api.clj:1483",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/v1/collection\" :- ::create-collection-response"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/mcp/resources.clj:16",
+      "untrusted": true,
+      "text": "   [metabase.api.macros.defendpoint.tools-manifest :as tools-manifest]"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/server/routes/static.clj:10",
+      "untrusted": true,
+      "text": "   [compojure.core :as compojure]"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/server/routes/static.clj:97",
+      "untrusted": true,
+      "text": "   Drop-in replacement for `compojure.route/resources`.\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/server/routes/static.clj:99",
+      "untrusted": true,
+      "text": "  (compojure/GET (add-wildcard path) request"
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/model_persistence/api.clj:70",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/model_persistence/api.clj:97",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/:persisted-info-id\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/model_persistence/api.clj:109",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :get \"/card/:card-id\""
+    },
+    {
+      "api": "http-route",
+      "input_shape": "http-request",
+      "file_line": "src/metabase/model_persistence/api.clj:129",
+      "untrusted": true,
+      "text": "(api.macros/defendpoint :post \"/set-refresh-schedule\""
+    }
+  ],
+  "candidates": [],
+  "notes": "auto-generated by autonomous driver"
+}
