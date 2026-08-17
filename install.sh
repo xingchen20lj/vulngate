@@ -97,7 +97,7 @@ PYEOF
 }
 
 echo "[4/4] Validating"
-VALIDATOR="/Users/cyber/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py"
+VALIDATOR="$HOME/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py"
 if [ -f "$VALIDATOR" ] && python3 -c 'import yaml' >/dev/null 2>&1; then
   if python3 "$VALIDATOR" "$DEST"; then
     :

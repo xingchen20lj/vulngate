@@ -10,7 +10,7 @@
   "jars": [
     {
       "version": "local",
-      "path": "/Volumes/DATA1T/vulngate/scripts/targets/metabase-web2/lib/metabase.jar"
+      "path": "scripts/targets/metabase-web2/lib/metabase.jar"
     }
   ],
   "deps": [],

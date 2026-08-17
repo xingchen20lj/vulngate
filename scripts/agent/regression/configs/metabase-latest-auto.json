@@ -5,7 +5,7 @@
   "jars": [
     {
       "version": "local",
-      "path": "/Volumes/DATA1T/vulngate/scripts/targets/metabase-latest/lib/metabase.jar"
+      "path": "scripts/targets/metabase-latest/lib/metabase.jar"
     }
   ],
   "deps": [],
