@@ -1,1 +1,1 @@
-"""0day-agent: fully-automated 0day hunting agent skeleton."""
+"""VulnGate: fully-automated source-audit agent (S1→S8)."""

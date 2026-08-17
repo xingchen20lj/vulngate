@@ -37,7 +37,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..orchestrator.config import TargetConfig
 from .novelty import Disclosure
 
-UA = {"User-Agent": "0day-agent-public-scan/1.0"}
+UA = {"User-Agent": "vulngate-public-scan/1.0"}
 
 
 class ScanError(Exception):

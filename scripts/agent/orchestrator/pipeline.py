@@ -135,7 +135,7 @@ def _evidence_lines(summary: Dict[str, Any]) -> list:
 
 
 def main(argv: Optional[list] = None) -> int:
-    ap = argparse.ArgumentParser(description="0day-agent pipeline")
+    ap = argparse.ArgumentParser(description="VulnGate pipeline")
     ap.add_argument("--target", required=True)
     ap.add_argument("--round", type=int, required=True)
     ap.add_argument("--config", required=True, help="path to target JSON config (regression config)")

@@ -80,7 +80,7 @@ class NoveltyResult:
 
 class NoveltyChecker:
     API = "https://api.github.com"
-    UA = {"User-Agent": "0day-agent-novelty-gate/1.0"}
+    UA = {"User-Agent": "vulngate-novelty-gate/1.0"}
 
     def __init__(self, fixtures_dir: Optional[Path] = None, offline: bool = False,
                  token: Optional[str] = None, cache_dir: Optional[Path] = None):

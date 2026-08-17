@@ -5,6 +5,15 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.10] - 2026-08-18
+
+### Fixed
+
+- **品牌命名统一（清理旧名残留）**：运行期标识里的 `0day-agent` 旧名全部改为
+  `vulngate`——`public_scan.py` / `novelty.py` 的 HTTP User-Agent、
+  `scripts/agent/__init__.py` docstring、`orchestrator/pipeline.py` argparse 描述。
+  功能无变化，仅对外标识一致（Novelty/公开检索请求不再顶着旧项目名）。
+
 ## [0.2.9] - 2026-08-18
 
 ### Added
