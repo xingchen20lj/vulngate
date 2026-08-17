@@ -5,6 +5,18 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.9] - 2026-08-18
+
+### Added
+
+- **S4 spawn 预检探针（把"每轮随机暴露"变成"开跑即暴露"）**：S4 开工前先 spawn 一个
+  极简探针子 Agent（任务模板 `skills/vulngate-audit/spawn-probe-task.md`），要求它在
+  ≤90 秒内写入 `S4/spawn-probe.heartbeat` 并回 `PROBE-DONE`。探针通过 → 才逐候选
+  spawn；探针失败（空任务 / 仅问候语 / 无心跳）→ 判定 degraded mode，整轮宿主顺序
+  执行，`agent_cli.py spawn-probe --status degraded` 落盘 `S4/spawn-probe.json`，
+  轮次汇总只记一条降级记录，不再逐候选重试。解决多轮实战中 spawn 通道问题"中途才
+  暴露、每轮赌一把"的反复现象（2026-08-16/18 Superset、fastjson2 轮次沉淀）。
+
 ## [0.2.8] - 2026-08-16
 
 ### Added

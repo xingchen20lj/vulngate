@@ -17,6 +17,8 @@ description: "Drive the VulnGate S1→S8 source-audit pipeline natively in Codex
   （可跳过 S5 Novelty——私有代码无上游 issue 可比对）。
 - 硬闸门 G0–G5：没有运行时 PoC 输出，不许说“确认”；上游公开命中，一律降级“同族+增量”，严禁声称 0day。
 - S4/S5 用宿主原生 spawn 并行（每个候选一个子 Agent 跑矩阵/查上游），子 Agent 只回传原始证据，结论由你定。
+  **S4 开工前必须先跑 spawn 探针**（0.2.9+）：探针通过才逐候选 spawn；探针失败整轮
+  宿主顺序执行并记录 "degraded mode"，把"每轮随机暴露"变成"开跑即暴露"。
 - 安全边界：JNDI/HTTP 副作用仅回环 127.0.0.1；修复公开前不发布任何内容；网络外发需用户批准。
 
 ## 0. 子 Agent 并行纪律（强制，非可选项）
@@ -27,10 +29,13 @@ Codex 宿主可能注入 `multi_agent_mode=explicitRequestOnly`（"除非用户�
 1. **S4 每个候选 spawn 一个子 Agent** 跑 PoC 矩阵；**S5 spawn 一个子 Agent** 收集
    上游 tracker + 公开披露证据。并行上限 3 个（并发槽 = 主 Agent + 3），禁止一次
    spawn 超过 3 个。
-2. **S4 开始前先自检**：通过 `list_agents` 确认 spawn 工具可用。可用则**必须使用**，
-   不得仅因"保守/省事"而全程顺序执行。
-3. 只有 spawn 工具**明确报错**（`agent thread limit reached` / 工具不存在 / 投递失败）
-   才允许降级宿主顺序执行，且必须在轮次汇总记录"降级原因 + 尝试次数"。
+2. **S4 预检探针（0.2.9+，强制）**：S4 开工前必须执行一次 spawn 探针（协议见 §4）。
+   探针通过（≤90s 内探针心跳文件出现）→ 按第 1 条逐候选 spawn；探针失败（心跳未出现，
+   含子 Agent 仅回问候语 / 空任务 / 无心跳）→ 判定 **degraded mode**：整轮宿主顺序执行，
+   `agent_cli.py spawn-probe --status degraded --reply "<观察到的回复>"` 落盘，轮次汇总
+   记录一次"degraded mode（探针失败 + 症状 + 证据路径）"，**不再逐候选重试**。
+3. 只有探针通过后，spawn 工具**明确报错**（`agent thread limit reached` / 工具不存在 /
+   投递失败）才允许中途降级宿主顺序执行，且必须在轮次汇总记录"降级原因 + 尝试次数"。
 4. 子 Agent 只回传原始证据，不给结论；按 §4 S4 心跳规则判断停滞，不得仅凭消息静默
    判定"子 Agent 停滞/通道不可用"。
 5. 若因用户提示词显式要求而选择不 spawn，在轮次汇总说明原因；**禁止虚构
@@ -174,6 +179,18 @@ Run stages in order. Persist every artifact under the target workspace:
   harness error and will be discarded." Sub-agents return evidence, never
   verdicts. If a sub-agent overstepped, treat its extra writes as harness errors
   and re-do them yourself as main agent.
+- **S4 预检探针（0.2.9+，强制，先于一切逐候选 spawn）**：把
+  `skills/vulngate-audit/spawn-probe-task.md` 的任务文本（把 `<HEARTBEAT_FILE>`
+  替换为 `state/<target>/round-NN/S4/spawn-probe.heartbeat` 的绝对路径）原样发给
+  一个探针子 Agent。探针只允许写心跳文件并回 `PROBE-DONE`，禁止任何其他动作。
+  宿主 spawn 后等待 ≤90 秒：
+  - 心跳文件出现 → `agent_cli.py spawn-probe --workspace <ws> --target <name>
+    --round <N> --status ok --reply "<回复>"` 落盘 `S4/spawn-probe.json`，
+    继续逐候选 spawn。
+  - 心跳未出现（含仅回问候语 / 空任务 / 超时无回复）→ `--status degraded`
+    落盘，**整轮降级宿主顺序执行**，轮次汇总记一条 degraded mode（探针结果路径 +
+    症状），不再逐候选重试，也不在 S5 再试 spawn。
+  - 探针记录不写任何 S5–S8 产物；探针子 Agent 若越权写入，按 harness error 处理。
 - **Sub-agent liveness (Metabase lesson, 2026-08-10):** long target operations
   (server boot, large-jar decompile/diff, integration tests) are silent for
   minutes. Never declare a sub-agent "stalled" based only on message silence.
@@ -290,11 +307,10 @@ your native collaboration tools for real parallelism:
 - S5: spawn 1 sub-agent for upstream tracker + web disclosure sweep → returns
   structured hits (repo/PR/issue/CVE/blog + URL). You apply G3.
 - Keep sub-agent tasks bounded and concrete. They return evidence, never verdicts.
-- If spawn is unavailable in the current environment, fall back to sequential
-  execution and note it in the round summary. **快速降级（Metabase 教训）**：
-  spawn 后子 Agent 在约 2 分钟内无任何实质产出（含空任务 / 仅问候语 /
-  心跳文件未出现），即判定 spawn 通道不可用，立即降级宿主顺序执行并记录，
-  不反复重试。
+- **探针先行（0.2.9+）**：S4 开工先 spawn 一个探针（§4 协议），而不是直接
+  逐候选 spawn。探针 ≤90s 无心跳 → degraded mode，整轮宿主顺序执行并记录一次。
+  逐候选的快速降级（Metabase 教训：约 2 分钟无实质产出 = 空任务 / 仅问候语 /
+  心跳未出现）只在探针通过后才适用；探针已失败则不再逐候选重试。
 
 ## 7. Safety and approval model
 
@@ -333,9 +349,11 @@ choice.
   boots/diffs legitimately take minutes. Only after heartbeat stale >5 min AND
   no children AND no growth may you declare a stall; then preserve its
   artifacts, kill its orphans, and note the fallback in the round summary.
-- **Sub-agent 收到空任务 / 只收到问候语**：spawn 通道在当前环境不可用时，
-  子 Agent 可能只回问候语或空结果。等待上限 2 分钟（含心跳文件检查），仍无
-  实质产出 → 判定通道不可用，立即降级宿主顺序执行并记录，不反复重试。
+- **Sub-agent 收到空任务 / 只收到问候语**：这是 S4 探针要捕获的典型症状
+  （0.2.9+）：探针心跳未在 ≤90s 内出现 → 判定 degraded mode，整轮宿主顺序
+  执行并落盘 `S4/spawn-probe.json`。若探针已通过但逐候选子 Agent 仍只回问候语，
+  等待上限 2 分钟（含心跳文件检查），仍无实质产出 → 判定通道不可用，降级并
+  记录，不反复重试。
 - **source-map returns nothing for a non-Java target**: the CLI scans
   Java+Clojure+Python+Go+JS etc. by default (`--globs all`). If you restricted
   to Java (`--globs java`) or the project uses an unusual layout, re-run with

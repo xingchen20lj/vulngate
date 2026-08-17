@@ -44,8 +44,10 @@ The host agent will:
 1. Map the attack surface (S1) — entries, danger call sites, default features.
 2. Propose candidates (S2) with precondition tiers.
 3. Audit the source with file:line evidence (S3).
-4. Spawn sub-agents to write, compile, and run PoC matrices (S4) across
-   versions × safe-mode × preconditions.
+4. Run a mandatory S4 spawn preflight probe, then spawn sub-agents to write,
+   compile, and run PoC matrices (S4) across versions × safe-mode ×
+   preconditions. If the probe fails (no heartbeat within 90s), the whole
+   round degrades to host-sequential execution and records "degraded mode".
 5. Sweep upstream issues/PRs and public disclosures (S5) and apply the hard
    novelty downgrade.
 6. Compute CVSS with precondition consistency (S6).

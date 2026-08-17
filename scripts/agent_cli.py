@@ -15,6 +15,8 @@ Usage:
   agent_cli.py cvss --vector <CVSS:3.1/...> [--tier <tier>] [--implicit-default-on]
   agent_cli.py ledger --workspace <dir> --target <name> --round <N> --entries <json>
   agent_cli.py deps --target <dir> [--out <report.md>] [--offline] [--cache <dir>]
+  agent_cli.py spawn-probe --workspace <dir> --target <name> --round <N>
+                           --status ok|degraded [--reply <agent-reply>]
 """
 
 from __future__ import annotations
@@ -330,6 +332,37 @@ def cmd_deps(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_spawn_probe(args: argparse.Namespace) -> int:
+    """Record the S4 spawn preflight probe result (deterministic bookkeeping).
+
+    The host decides ok/degraded from observed heartbeat/reply; this command
+    only persists the decision in a uniform schema so round summaries and
+    degradation records are consistent across hosts.
+    """
+    from datetime import datetime
+    from agent.memory.state import CheckpointStore
+
+    store = CheckpointStore(Path(args.workspace), args.target, args.round)
+    ok = args.status == "ok"
+    heartbeat = store.base / "S4" / "spawn-probe.heartbeat"
+    payload = {
+        "stage": "S4",
+        "probe": "spawn-preflight",
+        "status": args.status,
+        "observed": {
+            "heartbeat_file": str(heartbeat),
+            "heartbeat_seen": heartbeat.exists(),
+            "wait_seconds": args.wait_seconds,
+            "agent_reply": args.reply or "",
+        },
+        "decision": "parallel-per-candidate" if ok else "host-sequential-whole-round",
+        "recorded_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    out = store.write_artifact("S4", "spawn-probe.json", payload)
+    _out({"written_to": str(out), "decision": payload["decision"]})
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Zero-Day Agent plugin CLI (deterministic helpers)")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -392,6 +425,19 @@ def build_parser() -> argparse.ArgumentParser:
     dp.add_argument("--offline", action="store_true")
     dp.add_argument("--cache", default=None)
     dp.set_defaults(fn=cmd_deps)
+
+    sp = sub.add_parser(
+        "spawn-probe",
+        help="record S4 spawn preflight probe result (ok | degraded)",
+    )
+    sp.add_argument("--workspace", required=True)
+    sp.add_argument("--target", required=True)
+    sp.add_argument("--round", type=int, required=True)
+    sp.add_argument("--status", choices=["ok", "degraded"], required=True)
+    sp.add_argument("--reply", default="", help="observed sub-agent reply (raw)")
+    sp.add_argument("--wait-seconds", type=int, default=90,
+                    help="probe wait budget in seconds (default 90)")
+    sp.set_defaults(fn=cmd_spawn_probe)
     return p
 
 

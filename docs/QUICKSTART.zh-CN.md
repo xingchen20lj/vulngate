@@ -9,7 +9,8 @@ Codex 宿主默认 `multi_agent_mode=explicitRequestOnly`：只有"用户或技�
 显式授权**，例如：
 
 > 审计过程中 S4/S5 必须使用 spawn 子 Agent 并行（每候选一个，最多同时 3 个），
-> 子 Agent 只回传原始证据；只有 spawn 工具明确报错时才允许降级顺序执行。
+> 子 Agent 只回传原始证据；S4 开工前必须先跑 spawn 探针，探针失败才允许整轮
+> 降级宿主顺序执行并记录 degraded mode；只有 spawn 工具明确报错时才允许中途降级。
 
 加上这句后，模型不会再因系统层保守策略而跳过并行。
 

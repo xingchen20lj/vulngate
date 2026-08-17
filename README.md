@@ -35,7 +35,10 @@ research honest:
   precondition tier (default config vs. single feature vs. app cooperation).
 - **Parallel by design.** The pipeline spawns sub-agents for PoC matrices and
   upstream sweeps, so the host agent spends its time judging evidence, not running
-  errands.
+  errands. A mandatory S4 spawn preflight probe checks the channel before any
+  per-candidate spawn: on probe failure the whole round degrades to host-sequential
+  execution and records a single "degraded mode" note instead of discovering the
+  broken channel mid-round.
 
 ## Features
 
