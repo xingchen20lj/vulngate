@@ -5,6 +5,14 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.11] - 2026-08-18
+
+### Changed
+
+- **语言规则（SKILL.md）**：过程汇报跟随用户语言——用户用中文即全程中文叙述；
+  技术原文（代码、类名、CVE/GHSA/PR 引用、检索结果）保持原样不翻译；Novelty 检索
+  关键词用英文。解决多轮审计中"过程叙述默认英文、用户需额外要求中文"的问题。
+
 ## [0.2.10] - 2026-08-18
 
 ### Fixed

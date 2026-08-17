@@ -16,6 +16,9 @@ description: "Drive the VulnGate S1→S8 source-audit pipeline natively in Codex
   输出每条已知漏洞 + 修复版本建议）；随后按需走 S1→S8 查自研代码问题
   （可跳过 S5 Novelty——私有代码无上游 issue 可比对）。
 - 硬闸门 G0–G5：没有运行时 PoC 输出，不许说“确认”；上游公开命中，一律降级“同族+增量”，严禁声称 0day。
+- **语言（0.2.11+）**：过程汇报跟随用户语言——用户用中文即全程中文叙述；代码、类名、
+  CVE/PR 引用、GitHub 检索结果等**技术原文保持原样，不翻译**。报告按 §9 中文为主 +
+  英文摘要。
 - S4/S5 用宿主原生 spawn 并行（每个候选一个子 Agent 跑矩阵/查上游），子 Agent 只回传原始证据，结论由你定。
   **S4 开工前必须先跑 spawn 探针**（0.2.9+）：探针通过才逐候选 spawn；探针失败整轮
   宿主顺序执行并记录 "degraded mode"，把"每轮随机暴露"变成"开跑即暴露"。
@@ -341,6 +344,9 @@ choice.
 - Every excluded candidate is kept in the exclusions list with its reason.
 - Findings are bilingual-ready (zh primary, EN summary) so they can be submitted or
   coordinated directly.
+- **语言规则**：过程叙述跟随用户语言（用户用中文即全程中文，包括 S4/S5 直播式进度
+  与中间说明）；技术原文（代码、类名、异常、CVE/GHSA/PR 引用、检索结果）保持原样，
+  不翻译。Novelty 检索关键词用英文，命中率优先。
 
 ## 10. Troubleshooting
 
