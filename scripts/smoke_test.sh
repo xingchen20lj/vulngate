@@ -50,4 +50,51 @@ if python3 "$PLUGIN_ROOT/scripts/agent_cli.py" ledger \
 fi
 echo "  ok: empty-evidence entry rejected (exit != 0)"
 
-echo "[6/6] done"
+echo "[6/7] fix-completeness static-only exclusion rejected (0.2.15)"
+cat > /tmp/zda-ledger-static.json <<'EOF'
+{"rows": [], "excluded": [{"candidate_id": "C5",
+  "surface": "fix-completeness", "conclusion": "excluded",
+  "evidence": "static audit: listFirst + listRotateHeadToTail complete"}]}
+EOF
+if python3 "$PLUGIN_ROOT/scripts/agent_cli.py" ledger \
+  --workspace "$(mktemp -d)" --target smoke --round 1 \
+  --entries /tmp/zda-ledger-static.json >/dev/null 2>&1; then
+  echo "  FAIL: ledger accepted static-only fix-completeness exclusion"; exit 1
+fi
+echo "  ok: static-only fix-completeness exclusion rejected (exit != 0)"
+
+cat > /tmp/zda-ledger-untagged.json <<'EOF'
+{"rows": [], "excluded": [{"surface": "handleClientsBlockedOnKey UAF (#15594 / CVE-2026-23479)",
+  "conclusion": "excluded", "evidence": "static audit: listFirst + listRotateHeadToTail complete"}]}
+EOF
+if python3 "$PLUGIN_ROOT/scripts/agent_cli.py" ledger \
+  --workspace "$(mktemp -d)" --target smoke --round 1 \
+  --entries /tmp/zda-ledger-untagged.json >/dev/null 2>&1; then
+  echo "  FAIL: ledger accepted untagged fix-family static exclusion"; exit 1
+fi
+echo "  ok: untagged fix-family (UAF #CVE) static exclusion rejected (exit != 0)"
+
+cat > /tmp/zda-ledger-runtime.json <<'EOF'
+{"rows": [], "excluded": [{"candidate_id": "C5",
+  "surface": "fix-completeness", "conclusion": "excluded",
+  "evidence": "OBSERVATION=GATE_BLOCKED(fixed) ERROR=none"}]}
+EOF
+python3 "$PLUGIN_ROOT/scripts/agent_cli.py" ledger \
+  --workspace "$(mktemp -d)" --target smoke --round 1 \
+  --entries /tmp/zda-ledger-runtime.json >/dev/null 2>&1 || {
+  echo "  FAIL: runtime-evidenced exclusion should be accepted"; exit 1; }
+echo "  ok: runtime-evidenced exclusion accepted"
+
+cat > /tmp/zda-ledger-g1.json <<'EOF'
+{"rows": [], "excluded": [{"candidate_id": "C9",
+  "surface": "fix-completeness", "conclusion": "excluded",
+  "evidence": "src/x.c:100 reachable only via admin-only RPC",
+  "exclusion_basis": "g1-unreachable"}]}
+EOF
+python3 "$PLUGIN_ROOT/scripts/agent_cli.py" ledger \
+  --workspace "$(mktemp -d)" --target smoke --round 1 \
+  --entries /tmp/zda-ledger-g1.json >/dev/null 2>&1 || {
+  echo "  FAIL: G1-unreachable exclusion should be accepted"; exit 1; }
+echo "  ok: G1-unreachable exclusion accepted"
+
+echo "[7/7] done"

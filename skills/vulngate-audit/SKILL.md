@@ -37,6 +37,11 @@ description: "Drive the VulnGate S1→S8 source-audit pipeline natively in Codex
   probe cell。教训：CVE-2026-23479 修复不完整 → blocked-client UAF RCE
   （2026-08-19 腾讯云鼎预警，上游 #15562/PR #15594）；fastjson2 JSONB 声明长度
   修复只覆盖部分编码分支（字符串路径残留 OOM）。
+- **fix-completeness 排除硬校验（0.2.15+）**：S8 落盘时 CLI 拒绝"仅静态理由"的
+  fix-completeness 排除——证据必须含 S4 运行时观测行（`OBSERVATION=` / `ERROR=` /
+  `GATE_BLOCKED=` / `EXIT_CODE=` / `SIGNAL=` / ASAN 等），或显式
+  `exclusion_basis=g1-unreachable` + 源码引用。模型（flash/pro/任何网关）无法再
+  用一句 "static audit" 绕过（Redis 2026-08-20 pro 模型轮实测教训）。
 - **spawn 探针诊断升级（0.2.13+）**：探针失败时按子代理实际回复区分症状——
   通用问候语（"ready to help / waiting for task / 没看到任务"）= spawn 消息
   投递失败（环境级），不是探针协议问题；失败后允许一次 followup 重投，仍无心跳
@@ -342,6 +347,11 @@ Run stages in order. Persist every artifact under the target workspace:
   rejects entries with empty evidence — an exclusion with an empty "basis"
   column is a harness error, not a valid record (Metabase C4 lesson,
   2026-08-10).
+- **Fix-completeness exclusion hard rule（0.2.15+）**：`agent_cli.py ledger` 对
+  fix-completeness 排除做二次校验：仅"static audit"式证据直接报错（exit 2），
+  证据必须含 S4 运行时观测行，或显式 `exclusion_basis=g1-unreachable`（带源码
+  引用：修复点与不可信输入无关）。这条把"修复完整性必须由运行时 cell 支撑"从
+  模型自觉变成落盘硬闸门，模型选择不再影响闸门强度。
 - **Round-end cleanup checklist:** before reporting the round as done, verify no
   audit-started processes are still running (`ps aux | grep -iE "<target>|jar
   name"`, `lsof` on used ports) and terminate any that remain. Record cleanup

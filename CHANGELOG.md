@@ -5,6 +5,29 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.15] - 2026-08-20
+
+### Added
+
+- **fix-completeness 排除硬校验（CLI 落盘闸门，不再依赖模型自觉）**：
+  `agent_cli.py ledger` 新增二次校验——fix-completeness 候选的排除记录必须包含
+  S4 运行时观测行（`OBSERVATION=` / `ERROR=` / `GATE_BLOCKED=` / `EXIT_CODE=` /
+  `SIGNAL=` / ASAN / out of memory / SIGABRT 等），否则落盘直接报错（exit 2）；
+  唯一豁免是显式 `exclusion_basis=g1-unreachable`（修复点与不可信输入无关）且带
+  源码引用。检测同时覆盖**未显式标记**的修复族 surface（含 UAF / overflow /
+  bypass / race / `#issue` / CVE 等关键词的排除记录），防止模型只写
+  "static audit" 不带 fix-completeness 标签绕过。smoke_test.sh 增加四组用例
+  （显式 static-only 拒绝 / 未标记修复族拒绝 / 运行时行接受 / G1-unreachable 接受）。
+
+### 实测依据（2026-08-20）
+
+Redis 最新版审计轮（0.2.13 + deepseek-v4-pro）在 S4 把 8 个 fix-completeness
+候选全部以 `EXCLUDED_NO_REPRO` + "static audit" 一句话排除，零运行时 cell——
+违反 0.2.12 的"修复完整性必须由运行时 cell 支撑"规则（blocked-client UAF 教训，
+上一轮该候选是 pre/partial/HEAD 三态 ASAN 对照）。执行差异与模型有关（pro 倾向
+静态下结论），因此把规则从 SKILL.md 文本约束升级为 ledger CLI 硬校验，任何模型
+（flash/pro/第三方网关）都无法再以纯静态理由关闭 fix-completeness 排除。
+
 ## [0.2.14] - 2026-08-20
 
 ### Changed

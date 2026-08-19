@@ -288,6 +288,67 @@ def cmd_ledger(args: argparse.Namespace) -> int:
               "hint": "every ledger row and exclusion must carry non-empty "
                       "evidence (runtime output, source refs, or test results)"})
         return 2
+    # Fix-completeness runtime-evidence hard rule (0.2.15, blocked-client UAF /
+    # pro-model-static-audit lesson, 2026-08-20): an EXCLUDED fix-completeness
+    # candidate may NOT be closed on static reasoning alone. It must either
+    # carry machine-readable runtime observation lines from its S4 cell, or be
+    # explicitly justified as G1-unreachable with source references.
+    _RUNTIME_RE = re.compile(
+        r"(OBSERVATION\s*=|ERROR\s*=|GATE_BLOCKED|EXIT_CODE|SIGNAL\s*=|"
+        r"RESULT\s*=|INSTANTIATED\s*=|NETWORK\s*=|PARSED\s*=|HTTP_CODE\s*=|"
+        r"RESP_MATCH\s*=|EVIDENCE\s*=|ASAN|heap-use-after-free|out of memory|"
+        r"SIGABRT|SIGSEGV|abort\s*\(|exit code\s*\d+)",
+        re.IGNORECASE,
+    )
+
+    # Fix-verification surfaces that were not explicitly tagged
+    # "fix-completeness" still read as fix-completeness when they cite a fix /
+    # issue / CVE (Redis 0.2.13 round: "handleClientsBlockedOnKey UAF (#15594 /
+    # CVE-2026-23479)" with static-only evidence slipped through).
+    _FIX_FAMILY_RE = re.compile(
+        r"(fix-completeness|fix_completeness|修复完整性|uaf|use.after.free|"
+        r"use-after-free|overflow|out.of.bounds|\boob\b|bypass|race|crash|"
+        r"cve-\d|#\d{3,}|deserial|rce|memory|越界|溢出|崩溃|竞态)",
+        re.IGNORECASE,
+    )
+
+    def _is_fix_completeness(r: Dict[str, Any]) -> bool:
+        hay = " ".join(
+            str(r.get(k, "")) for k in
+            ("surface", "candidate_id", "id", "class", "type", "kind")
+        ).lower()
+        if ("fix-completeness" in hay or "fix_completeness" in hay or
+                str(r.get("fix_completeness", "")).lower() in ("true", "yes", "1")):
+            return True
+        # Untagged but clearly fix-verification shaped (fix keyword + issue/CVE
+        # reference, or a fix keyword with a static-only evidence note).
+        surface = str(r.get("surface", ""))
+        return bool(_FIX_FAMILY_RE.search(surface))
+
+    def _g1_unreachable(r: Dict[str, Any]) -> bool:
+        basis = " ".join(str(r.get(k, "")) for k in
+                         ("surface", "exclusion_basis", "basis", "gate", "reason")).lower()
+        return any(k in basis for k in
+                   ("g1", "unreachable", "untrusted", "不可达", "不受信",
+                    "无不可信输入", "不可信输入无关", "管理员", "admin-only",
+                    "trusted input"))
+
+    static_only = []
+    for r in entries.get("excluded", []):
+        cid = r.get("candidate_id") or r.get("surface") or "?"
+        if not _is_fix_completeness(r) or _g1_unreachable(r):
+            continue
+        if not _RUNTIME_RE.search(_evidence_text(r)):
+            static_only.append(cid)
+    if static_only:
+        _out({"error": "fix-completeness exclusions require runtime cell evidence",
+              "candidates": static_only,
+              "hint": "add a runtime observation line (OBSERVATION= / ERROR= / "
+                      "GATE_BLOCKED= / EXIT_CODE= / SIGNAL= / ASAN ...) from the "
+                      "S4 cell, or mark exclusion_basis=g1-unreachable with "
+                      "source references if the fix point is not reachable from "
+                      "untrusted input"})
+        return 2
     from agent.memory.ledger import write_round_artifacts
     out = write_round_artifacts(
         workspace, args.target, args.round,
