@@ -5,6 +5,18 @@ description: "Drive the VulnGate S1→S8 source-audit pipeline natively in Codex
 
 # VulnGate — S1→S8 漏洞研究管线（宿主驱动）
 
+## 语言硬指令（最高优先级，违反 = 流程错误）
+
+1. 用户用什么语言发起任务，你**所有**输出必须用同一语言——包括开场白、
+   S1–S8 每阶段直播式进度、工具调用后的旁白、中间说明、degraded mode
+   记录、轮次汇总与最终报告。**禁止**中途切回英文（或用户语言以外的语言）。
+2. 英文只允许出现在**技术原文**里：代码、类名、异常消息、CVE/GHSA/PR 编号、
+   GitHub 检索结果、命令输出、子代理原始回复等，逐字保留、不翻译、不改写。
+   你的**叙述语言**永远跟随用户语言；工具输出是英文，不是你切英文的理由。
+3. 开工第一条笔记先写死："本轮叙述语言 = <用户语言>"，此后每次输出前自查；
+   发现上一条消息用错语言，立即在下一条纠正并继续。
+4. 用户中途切换语言时，以**最近一条用户消息**的语言为准，切换后全程跟随。
+
 ## 中文速览
 
 - 你是主 Agent，拥有全部推理与结论判定；捆绑 CLI（`scripts/`）只做确定性工作。
@@ -16,9 +28,9 @@ description: "Drive the VulnGate S1→S8 source-audit pipeline natively in Codex
   输出每条已知漏洞 + 修复版本建议）；随后按需走 S1→S8 查自研代码问题
   （可跳过 S5 Novelty——私有代码无上游 issue 可比对）。
 - 硬闸门 G0–G5：没有运行时 PoC 输出，不许说“确认”；上游公开命中，一律降级“同族+增量”，严禁声称 0day。
-- **语言（0.2.11+）**：过程汇报跟随用户语言——用户用中文即全程中文叙述；代码、类名、
-  CVE/PR 引用、GitHub 检索结果等**技术原文保持原样，不翻译**。报告按 §9 中文为主 +
-  英文摘要。
+- **语言（0.2.14+，最高优先级硬指令）**：见文首"语言硬指令"——过程汇报必须跟随
+  用户语言，禁止中途漂回英文；代码、类名、CVE/PR 引用、GitHub 检索结果等
+  **技术原文保持原样，不翻译**。报告按 §9 中文为主 + 英文摘要。
 - **修复完整性验证（0.2.12+）**：S1 把目标 git 历史中近期安全修复 commit（UAF/
   越界/溢出/绕过/竞态/崩溃）逐个转成"修复完整性验证"候选，禁止"修复已在树 = 已处理"；
   S3 审计中的残余怀疑点必须写入 `S3/residuals.json`，S4 为每个 residual 至少跑一个
@@ -398,8 +410,9 @@ choice.
 - `S3/residuals.json`（残余怀疑点，0.2.12+）是 S4 必跑清单的一部分，不是可丢弃笔记。
 - Findings are bilingual-ready (zh primary, EN summary) so they can be submitted or
   coordinated directly.
-- **语言规则**：过程叙述跟随用户语言（用户用中文即全程中文，包括 S4/S5 直播式进度
-  与中间说明）；技术原文（代码、类名、异常、CVE/GHSA/PR 引用、检索结果）保持原样，
+- **语言规则（0.2.14+，见文首硬指令）**：过程叙述**必须**跟随用户语言（用户用中文
+  即全程中文，包括 S4/S5 直播式进度与中间说明），任何英文工具输出都不是切换叙述
+  语言的理由；技术原文（代码、类名、异常、CVE/GHSA/PR 引用、检索结果）保持原样，
   不翻译。Novelty 检索关键词用英文，命中率优先。
 
 ## 10. Troubleshooting
@@ -443,5 +456,6 @@ choice.
 ## 11. Final response format
 
 End each run with: 结论（确认/排除/待验证 + 数量）、每个确认项的前置条件分级与
-CVSS、Novelty 判定与依据、证据落盘路径、下一步建议。Keep it scannable; the full
-detail lives in the artifacts.
+CVSS、Novelty 判定与依据、证据落盘路径、下一步建议。**最终报告必须用用户语言输出**
+（中文用户 → 中文报告，可附英文摘要）；Keep it scannable; the full detail lives in
+the artifacts.

@@ -5,6 +5,25 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.14] - 2026-08-20
+
+### Changed
+
+- **语言规则升级为最高优先级硬指令（修复"过程叙述中途漂回英文"）**：语言规则从
+  速览区一条说明提升为 SKILL.md 文首独立硬指令（0. 语言硬指令，违反 = 流程错误）：
+  用户用什么语言发起任务，主 Agent 所有输出（开场、S1–S8 直播式进度、工具调用后
+  旁白、degraded mode 记录、轮次汇总、最终报告）必须全程跟随，禁止中途切回英文；
+  英文只允许保留在技术原文（代码、类名、异常、CVE/GHSA/PR、检索结果、子代理原始
+  回复）中。用户中途切换语言以最近一条用户消息为准。§9 语言规则与 §11 最终报告
+  格式同步加"必须/禁止"措辞。
+
+### 实测依据（2026-08-20）
+
+Redis 审计线程（用户全程中文发起）开场为中文，S1/S3 之后过程汇报漂回英文：
+0.2.11 起的语言规则在模型执行中未被当作硬约束。已运行的线程加载旧版技能不受
+本版影响，可向该线程补发"后面全部用中文汇报"立即纠正；新线程加载 0.2.14 后
+语言指令位于文首最高优先级。
+
 ## [0.2.13] - 2026-08-20
 
 ### Changed
