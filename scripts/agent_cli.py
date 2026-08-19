@@ -338,6 +338,14 @@ def cmd_spawn_probe(args: argparse.Namespace) -> int:
     The host decides ok/degraded from observed heartbeat/reply; this command
     only persists the decision in a uniform schema so round summaries and
     degradation records are consistent across hosts.
+
+    0.2.13+: symptom classification makes the degraded record diagnosable:
+      - no-heartbeat-greeting-only : sub-agent woke up but replied a generic
+        greeting ("ready to help", "waiting for task") -> spawn message
+        delivery failure (environment-level), NOT a probe protocol problem;
+      - no-heartbeat-timeout       : no heartbeat, no useful reply at all;
+      - followup-retried-failed    : one followup re-delivery was attempted
+        and still no heartbeat.
     """
     from datetime import datetime
     from agent.memory.state import CheckpointStore
@@ -345,15 +353,18 @@ def cmd_spawn_probe(args: argparse.Namespace) -> int:
     store = CheckpointStore(Path(args.workspace), args.target, args.round)
     ok = args.status == "ok"
     heartbeat = store.base / "S4" / "spawn-probe.heartbeat"
+    symptom = getattr(args, "symptom", None) or ("ok" if ok else "no-heartbeat-timeout")
     payload = {
         "stage": "S4",
         "probe": "spawn-preflight",
         "status": args.status,
+        "symptom": symptom,
         "observed": {
             "heartbeat_file": str(heartbeat),
             "heartbeat_seen": heartbeat.exists(),
             "wait_seconds": args.wait_seconds,
             "agent_reply": args.reply or "",
+            "followup_retried": bool(getattr(args, "followup_retried", False)),
         },
         "decision": "parallel-per-candidate" if ok else "host-sequential-whole-round",
         "recorded_at": datetime.now().isoformat(timespec="seconds"),
@@ -435,6 +446,22 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--round", type=int, required=True)
     sp.add_argument("--status", choices=["ok", "degraded"], required=True)
     sp.add_argument("--reply", default="", help="observed sub-agent reply (raw)")
+    sp.add_argument(
+        "--symptom",
+        choices=[
+            "ok",
+            "no-heartbeat-greeting-only",
+            "no-heartbeat-timeout",
+            "followup-retried-failed",
+        ],
+        default=None,
+        help="degraded-mode symptom classification (0.2.13+)",
+    )
+    sp.add_argument(
+        "--followup-retried",
+        action="store_true",
+        help="a single followup re-delivery was attempted before degrading (0.2.13+)",
+    )
     sp.add_argument("--wait-seconds", type=int, default=90,
                     help="probe wait budget in seconds (default 90)")
     sp.set_defaults(fn=cmd_spawn_probe)

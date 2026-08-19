@@ -25,6 +25,10 @@ description: "Drive the VulnGate S1→S8 source-audit pipeline natively in Codex
   probe cell。教训：CVE-2026-23479 修复不完整 → blocked-client UAF RCE
   （2026-08-19 腾讯云鼎预警，上游 #15562/PR #15594）；fastjson2 JSONB 声明长度
   修复只覆盖部分编码分支（字符串路径残留 OOM）。
+- **spawn 探针诊断升级（0.2.13+）**：探针失败时按子代理实际回复区分症状——
+  通用问候语（"ready to help / waiting for task / 没看到任务"）= spawn 消息
+  投递失败（环境级），不是探针协议问题；失败后允许一次 followup 重投，仍无心跳
+  才落盘 degraded（带 symptom 标签 + 子代理回复原文），整轮宿主顺序执行。
 - S4/S5 用宿主原生 spawn 并行（每个候选一个子 Agent 跑矩阵/查上游），子 Agent 只回传原始证据，结论由你定。
   **S4 开工前必须先跑 spawn 探针**（0.2.9+）：探针通过才逐候选 spawn；探针失败整轮
   宿主顺序执行并记录 "degraded mode"，把"每轮随机暴露"变成"开跑即暴露"。
@@ -225,9 +229,20 @@ Run stages in order. Persist every artifact under the target workspace:
   - 心跳文件出现 → `agent_cli.py spawn-probe --workspace <ws> --target <name>
     --round <N> --status ok --reply "<回复>"` 落盘 `S4/spawn-probe.json`，
     继续逐候选 spawn。
-  - 心跳未出现（含仅回问候语 / 空任务 / 超时无回复）→ `--status degraded`
-    落盘，**整轮降级宿主顺序执行**，轮次汇总记一条 degraded mode（探针结果路径 +
-    症状），不再逐候选重试，也不在 S5 再试 spawn。
+  - 心跳未出现（含仅回问候语 / 空任务 / 超时无回复）→ **先做一次 followup
+    重投**（把同一探针任务经 `followup_task` 再发一次，等 ≤60 秒），仍无心跳 →
+    `--status degraded` 落盘，并带上**症状标签**与**子代理实际回复原文**：
+    - 子代理回复含 "ready to help / waiting for task / no task has come through /
+      看不到任务" 等通用问候 → `--symptom no-heartbeat-greeting-only`，判定为
+      **spawn message delivery failure（环境级）**：宿主通道未把任务正文投递给
+      子代理，与探针协议无关；
+    - 子代理无任何实质回复 → `--symptom no-heartbeat-timeout`；
+    - followup 重投后仍失败 → 追加 `--followup-retried`（symptom 记
+      `followup-retried-failed`）。
+    `--reply "<子代理最终回复原文>"` 必须写实际观察到的文本（问候语也算），
+    禁止只写 "no heartbeat file after 90s" 这类推断。落盘后**整轮降级宿主顺序
+    执行**，轮次汇总记一条 degraded mode（探针结果路径 + symptom + 回复原文），
+    不再逐候选重试，也不在 S5 再试 spawn。
   - 探针记录不写任何 S5–S8 产物；探针子 Agent 若越权写入，按 harness error 处理。
 - **Sub-agent liveness (Metabase lesson, 2026-08-10):** long target operations
   (server boot, large-jar decompile/diff, integration tests) are silent for
@@ -395,10 +410,18 @@ choice.
   no children AND no growth may you declare a stall; then preserve its
   artifacts, kill its orphans, and note the fallback in the round summary.
 - **Sub-agent 收到空任务 / 只收到问候语**：这是 S4 探针要捕获的典型症状
-  （0.2.9+）：探针心跳未在 ≤90s 内出现 → 判定 degraded mode，整轮宿主顺序
-  执行并落盘 `S4/spawn-probe.json`。若探针已通过但逐候选子 Agent 仍只回问候语，
-  等待上限 2 分钟（含心跳文件检查），仍无实质产出 → 判定通道不可用，降级并
-  记录，不反复重试。
+  （0.2.13+ 诊断规则）：子代理回复 "ready to help / waiting for task /
+  看不到任务" 等通用问候，说明 **spawn 消息未投递**（环境级通道故障），不是
+  探针协议或任务格式问题。处置：followup 重投一次（≤60s）→ 仍无心跳 →
+  `--symptom no-heartbeat-greeting-only`（重投后仍失败记
+  `followup-retried-failed`）落盘 degraded，整轮宿主顺序执行。若探针已通过但
+  逐候选子 Agent 仍只回问候语，等待上限 2 分钟（含心跳文件检查），仍无实质
+  产出 → 判定通道不可用，降级并记录，不反复重试。
+  **已知环境级故障（2026-08-20 实测）**：Codex 桌面版 + 第三方 API 网关
+  （DeepSeek 等）下，spawn 初始消息与 followup 消息都可能无法到达子代理——
+  子代理能启动（感知 cwd）但收不到任务正文。此故障插件无法修复，需在宿主侧
+  排查（客户端版本 / API 网关 / 重启线程）；VulnGate 在此环境下自动以
+  degraded mode 运行，矩阵与结论完整性不受影响。
 - **source-map returns nothing for a non-Java target**: the CLI scans
   Java+Clojure+Python+Go+JS etc. by default (`--globs all`). If you restricted
   to Java (`--globs java`) or the project uses an unusual layout, re-run with

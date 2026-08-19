@@ -5,6 +5,27 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.13] - 2026-08-20
+
+### Changed
+
+- **S4 spawn 探针诊断升级（把"只回问候语"变成可判定的环境故障）**：探针失败时
+  必须把子代理**实际回复原文**写入 `spawn-probe.json` 的 `agent_reply`，并按症状
+  分类：通用问候语（"ready to help / waiting for task / 看不到任务"）判定为
+  **spawn message delivery failure（环境级）**，与探针协议问题区分；失败后允许
+  一次 followup 重投（≤60s），仍无心跳才落盘 degraded（`--symptom
+  no-heartbeat-greeting-only` / `no-heartbeat-timeout` / `followup-retried-failed`，
+  及 `--followup-retried` 标记）。
+
+### 实测依据（2026-08-20）
+
+受控实验确认：Codex 桌面版 + 第三方 API 网关下，spawn 初始消息与 followup
+消息都可能无法到达子代理——子代理能启动（感知 cwd）但收不到任务正文（回复
+"Ready to work in `<cwd>`. No task has come through yet"）。与消息长度、语言、
+fork_turns 无关。该故障为宿主环境级，插件无法修复；VulnGate 自动 degraded
+模式运行（宿主顺序执行矩阵），结论完整性不受影响，排查方向记录在
+SKILL.md Troubleshooting。
+
 ## [0.2.12] - 2026-08-19
 
 ### Added
