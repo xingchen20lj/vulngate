@@ -5,6 +5,26 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.12] - 2026-08-19
+
+### Added
+
+- **修复完整性验证（Fix-Completeness，S1→S4 通用规则）**：S1 对目标 git 历史近期
+  安全修复 commit（UAF / 越界 / 溢出 / 绕过 / 竞态 / 崩溃）逐个生成
+  "修复完整性验证"候选（surface=fix-completeness），禁止"修复已在树 = 已处理"；
+  S3 残余怀疑点强制写入 `S3/residuals.json`（含 probe_plan）并进入 S4 必跑清单，
+  每条至少一个 probe cell；fix-completeness 候选优先跑"修复前版本 × 修复后版本"
+  对照矩阵，修复完整性必须由运行时 cell 支撑。
+
+### 实战教训（沉淀进 playbook §10）
+
+- Redis blocked-client UAF RCE（腾讯云鼎 2026-08-19 预警）：CVE-2026-23479 修复
+  （5c355b68e）只堵 unblock 时 evict 的 UAF，`handleClientsBlockedOnKey()` 原始
+  list 迭代器 reprocessing 路径仍残留（上游 #15562 / PR #15594）。修复不完整
+  的"同类路径"验证是 UAF 类修复的必查项。
+- fastjson2 JSONB 声明长度 OOM 家族：上游修复只覆盖 BIGINT/BINARY/ARRAY，字符串
+  编解码器仍可按声明长度预分配触发 OOM——兄弟编码分支必须逐分支验证。
+
 ## [0.2.11] - 2026-08-18
 
 ### Changed

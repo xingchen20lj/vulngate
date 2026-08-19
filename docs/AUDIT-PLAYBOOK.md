@@ -166,25 +166,50 @@ Web 框架优先看"不可信输入 → 表达式求值 / 对象绑定 / 模板�
    verify every claimed sub-path on the audited versions.
 5. End-to-end precondition tier (0 / single-feature / app-cooperation /
    extra-primitive) → CVSS consistency (G5).
+6. Residual suspects discovered during the audit go to `S3/residuals.json` (each
+   with a probe_plan), never only into prose notes — S4 must run at least one
+   probe cell per residual.
 
-## 10. 通告驱动反查（Advisory → Fix-Diff → 攻击面）
+## 10. 通告/修复反查（Advisory/Fix-Commit → Fix-Diff → 攻击面）
 
 目标近期有安全通告（GHSA / CVE / 厂商公告）时，**修复 diff 是最准确的攻击面
 地图**：厂商修了什么，漏洞大概率就在那几行改动附近。此技术在 Metabase
 GHSA-vwf4-m7j8-wcjf 实战中直接定位到未公开根因（开放 Map + merge 残留 +
 honeysql raw），是"从通告到根因"的最高效路径。
 
+**即使近期没有通告**，git 历史里近期合并的安全修复 commit 也是同等信号：修复
+commit 是"上一个漏洞的答案"，而它**覆盖不全的地方就是下一个漏洞**。2026-08-19
+腾讯云鼎预警的 Redis blocked-client UAF 正是此类：CVE-2026-23479 的修复
+（5c355b68e）只堵了 unblock 时 evict 的 UAF，`handleClientsBlockedOnKey()`
+reprocessing 的原始 list 迭代器路径仍残留（上游 #15562 / PR #15594 才真正修复）。
+
 ### 操作步骤
 
+0. **无通告时的 git-log 反查**：对目标仓库执行
+   `git log --oneline -30 --all --grep='fix.*(uaf|use-after-free|overflow|bypass|race|crash|out-of-bounds|oob|deserial|rce)'`
+   （大小写不敏感；C 系项目追加 `asan|valgrind|memory`）。把近期合并的安全修复
+   commit **逐个转成"修复完整性验证"候选**（surface=fix-completeness），进
+   S2/S3/S4；禁止登记为 "NOT new findings" 直接归档。
 1. **拿修复版本**：从 GHSA / release notes 读 affected / patched 版本区间；
    下载或 clone patched tag（如 `git fetch origin tag v0.58.24`）。
-2. **diff 定位**：`git diff <受影响tag>..<修复tag> --stat`，把改动文件按
+2. **diff 定位**：`git diff <受影响tag>..<修复tag> --stat`（或
+   `git show <修复commit>`），把改动文件按
    输入校验 / 路由 / schema / 反序列化 / 过滤 / 会话管理分类。
 3. **逐改动点反推**：修复代码即答案——看它**加了什么检查**（拒绝未知键、
    类型校验、参数化、黑名单），反推漏洞触发条件与前置。
 4. **生成候选**：把修复点对应的旧版代码路径列为最高优先候选，照常走
    S3 源码审计 + S4 运行时验证（G1 / G1b / G4 不变）。
-5. **边界与纪律**：
+5. **修复完整性验证清单**（UAF / 竞态 / 越界 / 溢出类修复必查）：
+   - **被修函数的所有调用路径都覆盖了吗？** CVE-2026-23479 修了 unblock 时
+     evict 的 UAF，但 `handleClientsBlockedOnKey()` 的 reprocessing 迭代器路径
+     仍残留——按修复 diff 找"同类代码路径"，而不是只看被修的那一处；
+   - **同类编码/格式的兄弟分支覆盖了吗？** fastjson2 JSONB 声明长度修复覆盖
+     BIGINT/BINARY/ARRAY，字符串编解码器仍按声明长度预分配触发 OOM；
+   - **修复是否只堵了已知输入形状？** 换一种输入形状 / 入口 / 编码能否绕过；
+   - **运行时对照**：修复前版本（`git checkout` 未修复 commit 构建）应能复现
+     崩溃/越界/UAF，修复后版本应返回错误或拒绝；两个方向都要有 cell 输出，
+     禁止仅凭"修复 commit 在树"排除。
+6. **边界与纪律**：
    - 反查得到的候选仍必须运行时验证，禁止"修复 diff 存在 = 确认"；
    - 该机制通常已被上游通告覆盖 → G3 一律按 same-family 起步，增量只主张
      "精确根因 / 修复边界 / 旁路"，严禁声称 0day；
@@ -196,5 +221,7 @@ honeysql raw），是"从通告到根因"的最高效路径。
 ### 适用场景
 
 - 目标近期出过安全通告（在野 / 0day 预警）；
+- 目标近期 git 历史有安全修复 commit（尤其 UAF / 越界 / 竞态 / 溢出），
+  需验证修复完整性（即使无公开通告）；
 - 审计任务是"已修复漏洞的旁路 / 同族残留 / 修复不完整"；
 - 需要快速理解陌生代码库攻击面时，通告 diff 是性价比最高的入口。

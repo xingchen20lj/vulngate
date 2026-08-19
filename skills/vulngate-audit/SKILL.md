@@ -19,6 +19,12 @@ description: "Drive the VulnGate S1→S8 source-audit pipeline natively in Codex
 - **语言（0.2.11+）**：过程汇报跟随用户语言——用户用中文即全程中文叙述；代码、类名、
   CVE/PR 引用、GitHub 检索结果等**技术原文保持原样，不翻译**。报告按 §9 中文为主 +
   英文摘要。
+- **修复完整性验证（0.2.12+）**：S1 把目标 git 历史中近期安全修复 commit（UAF/
+  越界/溢出/绕过/竞态/崩溃）逐个转成"修复完整性验证"候选，禁止"修复已在树 = 已处理"；
+  S3 审计中的残余怀疑点必须写入 `S3/residuals.json`，S4 为每个 residual 至少跑一个
+  probe cell。教训：CVE-2026-23479 修复不完整 → blocked-client UAF RCE
+  （2026-08-19 腾讯云鼎预警，上游 #15562/PR #15594）；fastjson2 JSONB 声明长度
+  修复只覆盖部分编码分支（字符串路径残留 OOM）。
 - S4/S5 用宿主原生 spawn 并行（每个候选一个子 Agent 跑矩阵/查上游），子 Agent 只回传原始证据，结论由你定。
   **S4 开工前必须先跑 spawn 探针**（0.2.9+）：探针通过才逐候选 spawn；探针失败整轮
   宿主顺序执行并记录 "degraded mode"，把"每轮随机暴露"变成"开跑即暴露"。
@@ -120,6 +126,20 @@ Run stages in order. Persist every artifact under the target workspace:
   `docs/AUDIT-PLAYBOOK.md §10` 做 fix-diff 反查——拉 patched tag、diff 受影响
   版本，把修复点对应的旧版代码路径列为最高优先攻击面。修复代码即根因答案；
   反查产物仍必须过 S3 源码审计与 G4 运行时验证，且 G3 按 same-family 起步。
+- **git 历史安全修复反查（无通告时也必做，0.2.12+）**：对目标仓库执行
+  `git log --oneline -30 --all --grep='fix.*(uaf|use.after.free|overflow|bypass|race|crash|out.of.bounds|oob|deserial|rce)'`
+  （英文关键词命中率优先；C 系项目可追加 `asan|valgrind|memory`）。对每个近期
+  合并的安全修复 commit：
+  - 在 S1 记录 commit、改动文件、修复方式（新增检查 / 换迭代器 / 补边界 / 回滚
+    特性）与对应的旧版代码路径；
+  - **逐个生成"修复完整性验证"候选**（surface=fix-completeness），禁止登记为
+    "NOT new findings" 直接归档；
+  - 验证方向：修复是否覆盖同类调用路径 / 兄弟编码分支 / 其它入口；修复本身是否
+    引入新的绕过点（例：CVE-2026-23479 修了 unblock 路径，`handleClientsBlockedOnKey`
+    reprocessing 迭代器路径仍 UAF；JSONB 声明长度修复只覆盖 BIGINT/BINARY，
+    字符串编解码器漏掉）；
+  - 仅当该修复点与不可信输入无关（G1 不达）才允许排除，且排除必须留证据
+    （源码引用 + 为什么不可达）。
 - Ask the bundled CLI for source evidence:
   `python3 scripts/agent_cli.py source-map --target-dir <path> --preset <parsers|http|expression|io|exec|config|all>`
   (grep-based: entries, danger call sites, class instantiation, reflection).
@@ -137,6 +157,9 @@ Run stages in order. Persist every artifact under the target workspace:
   amplification), logic (auth bypass/race/validation bypass), and information
   disclosure (error stack/debug endpoints/log leaks). Do not anchor candidates to
   known advisories; the playbook is a checklist, not a limit.
+- **修复完整性候选强制入矩阵（0.2.12+）**：S1 反查得到的 fix-completeness 候选
+  必须进入 candidate-matrix.json，与普通候选同等对待（过 S3 源码审计、进 S4 矩阵），
+  不得在 S2 静默丢弃或降级为笔记。
 - Precondition tiers (this drives CVSS later):
   - `0` — default config, no setup.
   - `single-feature` — one library feature flag (e.g. SupportAutoType).
@@ -152,6 +175,11 @@ Run stages in order. Persist every artifact under the target workspace:
   --terms <t1,t2>` or grep/ripgrep directly; cite `file:line` in your notes.
 - Gate **G1b**: if the path is gated behind a non-default feature, mark it; do not
   silently treat it as default-reachable.
+- **残余怀疑点落盘（0.2.12+）**：审计中发现的"方向可疑但未正式立项"的残余点
+  （某修复只覆盖部分路径、某个 race 未验证、某个 check 可绕过但暂无输入形状），
+  不得只写进笔记——必须写入 `S3/residuals.json`，每条含
+  `{surface, evidence, reason_not_candidate, probe_plan}`；S4 必须为每个 residual
+  至少跑一个 probe cell。S3 结束前检查 residuals 为空或全部有 probe_plan。
 - Save `S3/audit-notes.json`. Drop candidates whose hypothesis is refuted; keep the
   refutation in the exclusions list (S8).
 
@@ -165,6 +193,13 @@ Run stages in order. Persist every artifact under the target workspace:
   stacks, a CLI invocation for applications.
 - Matrix: `{versions} × {safe-mode on/off} × {precondition tiers}`. At least the
   default-config cell and the claimed-precondition cell.
+- **修复完整性候选的矩阵（0.2.12+）**：fix-completeness 候选优先跑
+  {修复前版本 × 修复后版本} 对照 cell（本地有未修复 tag/分支时 `git checkout`
+  构建），观察修复前崩溃/UAF/OOM 与修复后 `GATE_BLOCKED(fixed)`；本地无未修复
+  版本时，至少构造触发原 bug 的最小输入验证修复点行为——修复后应返回错误/拒绝，
+  而非崩溃。**禁止仅凭"修复 commit 在树"排除候选**，修复完整性必须由运行时 cell
+  支撑（Redis blocked-client UAF 教训）。S3 的 residuals 清单并入 S4 必跑，
+  每条至少一个 probe cell。
 - **Shell/HTTP PoC 契约（Web 应用/服务，Metabase 实战沉淀）**：脚本放
   `poc/<target>/round-NN/src/<candidate>.sh`，以 `bash` 执行（无需执行位）。
   观察行：`HTTP_CODE=<状态码>`、`RESP_MATCH=<响应特征串>`、
@@ -300,6 +335,9 @@ Run stages in order. Persist every artifact under the target workspace:
 | G4 | Runtime PoC evidence | “confirmed” without cell output |
 | G5 | CVSS vector ↔ precondition tier | inconsistent severity |
 
+修复完整性验证不是新 gate，而是 G1/G4 在"修复反查候选"上的强制应用：修复 commit
+在树 ≠ 该面已处理，必须跑到运行时 cell（G4），修复点不可达才算排除（G1）。
+
 ## 6. Native parallelism (why this plugin exists)
 
 The standalone CLI cannot spawn Codex agents. As a plugin, **you** are the host: use
@@ -342,6 +380,7 @@ choice.
 - Machine-readable observations, not prose, drive conclusions.
 - Every matrix cell is kept (including failures and harness errors).
 - Every excluded candidate is kept in the exclusions list with its reason.
+- `S3/residuals.json`（残余怀疑点，0.2.12+）是 S4 必跑清单的一部分，不是可丢弃笔记。
 - Findings are bilingual-ready (zh primary, EN summary) so they can be submitted or
   coordinated directly.
 - **语言规则**：过程叙述跟随用户语言（用户用中文即全程中文，包括 S4/S5 直播式进度
