@@ -22,6 +22,7 @@ from ..tools.cvss import base_score, check_impact_consistency
 from ..tools.source_evidence import (DANGER_PATTERNS, build_source_sink_graph,
                                      grep_hits, match_source_sink_paths)
 from ..tools.patch_variants import analyze_patch_history, fix_completeness_candidate
+from ..tools.project_profile import build_project_profile
 from ..tools.novelty import (Disclosure, NoveltyChecker, UpstreamRef,
                              mechanism_audit_llm)
 from ..tools.public_scan import scan_all
@@ -140,6 +141,10 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
     gate_scan = _gate_scan(ctx)
     patch_history = analyze_patch_history(ctx.workspace, max_count=30)
     source_sink_graph = build_source_sink_graph(ctx.config.source_dirs, ctx.workspace)
+    project_profile = build_project_profile(
+        ctx.config, ctx.workspace, danger_site_count=len(danger_sites),
+        source_sink_path_count=len(source_sink_graph),
+        security_fix_count=len(patch_history))
     ctx.store.write_artifact("S1", "jars.json", jars_info)
     ctx.store.write_artifact("S1", "entry-inventory.json", entries)
     ctx.store.write_artifact("S1", "gate-scan.json", gate_scan)
@@ -152,10 +157,12 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
         for fix in patch_history
     ])
     ctx.store.write_artifact("S1", "source-sink-graph.json", source_sink_graph)
+    ctx.store.write_artifact("S1", "project-profile.json", project_profile)
     return {"jars": jars_info, "entries": entries, "gate_scan_count": len(gate_scan),
             "version_diff": version_diff, "danger_site_count": len(danger_sites),
             "security_fix_count": len(patch_history),
-            "source_sink_path_count": len(source_sink_graph)}
+            "source_sink_path_count": len(source_sink_graph),
+            "project_profile": project_profile}
 
 
 def run_s2(ctx: StageContext) -> Dict[str, Any]:
@@ -343,6 +350,13 @@ def run_s5(ctx: StageContext) -> Dict[str, Any]:
                              cache_dir=cache_dir)
     pub = ctx.public_disclosures()
     results = {}
+    coverage = {
+        "offline": ctx.offline,
+        "public_scan_channels": pub.get("channels", {}),
+        "public_scan_errors": pub.get("errors", []),
+        "public_disclosure_count": len(pub.get("disclosures", [])),
+        "candidates": [],
+    }
     for cand in ctx.config.candidates:
         if cand.get("skip_novelty"):
             results[cand["candidate_id"]] = {
@@ -355,6 +369,15 @@ def run_s5(ctx: StageContext) -> Dict[str, Any]:
             refs.append(UpstreamRef(**r))
         # Live scan: refresh config refs via API and search by keywords.
         repo = ctx.config.upstream_repo or ""
+        keyword_limit = max(1, int(cand.get("novelty_max_keywords", 12)))
+        result_limit = max(1, int(cand.get("novelty_max_results", 20)))
+        coverage["candidates"].append({
+            "candidate_id": cand["candidate_id"],
+            "repo": repo,
+            "keywords": list(cand.get("novelty_keywords", []))[:keyword_limit],
+            "keyword_limit": keyword_limit,
+            "result_limit": result_limit,
+        })
         if repo and not ctx.offline:
             for r in list(refs):
                 num = "".join(ch for ch in r.ref if ch.isdigit())
@@ -364,8 +387,8 @@ def run_s5(ctx: StageContext) -> Dict[str, Any]:
                     if live is not None:
                         live.coverage_note = r.coverage_note
                         refs[refs.index(r)] = live
-            for kw in cand.get("novelty_keywords", [])[:4]:
-                for item in checker.search(repo, kw)[:8]:
+            for kw in cand.get("novelty_keywords", [])[:keyword_limit]:
+                for item in checker.search(repo, kw)[:result_limit]:
                     number = item.get("number")
                     ref = UpstreamRef(
                         ref=("#%d" % number) if number else item.get("title", "")[:24],
@@ -420,6 +443,8 @@ def run_s5(ctx: StageContext) -> Dict[str, Any]:
         "channels": pub["channels"], "errors": pub["errors"],
         "disclosure_ids": [d.id for d in pub["disclosures"]],
     }
+    coverage["authoritative"] = not bool(pub.get("errors")) and not ctx.offline
+    ctx.store.write_artifact("S5", "novelty-coverage.json", coverage)
     ctx.store.write_artifact("S5", "novelty.json", results)
     return {"novelty": results}
 

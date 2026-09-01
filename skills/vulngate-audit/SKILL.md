@@ -270,6 +270,9 @@ Run stages in order. Persist every artifact under the target workspace:
   辅助，按 `Source→Transform→Validation→Authorization→Sink` 组织带行号的启发式路径。
   这是候选发现和人工复核索引，不是静态数据流证明；S3/S4 仍必须确认真实可达性、数据
   传播和运行时效果。
+- **项目价值与 Novelty 覆盖（0.2.25+）**：S1 的 `project-profile.json` 仅用于比较
+  审计优先级，不是漏洞概率；S5 的 `novelty-coverage.json` 必须记录实际关键词、结果
+  上限、扫描渠道、错误和权威性。任何渠道失败或离线运行都不能被描述为“未发现公开漏洞”。
 - **Spawn one sub-agent per candidate** (up to 3 in parallel) with a bounded task:
   write the PoC under the workspace, compile, run the matrix, and return raw cell
   outputs plus any `harness_error`. The spawn message MUST state the boundary

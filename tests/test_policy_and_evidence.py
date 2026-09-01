@@ -18,6 +18,7 @@ from agent.tools.build import (MatrixCell, ShellMatrixRunner, ShellPOCSpec,
 from agent.tools.patch_variants import analyze_patch_history  # noqa: E402
 from agent.tools.source_evidence import (build_source_sink_graph,
                                          match_source_sink_paths)  # noqa: E402
+from agent.tools.project_profile import build_project_profile  # noqa: E402
 from agent.memory.ledger import render_finding_md  # noqa: E402
 from agent.tools.conclusion import derive_conclusion  # noqa: E402
 from agent.tools.cvss import check_impact_consistency  # noqa: E402
@@ -111,6 +112,20 @@ class PolicyTests(unittest.TestCase):
             self.assertIn("Handler.java", graph[0]["source"])
             self.assertTrue(match_source_sink_paths(
                 graph, {"entry": "handle", "code_location": []}))
+
+    def test_project_profile_is_priority_signal_not_vulnerability_verdict(self):
+        class Config:
+            target_type = "web-app"
+            api_hint = "tenant permission upload template"
+            scope_constraints = "local"
+            entry_points = [{"api": "POST /upload"}]
+            source_dirs = []
+        profile = build_project_profile(Config(), Path("/tmp"),
+                                       danger_site_count=20,
+                                       source_sink_path_count=40,
+                                       security_fix_count=3)
+        self.assertGreaterEqual(profile["score"], 30)
+        self.assertIn("不是漏洞存在概率", profile["meaning"])
 
 
 class EvidenceTests(unittest.TestCase):

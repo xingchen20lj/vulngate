@@ -5,6 +5,17 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.25] - 2026-09-02
+
+### Added
+
+- **Project value profile**：S1 生成 `project-profile.json`，按 HTTP/RPC、鉴权边界、
+  解析/反序列化、文件/配置/模板、执行/类加载、协议和历史修复等信号给出审计优先级；
+  明确该分数只用于排序，不代表漏洞概率或严重性。
+- **Novelty coverage record**：S5 生成 `novelty-coverage.json`，记录关键词数量、每项
+  查询上限、公开扫描渠道、错误和是否具备权威性；关键词/结果上限可按候选配置，默认
+  扩大到 12/20，避免静默截断造成“未发现公开记录”的错觉。
+
 ## [0.2.24] - 2026-09-02
 
 ### Added
