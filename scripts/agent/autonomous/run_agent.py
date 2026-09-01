@@ -1288,15 +1288,26 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                 continue
             idx += 1
             cand = row["candidate"]
+            summary = row.get("summary") or {}
             finding = {
                 "title": cand.get("surface", cand["candidate_id"]),
                 "date": ctx.cfg.discovery_date,
                 "status": "确认（机制级，受控验证）",
                 "summary": cand.get("hypothesis", ""),
+                "entrypoint": cand.get("entry", ""),
+                "affected_versions": cand.get("affected_versions") or [
+                    str(j.get("version")) for j in ctx.cfg.jars if j.get("version")],
+                "fixed_versions": cand.get("fixed_versions", []),
+                "source_to_sink": cand.get("source_to_sink", []),
+                "code_location": cand.get("code_location", []),
+                "scope": ctx.cfg.scope_constraints,
                 "repro": _repro_text(row),
                 "evidence": _evidence_text(row),
                 "preconditions": cand.get("preconditions") or ["无"],
                 "authorization_matrix": (row.get("summary") or {}).get("authz_results", []),
+                "negative_results": cand.get("negative_results") or summary.get("validation_issues", []),
+                "novelty": (row.get("novelty_check") or {}).get("novelty", {}),
+                "cvss": row.get("cvss", {}),
                 "impact": [
                     {"tier": "机制", "impact": cand.get("logic", "")},
                     {"tier": "端到端（条件部分）", "impact": "受控 harness 验证；未做武器化。"},

@@ -16,6 +16,7 @@ from agent.tools.authz import (assert_authz_observations, authz_env,
 from agent.tools.build import (MatrixCell, ShellMatrixRunner, ShellPOCSpec,
                                scan_source_egress, summarize_candidate)  # noqa: E402
 from agent.tools.patch_variants import analyze_patch_history  # noqa: E402
+from agent.memory.ledger import render_finding_md  # noqa: E402
 from agent.tools.conclusion import derive_conclusion  # noqa: E402
 from agent.tools.cvss import check_impact_consistency  # noqa: E402
 
@@ -171,6 +172,20 @@ class EvidenceTests(unittest.TestCase):
                 cells=[MatrixCell(version="local", safe_mode=False, authz=case)])
             results = ShellMatrixRunner(root, "demo", 1).run_manifest([spec])["A1"]
             self.assertEqual(results[0]["authz_assertion"]["status"], "passed")
+
+    def test_finding_report_contains_structured_sections(self):
+        report = render_finding_md({
+            "title": "test", "summary": "summary", "entrypoint": "/api/x",
+            "affected_versions": ["1.0"], "fixed_versions": ["1.1"],
+            "source_to_sink": [{"source": "body", "transform": "parse",
+                                "validation": "missing", "authorization": "deny",
+                                "sink": "write"}],
+            "negative_results": ["safe mode blocked"],
+            "novelty": {"verdict": "unknown"}, "cvss": {"vector": "-", "score": "-"},
+        })
+        for marker in ("范围与版本", "Source→Sink 路径", "负向结果与排除项",
+                       "Novelty 证据", "CVSS 与前置一致性"):
+            self.assertIn(marker, report)
 
     def test_real_command_marker_can_confirm_rce(self):
         cells = [{

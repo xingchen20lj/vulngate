@@ -503,15 +503,31 @@ def run_s7(ctx: StageContext, rows: List[Dict[str, Any]], summaries: Dict[str, A
             continue
         idx += 1
         sev = severities.get(cid, {})
+        novelty_record = (ctx.store.read_artifact("S5", "novelty.json") or {}).get(cid, {})
+        affected_versions = cand.get("affected_versions") or [
+            str(j.get("version")) for j in ctx.config.jars if j.get("version")]
+        negative_results = list(cand.get("negative_results") or [])
+        negative_results += ["%s" % issue for issue in
+                             (ctx.store.read_artifact("S4", "verification-matrix.json") or {}
+                              ).get(cid, {}).get("validation_issues", [])]
         finding = {
             "title": row.get("surface", cid),
             "date": ctx.config.discovery_date,
             "status": "确认（机制级，受控验证）",
             "summary": cand.get("finding_summary", row.get("surface", "")),
+            "entrypoint": cand.get("entry", ""),
+            "affected_versions": affected_versions,
+            "fixed_versions": cand.get("fixed_versions", []),
+            "source_to_sink": cand.get("source_to_sink", []),
+            "code_location": cand.get("code_location", []),
+            "scope": ctx.config.scope_constraints,
             "repro": cand.get("repro", ""),
             "evidence": "\n".join(row.get("evidence", [])) or "见 matrix-runs 输出",
             "preconditions": cand.get("preconditions", []),
             "authorization_matrix": row.get("authorization_matrix", []),
+            "negative_results": negative_results,
+            "novelty": novelty_record.get("novelty", novelty_record),
+            "cvss": sev,
             "impact": sev.get("impact", []),
             "boundary": sev.get("boundary", cand.get("boundary", "")),
             "timeline": cand.get("timeline", [{"date": ctx.config.discovery_date, "event": "发现并完成验证矩阵"}]),

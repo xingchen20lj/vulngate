@@ -262,6 +262,10 @@ Run stages in order. Persist every artifact under the target workspace:
   运行器独立断言预期与实际结果；缺少观测只能是 `unsupported`，不得确认。
   结果写入 `S4/authz-matrix.json`，越权迹象单独标记
   `boundary_violation=true`，不直接替代 G4/G5 结论。
+- **结构化发现记录（0.2.23+）**：S7 报告必须尽量填充入口、影响/修复版本、代码位置、
+  `Source→Transform→Validation→Authorization→Sink` 路径、范围、权限矩阵、负向结果、
+  Novelty 和 CVSS。路径或运行时证据缺失时，报告只能保留“待验证”语义，不得靠模板字段
+  完整性伪造确认结论。
 - **Spawn one sub-agent per candidate** (up to 3 in parallel) with a bounded task:
   write the PoC under the workspace, compile, run the matrix, and return raw cell
   outputs plus any `harness_error`. The spawn message MUST state the boundary

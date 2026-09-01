@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
+from ..tools.finding import normalize_finding
+
 
 L10N = {
     "zh": {
@@ -34,10 +36,15 @@ L10N = {
         "date": "日期：%s",
         "status": "状态：%s",
         "summary": "## 摘要",
+        "scope": "## 范围与版本",
+        "source_sink": "## Source→Sink 路径",
         "repro": "## 复现（自包含，无外链）",
         "evidence": "## 实测证据（运行输出）",
         "preconditions": "## 前置条件清单",
         "authorization": "## 权限边界验证",
+        "negative": "## 负向结果与排除项",
+        "novelty": "## Novelty 证据",
+        "cvss": "## CVSS 与前置一致性",
         "impact": "## 影响分级",
         "boundary": "## 边界声明",
         "timeline": "## 披露时间线",
@@ -69,10 +76,15 @@ L10N = {
         "date": "Date: %s",
         "status": "Status: %s",
         "summary": "## Summary",
+        "scope": "## Scope & Versions",
+        "source_sink": "## Source→Sink Path",
         "repro": "## Reproduction (self-contained, no external links)",
         "evidence": "## Runtime Evidence (run output)",
         "preconditions": "## Preconditions",
         "authorization": "## Authorization Boundary Checks",
+        "negative": "## Negative Results & Exclusions",
+        "novelty": "## Novelty Evidence",
+        "cvss": "## CVSS & Preconditions",
         "impact": "## Impact",
         "boundary": "## Boundary Statement",
         "timeline": "## Disclosure Timeline",
@@ -203,6 +215,7 @@ def render_round_summary_md(round_no: int, target: str, confirmed: List[Dict],
 def render_finding_md(finding: Dict, lang: str = "zh") -> str:
     """Self-contained submission body (no external links) + boundary + timeline."""
     t = _t(lang)
+    finding = normalize_finding(finding)
     lines = [
         t["finding_title"] % finding.get("title", ""),
         "",
@@ -212,6 +225,30 @@ def render_finding_md(finding: Dict, lang: str = "zh") -> str:
         t["summary"],
         "",
         finding.get("summary", ""),
+        "",
+        t["scope"],
+        "",
+        "- 入口：%s" % (finding.get("entrypoint") or "未填写"),
+        "- 影响版本：%s" % (", ".join(finding.get("affected_versions")) or "未填写"),
+        "- 修复版本：%s" % (", ".join(finding.get("fixed_versions")) or "未确认"),
+        "- 代码位置：%s" % ("；".join(finding.get("code_location")) or "未填写"),
+        "- 范围声明：%s" % (finding.get("scope") or "仅限本地/授权测试范围"),
+        "",
+        t["source_sink"],
+        "",
+    ]
+    if finding.get("source_to_sink"):
+        for path in finding["source_to_sink"]:
+            if isinstance(path, dict):
+                parts = [str(path.get(k, "")) for k in
+                         ("source", "transform", "validation", "authorization", "sink")
+                         if path.get(k)]
+                lines.append("- %s" % " → ".join(parts))
+            else:
+                lines.append("- %s" % path)
+    else:
+        lines.append("- 未建立结构化路径；不得据此升级为确认")
+    lines += [
         "",
         t["repro"],
         "",
@@ -242,6 +279,19 @@ def render_finding_md(finding: Dict, lang: str = "zh") -> str:
                 az.get("role", "?"), az.get("tenant_id", "?"),
                 az.get("object_id", "?"), row.get("status", "?"),
                 row.get("boundary_violation", False)))
+    lines += ["", t["negative"], ""]
+    for item in finding.get("negative_results", []):
+        lines.append("- %s" % item)
+    if not finding.get("negative_results"):
+        lines.append("- 未填写")
+    if finding.get("novelty"):
+        lines += ["", t["novelty"], ""]
+        for key, value in finding["novelty"].items():
+            lines.append("- %s：%s" % (key, value))
+    if finding.get("cvss"):
+        lines += ["", t["cvss"], ""]
+        for key, value in finding["cvss"].items():
+            lines.append("- %s：%s" % (key, value))
     lines += ["", t["impact"], ""]
     for row in finding.get("impact", []):
         lines.append("- %s：%s" % (row.get("tier", "?"), row.get("impact", "")))

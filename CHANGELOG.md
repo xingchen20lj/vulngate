@@ -5,6 +5,16 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.23] - 2026-09-02
+
+### Added
+
+- **Structured finding schema**：S7 本地报告统一记录入口、影响/修复版本、代码位置、
+  Source→Sink 路径、范围、权限矩阵、负向结果、Novelty 和 CVSS；缺少路径的报告明确
+  标记为不可据此升级确认。
+- Config-driven and autonomous report generation now populate the same fields from the
+  candidate and runtime artifacts.
+
 ## [0.2.22] - 2026-09-02
 
 ### Added
