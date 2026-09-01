@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..orchestrator.config import TargetConfig
+from .github_auth import resolve_github_token
 from .novelty import Disclosure
 
 UA = {"User-Agent": "vulngate-public-scan/1.0"}
@@ -172,7 +173,7 @@ def scan_github_advisories(repo: str, token: Optional[str] = None,
     """GitHub repo security-advisories -> disclosures."""
     if not repo:
         return [], "github-advisories: no repo"
-    token = token or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+    token = resolve_github_token(token)
     key = _cache_key("github-advisories", repo)
     cached = _read_cache(cache_dir, key, ttl=6 * 3600)
     if cached is not None:

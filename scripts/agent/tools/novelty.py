@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from ..llm.adapter import BudgetExceeded
+from .github_auth import resolve_github_token
 
 
 class RateLimited(Exception):
@@ -86,8 +87,8 @@ class NoveltyChecker:
                  token: Optional[str] = None, cache_dir: Optional[Path] = None):
         self.fixtures_dir = fixtures_dir
         self.offline = offline
-        # Prefer explicit token, then GITHUB_TOKEN / GH_TOKEN (e.g. `gh auth token`).
-        self.token = token or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+        # Prefer explicit/env credentials, then the logged-in gh keychain.
+        self.token = resolve_github_token(token)
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.last_rate_limit: Optional[dict] = None
 

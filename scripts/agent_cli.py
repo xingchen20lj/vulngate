@@ -55,6 +55,7 @@ from agent.tools.novelty import (  # noqa: E402
     NoveltyChecker,
     UpstreamRef,
 )
+from agent.tools.github_auth import github_token_source  # noqa: E402
 from agent.tools import source_evidence as se  # noqa: E402
 
 
@@ -63,13 +64,14 @@ def _out(payload: Dict[str, Any]) -> None:
 
 
 def cmd_doctor(_args: argparse.Namespace) -> int:
+    github_source = github_token_source()
     checks = {
         "python3": shutil.which("python3") is not None,
         "java": shutil.which("java") is not None,
         "javac": shutil.which("javac") is not None,
         "rg": shutil.which("rg") is not None,
         "jar": shutil.which("jar") is not None,
-        "GITHUB_TOKEN|GH_TOKEN": bool(os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")),
+        "GITHUB_TOKEN|GH_TOKEN": github_source != "missing",
     }
     if checks["java"]:
         try:
@@ -79,7 +81,7 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
         except Exception as exc:  # pragma: no cover
             checks["java_version"] = "error: %s" % exc
     missing = [k for k, v in checks.items() if v is False]
-    _out({"checks": checks, "missing": missing,
+    _out({"checks": checks, "github_token_source": github_source, "missing": missing,
           "status": "ok" if not missing else "missing-tools"})
     return 0 if not missing else 2
 

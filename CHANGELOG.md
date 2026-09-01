@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   authorized ECS staging validation, and prevented a single-request slowdown from
   being silently promoted to High impact.
 
+## [0.2.20] - 2026-09-02
+
+### Fixed
+
+- **GitHub CLI authentication discovery**：S5/`doctor` now falls back to the
+  logged-in `gh auth token` keychain when `GITHUB_TOKEN` and `GH_TOKEN` are not
+  exported. The token stays in memory and is never written to audit artifacts.
+
 ## [0.2.15] - 2026-08-20
 
 ### Added
