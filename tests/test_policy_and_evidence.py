@@ -11,7 +11,10 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from agent.sandbox.approval import ApprovalGate  # noqa: E402
 from agent.sandbox.runner import (CommandRunner, validate_global_command,
                                   validate_poc_command)  # noqa: E402
-from agent.tools.build import scan_source_egress, summarize_candidate  # noqa: E402
+from agent.tools.authz import (assert_authz_observations, authz_env,
+                               authz_jvm_props, normalize_authz_case)  # noqa: E402
+from agent.tools.build import (MatrixCell, ShellMatrixRunner, ShellPOCSpec,
+                               scan_source_egress, summarize_candidate)  # noqa: E402
 from agent.tools.conclusion import derive_conclusion  # noqa: E402
 from agent.tools.cvss import check_impact_consistency  # noqa: E402
 
@@ -58,6 +61,12 @@ class PolicyTests(unittest.TestCase):
                     operation="loopback_connect",
                 )
 
+    def test_homebrew_at_path_is_not_misread_as_remote_host(self):
+        self.assertIsNone(validate_poc_command(
+            ["bash", "/tmp/probe.sh"],
+            {"JAVA_HOME": "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"},
+            False, set()))
+
 
 class EvidenceTests(unittest.TestCase):
     def test_memory_canary_cannot_confirm_rce(self):
@@ -76,6 +85,70 @@ class EvidenceTests(unittest.TestCase):
         }, cells)
         self.assertEqual(result, "候选（待验证）")
         self.assertTrue(summary["safe_equivalent"])
+
+    def test_authz_context_is_metadata_only(self):
+        case = normalize_authz_case({
+            "case_id": "cross-tenant", "principal": "user-1", "role": "user",
+            "tenant_id": "tenant-a", "object_id": "doc-7",
+            "object_tenant_id": "tenant-b", "expected_http_codes": [403],
+            "expected_object_mutated": False, "expected_authz": "deny",
+            "token": "must-not-be-persisted",
+        })
+        self.assertNotIn("token", case)
+        self.assertNotIn("must-not-be-persisted", str(case))
+        self.assertNotIn("token", " ".join(authz_env(case)))
+        self.assertTrue(any("vulngate.authz.case" in p for p in authz_jvm_props(case)))
+
+    def test_authz_deny_contract_passes(self):
+        case = {
+            "case_id": "cross-tenant", "principal": "user-1", "role": "user",
+            "tenant_id": "tenant-a", "object_id": "doc-7",
+            "expected_http_codes": [403], "expected_object_mutated": False,
+            "expected_authz": "deny",
+        }
+        result = assert_authz_observations(case, {
+            "HTTP_CODE": "403", "OBJECT_MUTATED": "false", "AUTHZ_RESULT": "deny",
+        })
+        self.assertEqual(result["status"], "passed")
+        self.assertFalse(result["boundary_violation"])
+
+    def test_authz_cross_tenant_allow_is_boundary_violation(self):
+        case = {
+            "case_id": "cross-tenant", "principal": "user-1", "role": "user",
+            "tenant_id": "tenant-a", "object_id": "doc-7",
+            "expected_http_codes": [403], "expected_object_mutated": False,
+            "expected_authz": "deny",
+        }
+        result = assert_authz_observations(case, {
+            "HTTP_CODE": "200", "OBJECT_MUTATED": "true", "AUTHZ_RESULT": "allow",
+        })
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["boundary_violation"])
+
+    def test_authz_missing_observation_is_not_confirmed(self):
+        result = assert_authz_observations(
+            {"case_id": "admin-only", "expected_authz": "deny"}, {})
+        self.assertEqual(result["status"], "unsupported")
+        self.assertFalse(result["boundary_violation"])
+
+    def test_shell_matrix_passes_structured_authz_context(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "poc" / "demo" / "round-01" / "src"
+            src.mkdir(parents=True)
+            (src / "probe.sh").write_text(
+                "#!/bin/sh\nprintf 'HTTP_CODE=403\\n'\n"
+                "printf 'OBJECT_MUTATED=false\\n'\n"
+                "printf 'AUTHZ_RESULT=deny\\n'\n", encoding="utf-8")
+            case = {"case_id": "cross-tenant", "principal": "u1", "role": "user",
+                    "tenant_id": "a", "object_id": "o7",
+                    "expected_http_codes": [403], "expected_object_mutated": False,
+                    "expected_authz": "deny"}
+            spec = ShellPOCSpec(
+                candidate_id="A1", script="probe.sh",
+                cells=[MatrixCell(version="local", safe_mode=False, authz=case)])
+            results = ShellMatrixRunner(root, "demo", 1).run_manifest([spec])["A1"]
+            self.assertEqual(results[0]["authz_assertion"]["status"], "passed")
 
     def test_real_command_marker_can_confirm_rce(self):
         cells = [{

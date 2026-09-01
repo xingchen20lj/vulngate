@@ -1,6 +1,6 @@
 {
   "name": "vulngate",
-  "version": "0.2.20",
+  "version": "0.2.21",
   "description": "VulnGate — a Codex-native source-audit pipeline for ANY codebase: libraries (parsing/serialization), web frameworks (Spring/Struts), middleware/servers (Tomcat/Jetty), logging libraries (Log4j/Logback), expression engines, message/RPC stacks, and applications. Runs the S1→S8 audit loop (attack-surface map → candidates → source audit → PoC matrix → novelty gate → CVSS → disclosure-ready report) with hard evidence gates (G0–G5) driven by the host agent.\n\nAliases: @vulngate, @vg, 漏洞审计, 源码审计, 审计管线, vuln audit.",
   "author": {
     "name": "xingchen20lj",

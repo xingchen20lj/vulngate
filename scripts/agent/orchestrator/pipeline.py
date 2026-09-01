@@ -147,6 +147,13 @@ def _evidence_lines(summary: Dict[str, Any]) -> list:
     for a in summary.get("availability_proof", [])[:2]:
         lines.append("%s Safe=%s %s -> AVAILABILITY_PROOF concurrency=%s service_unavailable=%s" % (
             a["version"], a["safe"], a["precondition"], a["concurrency"], a["service_unavailable"]))
+    for a in summary.get("authz_results", [])[:8]:
+        az = a.get("authz", {})
+        lines.append("%s Safe=%s %s -> AUTHZ_CASE=%s principal=%s role=%s tenant=%s object=%s assertion=%s boundary_violation=%s" % (
+            a.get("version"), a.get("safe"), a.get("precondition"),
+            az.get("case_id", "?"), az.get("principal", "?"), az.get("role", "?"),
+            az.get("tenant_id", "?"), az.get("object_id", "?"),
+            a.get("status", "?"), a.get("boundary_violation", False)))
     for issue in summary.get("validation_issues", [])[:4]:
         lines.append("VALIDATION_ISSUE=%s" % issue)
     lines.append("cells_ran=%d" % summary.get("cells_ran", 0))

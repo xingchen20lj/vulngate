@@ -133,6 +133,7 @@ def _matrix_cell(c: Dict[str, Any]) -> MatrixCell:
         args=list(c.get("args", [])),
         jvm=dict(c.get("jvm", {})),
         timeout=c.get("timeout"),
+        authz=dict(c.get("authz", {})),
     )
 
 

@@ -17,6 +17,7 @@ from typing import Dict, List, Optional
 
 from ..sandbox.approval import ApprovalGate
 from ..sandbox.runner import CommandRunner, RunResult
+from .authz import assert_authz_observations, authz_env, authz_jvm_props, normalize_authz_case
 
 
 RUNNER_POLICY_VERSION = "loopback-only-v2"
@@ -76,6 +77,7 @@ class MatrixCell:
     args: List[str] = field(default_factory=list)
     jvm: Dict[str, str] = field(default_factory=dict)   # e.g. {"Xmx": "128m"}
     timeout: Optional[int] = None                        # seconds; None = runner default
+    authz: Dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -113,7 +115,8 @@ def parse_observations(stdout: str, stderr: str = "") -> Dict[str, str]:
                     "EFFECT_KIND", "EFFECT", "SIDE_EFFECT", "CANARY",
                     "PROCESS_START_CALLS", "COMMAND_EXECUTIONS",
                     "NETWORK_ATTEMPTS", "NETWORK_SUCCESS", "CONCURRENCY",
-                    "SERVICE_UNAVAILABLE", "AVAILABILITY"):
+                    "SERVICE_UNAVAILABLE", "AVAILABILITY", "OBJECT_MUTATED",
+                    "AUTHZ_RESULT", "AUTHZ_NOTE"):
             if line.startswith(key + "="):
                 obs[key] = line[len(key) + 1:]
     if "ERROR" not in obs:
@@ -188,6 +191,7 @@ class JavaMatrixRunner:
         # target-generic safe-mode property (target PoCs may read
         # -Dtarget.safeMode to implement two states)
         java_cmd += ["-Dtarget.safeMode=%s" % ("true" if cell.safe_mode else "false")]
+        java_cmd += authz_jvm_props(cell.authz)
         java_cmd += spec.module_run_opts
         java_cmd += ["-cp", cp, spec.class_name] + list(cell.args)
         try:
@@ -203,6 +207,7 @@ class JavaMatrixRunner:
                 "candidate_id": spec.candidate_id, "poc_class": spec.class_name,
                 "version": cell.version, "safe_mode": cell.safe_mode,
                 "features": cell.features, "precondition": cell.precondition,
+                "authz": normalize_authz_case(cell.authz),
                 "returncode": -3, "timed_out": False, "duration_ms": 0,
                 "observations": {"GATE_BLOCKED": "policy-denied"},
                 "harness_error": "policy_denied: %s" % exc,
@@ -210,6 +215,7 @@ class JavaMatrixRunner:
                 "runner_policy": RUNNER_POLICY_VERSION,
             }
         obs = parse_observations(result.stdout, result.stderr)
+        authz_assertion = assert_authz_observations(cell.authz, obs)
         return {
             "candidate_id": spec.candidate_id,
             "poc_class": spec.class_name,
@@ -217,10 +223,12 @@ class JavaMatrixRunner:
             "safe_mode": cell.safe_mode,
             "features": cell.features,
             "precondition": cell.precondition,
+            "authz": normalize_authz_case(cell.authz),
             "returncode": result.returncode,
             "timed_out": result.timed_out,
             "duration_ms": result.duration_ms,
             "observations": obs,
+            "authz_assertion": authz_assertion,
             "stdout": result.stdout,
             "stderr": result.stderr[-4000:],
             "cmd": " ".join(java_cmd),
@@ -242,6 +250,8 @@ class JavaMatrixRunner:
                         "candidate_id": spec.candidate_id,
                         "poc_class": spec.class_name,
                         "version": version,
+                        "authz": normalize_authz_case(next(
+                            (c.authz for c in spec.cells if c.version == version), {})),
                         "compile_error": (compiled.stderr or compiled.stdout)[-2000:],
                         "observations": {},
                         "cmd": " ".join(compiled.cmd),
@@ -326,6 +336,7 @@ class ShellMatrixRunner:
                 "precondition": cell.precondition,
                 "harness_error": "script missing: %s (stage .sh PoCs into %s)" % (script, self.src_dir),
                 "observations": {},
+                "authz_assertion": assert_authz_observations(cell.authz, {}),
                 "lang": "shell",
             }
         egress = scan_source_egress(
@@ -352,6 +363,9 @@ class ShellMatrixRunner:
             "VULNGATE_TARGET_URL": spec.urls.get(cell.version, spec.env.get("VULNGATE_TARGET_URL", "")),
         }
         env_extra.update(spec.env)
+        # Structured authorization context wins over free-form PoC env values;
+        # credentials are never part of this contract.
+        env_extra.update(authz_env(cell.authz))
         cmd = ["bash", str(script)] + list(cell.args)
         try:
             result = self.runner.run(
@@ -367,6 +381,7 @@ class ShellMatrixRunner:
                 "candidate_id": spec.candidate_id, "poc_script": spec.script,
                 "version": cell.version, "safe_mode": cell.safe_mode,
                 "features": cell.features, "precondition": cell.precondition,
+                "authz": normalize_authz_case(cell.authz),
                 "returncode": -3, "timed_out": False, "duration_ms": 0,
                 "observations": {"GATE_BLOCKED": "policy-denied"},
                 "harness_error": "policy_denied: %s" % exc,
@@ -374,6 +389,7 @@ class ShellMatrixRunner:
                 "runner_policy": RUNNER_POLICY_VERSION,
             }
         obs = parse_observations(result.stdout, result.stderr)
+        authz_assertion = assert_authz_observations(cell.authz, obs)
         return {
             "candidate_id": spec.candidate_id,
             "poc_script": spec.script,
@@ -381,10 +397,12 @@ class ShellMatrixRunner:
             "safe_mode": cell.safe_mode,
             "features": cell.features,
             "precondition": cell.precondition,
+            "authz": normalize_authz_case(cell.authz),
             "returncode": result.returncode,
             "timed_out": result.timed_out,
             "duration_ms": result.duration_ms,
             "observations": obs,
+            "authz_assertion": authz_assertion,
             "stdout": result.stdout,
             "stderr": result.stderr[-4000:],
             "cmd": " ".join(cmd),
@@ -422,6 +440,8 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
     safe_equivalent = []
     effect_evidence = []
     availability_proof = []
+    authz_results = []
+    authz_boundary_violations = []
 
     def truthy(v: str) -> bool:
         # LLM-authored PoCs may emit INSTANTIATED=false / GATE_BLOCKED=none /
@@ -430,6 +450,23 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
 
     for c in cells:
         obs = c.get("observations", {})
+        assertion = c.get("authz_assertion")
+        if assertion is None and c.get("authz"):
+            assertion = assert_authz_observations(c.get("authz"), obs)
+        if assertion and assertion.get("status") != "not_applicable":
+            item = {
+                "version": c.get("version"), "safe": c.get("safe_mode"),
+                "precondition": c.get("precondition"),
+                "authz": normalize_authz_case(c.get("authz", {})),
+                "status": assertion.get("status"),
+                "boundary_violation": bool(assertion.get("boundary_violation")),
+                "checks": assertion.get("checks", []),
+                "missing": assertion.get("missing", []),
+                "mismatch": assertion.get("mismatch", []),
+            }
+            authz_results.append(item)
+            if item["boundary_violation"]:
+                authz_boundary_violations.append(item)
         # Evidence contract: INSTANTIATED must be an FQCN (e.g.
         # a fully-qualified class name). A bare "true"/"yes" from an LLM PoC
         # ("parse returned non-null") is NOT evidence of target instantiation.
@@ -512,4 +549,6 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
         "safe_equivalent": safe_equivalent,
         "effect_evidence": effect_evidence,
         "availability_proof": availability_proof,
+        "authz_results": authz_results,
+        "authz_boundary_violations": authz_boundary_violations,
     }

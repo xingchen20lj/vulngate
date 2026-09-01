@@ -19,6 +19,8 @@ L10N = {
         "ledger_cols": ["候选面", "结论", "证据", "前置条件", "代码位置"],
         "novelty_section": "## Novelty 与定级",
         "novelty_cols": ["候选", "Novelty 判定", "理由", "增量清单", "CVSS"],
+        "authz_section": "## 权限边界验证",
+        "authz_cols": ["候选", "身份/角色", "租户", "对象", "断言", "越界"],
         "excl_title": "# 挖洞候选排除清单（%s 轮次 · %s）",
         "excl_intro": "记录本轮已排查并排除（或降级为低优先）的候选攻击面，供后续答辩/说明使用。",
         "excl_cols": ["候选面", "结论", "依据"],
@@ -35,6 +37,7 @@ L10N = {
         "repro": "## 复现（自包含，无外链）",
         "evidence": "## 实测证据（运行输出）",
         "preconditions": "## 前置条件清单",
+        "authorization": "## 权限边界验证",
         "impact": "## 影响分级",
         "boundary": "## 边界声明",
         "timeline": "## 披露时间线",
@@ -51,6 +54,8 @@ L10N = {
         "ledger_cols": ["Surface", "Conclusion", "Evidence", "Precondition", "Code Location"],
         "novelty_section": "## Novelty & Severity",
         "novelty_cols": ["Candidate", "Novelty Verdict", "Reason", "Increments", "CVSS"],
+        "authz_section": "## Authorization Boundary Checks",
+        "authz_cols": ["Candidate", "Principal/Role", "Tenant", "Object", "Assertion", "Violation"],
         "excl_title": "# Excluded Candidates (%s round · %s)",
         "excl_intro": "Candidates reviewed and excluded (or downgraded) this round, kept for later defense/discussion.",
         "excl_cols": ["Surface", "Conclusion", "Basis"],
@@ -67,6 +72,7 @@ L10N = {
         "repro": "## Reproduction (self-contained, no external links)",
         "evidence": "## Runtime Evidence (run output)",
         "preconditions": "## Preconditions",
+        "authorization": "## Authorization Boundary Checks",
         "impact": "## Impact",
         "boundary": "## Boundary Statement",
         "timeline": "## Disclosure Timeline",
@@ -133,6 +139,18 @@ def render_ledger_md(rows: List[Dict], round_no: int, target: str,
                 "<br>".join(nv.get("increments", [])) or "-",
                 "%s (%s)" % (cv.get("vector", "-"), cv.get("score", "-")) if cv else "-",
             ))
+    authz_rows = [(r.get("candidate_id", ""), a)
+                  for r in rows for a in (r.get("authorization_matrix") or [])]
+    if authz_rows:
+        lines += ["", t["authz_section"], ""]
+        acols = t["authz_cols"]
+        lines += ["| %s |" % " | ".join(acols), "|" + "---|" * len(acols)]
+        for cid, a in authz_rows:
+            az = a.get("authz", {})
+            lines.append("| %s | %s/%s | %s | %s | %s | %s |" % (
+                cid, az.get("principal", "?"), az.get("role", "?"),
+                az.get("tenant_id", "?"), az.get("object_id", "?"),
+                a.get("status", "?"), a.get("boundary_violation", False)))
     return "\n".join(lines) + "\n"
 
 
@@ -212,6 +230,18 @@ def render_finding_md(finding: Dict, lang: str = "zh") -> str:
     ]
     for p in finding.get("preconditions", []):
         lines.append("1. %s" % p)
+    matrix = finding.get("authorization_matrix") or []
+    if matrix:
+        lines += ["", t["authorization"], "",
+                  "| Case | Principal/Role | Tenant | Object | Assertion | Violation |",
+                  "|---|---|---|---|---|---|"]
+        for row in matrix:
+            az = row.get("authz", {})
+            lines.append("| %s | %s/%s | %s | %s | %s | %s |" % (
+                az.get("case_id", "?"), az.get("principal", "?"),
+                az.get("role", "?"), az.get("tenant_id", "?"),
+                az.get("object_id", "?"), row.get("status", "?"),
+                row.get("boundary_violation", False)))
     lines += ["", t["impact"], ""]
     for row in finding.get("impact", []):
         lines.append("- %s：%s" % (row.get("tier", "?"), row.get("impact", "")))

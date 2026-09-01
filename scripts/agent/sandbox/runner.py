@@ -70,10 +70,13 @@ def _hosts_in_value(value: str) -> List[str]:
         if USER_AT_HOST_RE.fullmatch(token):
             hosts.append(token.rsplit("@", 1)[1].split(":", 1)[0])
         elif "@" in token and not token.startswith("@"):
-            # scp/rsync syntax: user@host:/path
-            remote_host = token.rsplit("@", 1)[1].split(":", 1)[0]
-            if remote_host:
-                hosts.append(remote_host)
+            # scp/rsync syntax: user@host:/path.  Do not interpret ordinary
+            # filesystem paths such as /opt/openjdk@17/... as remote hosts.
+            suffix = token.rsplit("@", 1)[1]
+            if ":" in suffix:
+                remote_host = suffix.split(":", 1)[0]
+                if remote_host and "/" not in remote_host:
+                    hosts.append(remote_host)
     hosts.extend(IP_LITERAL_RE.findall(str(value)))
     return hosts
 

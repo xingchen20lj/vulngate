@@ -43,6 +43,7 @@ from ..orchestrator.gates import g3_novelty
 from ..sandbox.approval import ApprovalGate
 from ..tools.build import (JavaMatrixRunner, MatrixCell, POCSpec,
                            ShellMatrixRunner, ShellPOCSpec, summarize_candidate)
+from ..tools.authz import normalize_authz_case, normalize_authz_cases
 from ..tools.conclusion import (DENY_CLASS_HINTS, derive_conclusion,
                                 validate_confirmation)
 from ..tools.cvss import base_score, check_impact_consistency
@@ -417,6 +418,8 @@ def propose_candidates(ctx: AutoCtx, round_no: int,
             "命令注入 / 信息泄露 / 业务逻辑。"
             "前置分级必须引用路由与中间件的默认鉴权/校验：入口有 +auth 或权限中间件时，"
             'precondition_tier_hint 不得为 "0"，preconditions 必须写明所需调用方配置。'
+            "涉及授权边界时必须给出 authz_cases：匿名/普通用户/管理员、跨租户和非归属对象，"
+            "并声明 expected_http_codes、expected_object_mutated 或 expected_authz。"
         )
         input_shape_hint = 'input_shape("json"|"query"|"path"|"body"|"multipart")'
     else:
@@ -446,6 +449,8 @@ def propose_candidates(ctx: AutoCtx, round_no: int,
         'entry_feature(默认开关名或 ""), poc_class(Java 类名; Web 候选填 ""), jvm(对象,如 {"Xmx":"256m"}), '
         'target_classes(数组，预期实例化的目标类全限定名，如 ["com.example.Exploit"]；'
         '类型混淆/DoS 类候选可为 []), '
+        'authz_cases(可选数组；每项仅含 case_id、principal、role、tenant_id、object_id、object_tenant_id、'
+        'expected_http_codes、expected_object_mutated、expected_authz；禁止放 token/cookie/password), '
         'novelty_keywords(数组,上游检索关键词), cvss_vector(可选)。\n'
         "只输出 JSON：{\"candidates\":[...]}"
         % (ctx.cfg.name, versions, ctx.cfg.api_hint or "（无）",
@@ -478,6 +483,7 @@ def propose_candidates(ctx: AutoCtx, round_no: int,
         c.setdefault("jvm", {})
         c.setdefault("target_classes", [])
         c.setdefault("novelty_keywords", [])
+        c["authz_cases"] = normalize_authz_cases(c.get("authz_cases"))
     ctx.write_artifact(round_no, "S2", "candidate-matrix.json",
                        {"candidate_count": len(cands), "matrix": cands})
     return cands[: ctx.max_candidates]
@@ -646,7 +652,10 @@ def generate_shell_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
         "  EVIDENCE=<副作用证据，如会话接管后 /api/user/current 返回的管理员身份>\n"
         "  EFFECT_KIND=<真实副作用类型，如 session-marker/file-marker>\n"
         "  EFFECT=<真实副作用证据；响应状态码或猜测不能代替副作用>\n"
+        "  OBJECT_MUTATED=<true|false；仅在本地 fixture/响应可验证对象确实改变时输出>\n"
+        "  AUTHZ_RESULT=<allow|deny；根据真实服务端授权结果输出>\n"
         "  GATE_BLOCKED=<未触发的原因>\n  ERROR=<异常>\n"
+        "- 权限矩阵上下文由 VULNGATE_AUTHZ_* 环境变量提供；不要在脚本中写入或输出 token/cookie/password；\n"
         "- 只允许访问 VULNGATE_TARGET_URL 指向的主机（回环 127.0.0.1）；禁止外联；\n"
         "- 禁止解释性输出，只输出脚本本身。"
         % (cand["candidate_id"], cand.get("surface"), cand.get("entry"),
@@ -666,7 +675,8 @@ def repair_shell_poc(ctx: AutoCtx, cand: Dict[str, Any], script_text: str,
         "攻击逻辑：%s\n"
         "请只输出修正后的完整 bash 脚本：base URL 从 VULNGATE_TARGET_URL 读取，"
         "按候选逻辑真实发送请求并检查响应，保持机器可读观测行 "
-        "（HTTP_CODE= / RESP_MATCH= / EVIDENCE= / GATE_BLOCKED= / ERROR=），"
+        "（HTTP_CODE= / RESP_MATCH= / EVIDENCE= / OBJECT_MUTATED= / AUTHZ_RESULT= / GATE_BLOCKED= / ERROR=），"
+        "权限上下文从 VULNGATE_AUTHZ_* 环境变量读取，禁止写入或输出 token/cookie/password；"
         "只允许访问 127.0.0.1/localhost，无解释性文本。"
         % (cand["candidate_id"], feedback[-3000:],
            cand.get("surface", ""), cand.get("logic", ""))
@@ -697,8 +707,9 @@ def _verify_web_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
                 "conclusion": "待验证", "spec": None}
     script_file = src_dir / script_name
     script_file.write_text(script_text, encoding="utf-8")
-    cells = [MatrixCell(version=v, safe_mode=False, precondition="none")
-             for v in sorted(urls)]
+    authz_cases = normalize_authz_cases(cand.get("authz_cases")) or [{}]
+    cells = [MatrixCell(version=v, safe_mode=False, precondition="none", authz=case)
+             for v in sorted(urls) for case in authz_cases]
     spec = ShellPOCSpec(candidate_id=cid, script=script_name, cells=cells,
                         urls=urls, entry=cand.get("entry", ""),
                         input_shape=cand.get("input_shape", ""),
@@ -759,6 +770,7 @@ def build_cells(ctx: AutoCtx, cand: Dict[str, Any]) -> List[MatrixCell]:
     # preconditions = human checklist for the finding doc. Autonomous matrix
     # defaults to a single "none" cell unless cell_preconditions is set.
     preconditions = cand.get("cell_preconditions") or ["none"]
+    authz_cases = normalize_authz_cases(cand.get("authz_cases")) or [{}]
     cells = []
     features = ["SupportAutoType"] if cand.get("entry_feature") == "SupportAutoType" else []
     jvm = dict(cand.get("jvm") or {})
@@ -776,8 +788,9 @@ def build_cells(ctx: AutoCtx, cand: Dict[str, Any]) -> List[MatrixCell]:
     for v in versions:
         for safe in (True, False):
             for pre in preconditions:
-                cells.append(MatrixCell(version=v, safe_mode=safe, features=features,
-                                        precondition=pre, jvm=jvm))
+                for authz in authz_cases:
+                    cells.append(MatrixCell(version=v, safe_mode=safe, features=features,
+                                        precondition=pre, jvm=jvm, authz=authz))
     return cells
 
 
@@ -1128,7 +1141,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                            {"candidate_count": len(candidates),
                             "matrix": [{k: c.get(k) for k in
                                         ("candidate_id", "surface", "entry",
-                                         "input_shape", "logic")} for c in candidates]})
+                                         "input_shape", "logic", "authz_cases")} for c in candidates]})
         store.save_stage("S2", {"candidates": candidates})
 
     # ---- S3: static audit (resumable) ---------------------------------
@@ -1192,6 +1205,13 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             rr.pop("spec", None)   # POCSpec is not JSON-serializable
             serializable.append(rr)
         store.save_stage("S4", {"rows": serializable, "excluded": excluded})
+        ctx.write_artifact(round_no, "S4", "authz-matrix.json", [
+            {
+                "candidate_id": r["candidate"]["candidate_id"],
+                "authz_results": (r.get("summary") or {}).get("authz_results", []),
+            }
+            for r in rows if (r.get("summary") or {}).get("authz_results")
+        ])
 
     # ---- S5: Novelty (resumable) --------------------------------------
     s5 = store.load_stage("S5")
@@ -1268,6 +1288,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                 "repro": _repro_text(row),
                 "evidence": _evidence_text(row),
                 "preconditions": cand.get("preconditions") or ["无"],
+                "authorization_matrix": (row.get("summary") or {}).get("authz_results", []),
                 "impact": [
                     {"tier": "机制", "impact": cand.get("logic", "")},
                     {"tier": "端到端（条件部分）", "impact": "受控 harness 验证；未做武器化。"},
@@ -1365,6 +1386,13 @@ def _evidence_lines(row: Dict[str, Any]) -> List[str]:
         lines.append("%s SafeMode=%s %s -> AVAILABILITY_PROOF=concurrency:%s service_unavailable:%s" % (
             a.get("version"), a.get("safe"), a.get("precondition"),
             a.get("concurrency"), a.get("service_unavailable")))
+    for a in s.get("authz_results", [])[:8]:
+        az = a.get("authz", {})
+        lines.append("%s SafeMode=%s %s -> AUTHZ_CASE=%s principal=%s role=%s tenant=%s object=%s assertion=%s boundary_violation=%s" % (
+            a.get("version"), a.get("safe"), a.get("precondition"),
+            az.get("case_id", "?"), az.get("principal", "?"), az.get("role", "?"),
+            az.get("tenant_id", "?"), az.get("object_id", "?"),
+            a.get("status", "?"), a.get("boundary_violation", False)))
     for issue in s.get("validation_issues", []):
         lines.append("VALIDATION_ISSUE=" + str(issue))
     if s.get("cells_ran") is not None:

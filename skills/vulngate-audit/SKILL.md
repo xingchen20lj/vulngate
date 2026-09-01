@@ -246,6 +246,16 @@ Run stages in order. Persist every artifact under the target workspace:
   `VULNGATE_PRECONDITION` / `VULNGATE_FEATURES`。确定性运行：
   `agent_cli.py matrix --lang shell --manifest <json>`；与 Java 相同，回环强制、
   非回环 URL/IP 静态扫描拒绝。
+- **权限边界矩阵（0.2.21+）**：涉及鉴权、租户隔离或对象归属的候选必须在
+  `authz_cases` 中显式列出匿名/普通用户/管理员、跨租户和非归属对象等用例。
+  每项只允许包含 `case_id`、`principal`、`role`、`tenant_id`、`object_id`、
+  `object_tenant_id`、`expected_http_codes`、`expected_object_mutated`、
+  `expected_authz` 等元数据，禁止写入 token/cookie/password。PoC 通过
+  `VULNGATE_AUTHZ_*` 环境变量或 `-Dvulngate.authz.*` JVM 参数读取上下文，
+  并打印 `OBJECT_MUTATED=<true|false>`、`AUTHZ_RESULT=<allow|deny>`。
+  运行器独立断言预期与实际结果；缺少观测只能是 `unsupported`，不得确认。
+  结果写入 `S4/authz-matrix.json`，越权迹象单独标记
+  `boundary_violation=true`，不直接替代 G4/G5 结论。
 - **Spawn one sub-agent per candidate** (up to 3 in parallel) with a bounded task:
   write the PoC under the workspace, compile, run the matrix, and return raw cell
   outputs plus any `harness_error`. The spawn message MUST state the boundary

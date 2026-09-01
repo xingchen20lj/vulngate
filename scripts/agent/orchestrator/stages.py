@@ -16,6 +16,7 @@ from ..sandbox.runner import CommandRunner
 from ..tools import search as srch
 from ..tools.build import (JavaMatrixRunner, MatrixCell, POCSpec,
                            ShellMatrixRunner, ShellPOCSpec, summarize_candidate)
+from ..tools.authz import normalize_authz_case, normalize_authz_cases
 from ..tools.conclusion import derive_conclusion
 from ..tools.cvss import base_score, check_impact_consistency
 from ..tools.source_evidence import DANGER_PATTERNS, grep_hits
@@ -154,6 +155,7 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
             "entry": cand.get("entry", ""),
             "input_shape": cand.get("input_shape", ""),
             "logic": cand.get("logic", ""),
+            "authz_cases": normalize_authz_cases(cand.get("authz_cases")),
             "status": "candidate",
         })
     ctx.store.write_artifact("S2", "candidate-matrix.json", matrix)
@@ -181,6 +183,7 @@ def run_s3(ctx: StageContext) -> Dict[str, Any]:
 def _poc_specs(ctx: StageContext) -> List[POCSpec]:
     specs = []
     for cand in ctx.config.candidates:
+        candidate_cases = normalize_authz_cases(cand.get("authz_cases"))
         for poc in cand.get("pocs", []):
             if "script" in poc:
                 continue  # shell PoCs are collected separately
@@ -188,6 +191,8 @@ def _poc_specs(ctx: StageContext) -> List[POCSpec]:
                 version=c["version"], safe_mode=c["safe_mode"],
                 features=c.get("features", []), precondition=c.get("precondition", "none"),
                 args=c.get("args", []), jvm=c.get("jvm", {}),
+                authz=normalize_authz_case(c.get("authz") or
+                                           (candidate_cases[0] if len(candidate_cases) == 1 else {})),
             ) for c in poc.get("cells", [])]
             specs.append(POCSpec(
                 candidate_id=cand["candidate_id"],
@@ -208,6 +213,7 @@ def _poc_specs(ctx: StageContext) -> List[POCSpec]:
 def _shell_poc_specs(ctx: StageContext) -> List[ShellPOCSpec]:
     specs = []
     for cand in ctx.config.candidates:
+        candidate_cases = normalize_authz_cases(cand.get("authz_cases"))
         for poc in cand.get("pocs", []):
             if "script" not in poc:
                 continue
@@ -216,6 +222,8 @@ def _shell_poc_specs(ctx: StageContext) -> List[ShellPOCSpec]:
                 features=c.get("features", []), precondition=c.get("precondition", "none"),
                 args=c.get("args", []), jvm=c.get("jvm", {}),
                 timeout=c.get("timeout"),
+                authz=normalize_authz_case(c.get("authz") or
+                                           (candidate_cases[0] if len(candidate_cases) == 1 else {})),
             ) for c in poc.get("cells", [])]
             specs.append(ShellPOCSpec(
                 candidate_id=cand["candidate_id"],
@@ -258,12 +266,25 @@ def run_s4(ctx: StageContext) -> Dict[str, Any]:
         shell_runner = ShellMatrixRunner(ctx.workspace, ctx.target, ctx.round_no, ctx.approval)
         results.update(shell_runner.run_manifest(shell_specs))
     summaries = {}
+    authz_matrix = []
     for cand in ctx.config.candidates:
         cid = cand["candidate_id"]
         cells = results.get(cid, [])
         summaries[cid] = summarize_candidate(cells)
         summaries[cid]["cells_ran"] = len(cells)
+        for cell in cells:
+            assertion = cell.get("authz_assertion")
+            if assertion and assertion.get("status") != "not_applicable":
+                authz_matrix.append({
+                    "candidate_id": cid,
+                    "version": cell.get("version"),
+                    "safe_mode": cell.get("safe_mode"),
+                    "precondition": cell.get("precondition"),
+                    "authz": normalize_authz_case(cell.get("authz", {})),
+                    "assertion": assertion,
+                })
     ctx.store.write_artifact("S4", "verification-matrix.json", summaries)
+    ctx.store.write_artifact("S4", "authz-matrix.json", authz_matrix)
     return {"summaries": summaries}
 
 
@@ -422,6 +443,13 @@ def _evidence_from_summary(summary: Dict[str, Any], candidate: Dict[str, Any]) -
     for a in summary.get("availability_proof", [])[:2]:
         ev.append("%s SafeMode=%s %s -> AVAILABILITY_PROOF=concurrency:%s service_unavailable:%s" % (
             a["version"], a["safe"], a["precondition"], a["concurrency"], a["service_unavailable"]))
+    for a in summary.get("authz_results", [])[:8]:
+        az = a.get("authz", {})
+        ev.append("%s SafeMode=%s %s -> AUTHZ_CASE=%s principal=%s role=%s tenant=%s object=%s assertion=%s boundary_violation=%s" % (
+            a.get("version"), a.get("safe"), a.get("precondition"),
+            az.get("case_id", "?"), az.get("principal", "?"), az.get("role", "?"),
+            az.get("tenant_id", "?"), az.get("object_id", "?"),
+            a.get("status"), a.get("boundary_violation")))
     for issue in summary.get("validation_issues", [])[:4]:
         ev.append("VALIDATION_ISSUE=" + str(issue))
     ev.append("cells_ran=%d" % summary.get("cells_ran", 0))
@@ -452,6 +480,7 @@ def run_s7(ctx: StageContext, rows: List[Dict[str, Any]], summaries: Dict[str, A
             "repro": cand.get("repro", ""),
             "evidence": "\n".join(row.get("evidence", [])) or "见 matrix-runs 输出",
             "preconditions": cand.get("preconditions", []),
+            "authorization_matrix": row.get("authorization_matrix", []),
             "impact": sev.get("impact", []),
             "boundary": sev.get("boundary", cand.get("boundary", "")),
             "timeline": cand.get("timeline", [{"date": ctx.config.discovery_date, "event": "发现并完成验证矩阵"}]),
@@ -480,6 +509,7 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
             "evidence": _evidence_from_summary(summary, cand),
             "precondition_tier": cand.get("precondition_tier_hint", ""),
             "code_location": cand.get("code_location", []),
+            "authorization_matrix": summary.get("authz_results", []),
         }
         nv = novelties.get(cid, {}).get("novelty")
         if nv:

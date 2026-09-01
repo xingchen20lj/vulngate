@@ -5,6 +5,23 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.21] - 2026-09-02
+
+### Added
+
+- **Authorization boundary matrix**：候选可声明身份、角色、租户和对象归属用例；
+  S4 通过 `VULNGATE_AUTHZ_*` / `-Dvulngate.authz.*` 将非敏感上下文传给本地 PoC，
+  独立校验 `HTTP_CODE`、`OBJECT_MUTATED` 和 `AUTHZ_RESULT`，并落盘
+  `S4/authz-matrix.json`。
+- Authorization metadata is whitelisted; tokens, cookies, passwords and other
+  credential material are never retained in matrix artifacts.
+
+### Fixed
+
+- Web and Java verification cells now distinguish missing authorization evidence
+  (`unsupported`) from a failed authorization contract and flag only observed
+  deny-to-allow or ownership mutation contradictions as `boundary_violation`.
+
 ## [0.2.19] - 2026-09-01
 
 ### Added
