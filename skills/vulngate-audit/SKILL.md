@@ -275,6 +275,9 @@ Run stages in order. Persist every artifact under the target workspace:
   上限、扫描渠道、错误和权威性。任何渠道失败或离线运行都不能被描述为“未发现公开漏洞”。
 - **报告脱敏（0.2.26+）**：账本和报告渲染必须经过本地脱敏，遮蔽凭据与敏感查询参数；
   脱敏不能回写或改变原始运行判定，原始证据是否保留应遵守当前项目的本地存储策略。
+- **目标类型与组合链（0.2.27+）**：S1 根据 `target_type` 选择 Web、RPC、中间件、日志、
+  表达式或库的专项规则，并把 `Authorization→Sink` 组合路径单独列为启发式提示。专项命中
+  和组合链只负责提高候选覆盖率，仍必须经过真实源码可达性、前置条件和 S4 运行时验证。
 - **Spawn one sub-agent per candidate** (up to 3 in parallel) with a bounded task:
   write the PoC under the workspace, compile, run the matrix, and return raw cell
   outputs plus any `harness_error`. The spawn message MUST state the boundary

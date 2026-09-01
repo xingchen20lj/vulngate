@@ -5,6 +5,17 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.27] - 2026-09-02
+
+### Added
+
+- **Target-specific S1 rules**：按 `library`、`web-app`、`middleware`、`message-rpc`、
+  `logging` 和 `expression` 选择入口、授权、协议、文件流、序列化和危险 Sink 规则，
+  落盘 `S1/target-rules.json`。
+- **Composite-chain hints**：把同时包含授权边界与危险 Sink 的启发式路径单独落盘到
+  `S1/composite-chain-hints.json`，提示验证“变换后对象是否仍受授权保护”；不替代数据流
+  与运行时证据。
+
 ## [0.2.26] - 2026-09-02
 
 ### Added

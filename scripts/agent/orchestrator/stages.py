@@ -23,6 +23,7 @@ from ..tools.source_evidence import (DANGER_PATTERNS, build_source_sink_graph,
                                      grep_hits, match_source_sink_paths)
 from ..tools.patch_variants import analyze_patch_history, fix_completeness_candidate
 from ..tools.project_profile import build_project_profile
+from ..tools.target_rules import collect_target_rule_hits, composite_chain_hints
 from ..tools.novelty import (Disclosure, NoveltyChecker, UpstreamRef,
                              mechanism_audit_llm)
 from ..tools.public_scan import scan_all
@@ -141,6 +142,9 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
     gate_scan = _gate_scan(ctx)
     patch_history = analyze_patch_history(ctx.workspace, max_count=30)
     source_sink_graph = build_source_sink_graph(ctx.config.source_dirs, ctx.workspace)
+    target_rule_hits = collect_target_rule_hits(
+        ctx.config.target_type, ctx.config.source_dirs, ctx.workspace)
+    chain_hints = composite_chain_hints(source_sink_graph)
     project_profile = build_project_profile(
         ctx.config, ctx.workspace, danger_site_count=len(danger_sites),
         source_sink_path_count=len(source_sink_graph),
@@ -158,10 +162,17 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
     ])
     ctx.store.write_artifact("S1", "source-sink-graph.json", source_sink_graph)
     ctx.store.write_artifact("S1", "project-profile.json", project_profile)
+    ctx.store.write_artifact("S1", "target-rules.json", {
+        "target_type": ctx.config.target_type,
+        "hits": target_rule_hits,
+    })
+    ctx.store.write_artifact("S1", "composite-chain-hints.json", chain_hints)
     return {"jars": jars_info, "entries": entries, "gate_scan_count": len(gate_scan),
             "version_diff": version_diff, "danger_site_count": len(danger_sites),
             "security_fix_count": len(patch_history),
             "source_sink_path_count": len(source_sink_graph),
+            "target_rule_hit_count": len(target_rule_hits),
+            "composite_chain_hint_count": len(chain_hints),
             "project_profile": project_profile}
 
 
@@ -189,6 +200,7 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
             "fix_completeness": bool(cand.get("fix_completeness")),
             "patch_commit": cand.get("patch_commit", ""),
             "patch_variants": cand.get("patch_variants", []),
+            "chain_components": cand.get("chain_components", []),
         })
     ctx.store.write_artifact("S2", "candidate-matrix.json", matrix)
     return {"candidate_count": len(matrix), "matrix": matrix,

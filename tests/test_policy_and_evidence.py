@@ -20,6 +20,7 @@ from agent.tools.source_evidence import (build_source_sink_graph,
                                          match_source_sink_paths)  # noqa: E402
 from agent.tools.project_profile import build_project_profile  # noqa: E402
 from agent.tools.redaction import redact_text  # noqa: E402
+from agent.tools.target_rules import composite_chain_hints, patterns_for  # noqa: E402
 from agent.memory.ledger import render_finding_md  # noqa: E402
 from agent.tools.conclusion import derive_conclusion  # noqa: E402
 from agent.tools.cvss import check_impact_consistency  # noqa: E402
@@ -134,6 +135,17 @@ class PolicyTests(unittest.TestCase):
         self.assertNotIn("secret123", text)
         self.assertNotIn("ghp_abc123", text)
         self.assertIn("[REDACTED]", text)
+
+    def test_target_rules_and_composite_hints_are_explicitly_heuristic(self):
+        rules = patterns_for("message-rpc")
+        self.assertTrue(any(label == "serializer-boundary" for _, label in rules))
+        hints = composite_chain_hints([{
+            "source": "Api.java:1 body", "transform": ["Api.java:2 parse"],
+            "authorization": ["Api.java:3 checkPermission"],
+            "sink": "Api.java:4 writeObject",
+        }])
+        self.assertEqual(hints[0]["confidence"], "heuristic-nearby")
+        self.assertTrue(hints[0]["requires_manual_dataflow"])
 
 
 class EvidenceTests(unittest.TestCase):

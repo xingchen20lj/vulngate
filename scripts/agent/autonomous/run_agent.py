@@ -52,6 +52,7 @@ from ..tools.novelty import (Disclosure, NoveltyChecker, UpstreamRef,
                              mechanism_audit_llm)
 from ..tools.patch_variants import analyze_patch_history
 from ..tools.project_profile import build_project_profile
+from ..tools.target_rules import collect_target_rule_hits, composite_chain_hints
 from ..tools.public_scan import scan_all
 from ..tools.seeds import load_seeds, seed_reference_block
 from ..tools.source_evidence import (DANGER_PATTERNS, SOURCE_MAP_PRESETS,
@@ -454,6 +455,7 @@ def propose_candidates(ctx: AutoCtx, round_no: int,
         '类型混淆/DoS 类候选可为 []), '
         'authz_cases(可选数组；每项仅含 case_id、principal、role、tenant_id、object_id、object_tenant_id、'
         'expected_http_codes、expected_object_mutated、expected_authz；禁止放 token/cookie/password), '
+        'chain_components(可选数组；例如 ["request-body", "parser", "authorization", "file-write"]), '
         'novelty_keywords(数组,上游检索关键词), cvss_vector(可选)。\n'
         "只输出 JSON：{\"candidates\":[...]}"
         % (ctx.cfg.name, versions, ctx.cfg.api_hint or "（无）",
@@ -1118,6 +1120,9 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         ctx.cfg, ctx.root, danger_site_count=len(_danger),
         source_sink_path_count=len(ctx._source_sink_graph),
         security_fix_count=len(patch_history))
+    target_rule_hits = collect_target_rule_hits(
+        ctx.cfg.target_type, ctx.cfg.source_dirs, ctx.root)
+    chain_hints = composite_chain_hints(ctx._source_sink_graph)
     ctx.write_artifact(round_no, "S1", "security-fix-history.json", patch_history)
     ctx.write_artifact(round_no, "S1", "patch-variants.json", [
         {k: fix[k] for k in ("short_commit", "commit", "parent", "subject",
@@ -1126,6 +1131,10 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
     ])
     ctx.write_artifact(round_no, "S1", "source-sink-graph.json", ctx._source_sink_graph)
     ctx.write_artifact(round_no, "S1", "project-profile.json", ctx._project_profile)
+    ctx.write_artifact(round_no, "S1", "target-rules.json", {
+        "target_type": ctx.cfg.target_type, "hits": target_rule_hits,
+    })
+    ctx.write_artifact(round_no, "S1", "composite-chain-hints.json", chain_hints)
 
     # ---- S2: candidates (resumable) -----------------------------------
     s2 = store.load_stage("S2")
