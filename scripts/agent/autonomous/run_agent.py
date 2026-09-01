@@ -50,6 +50,7 @@ from ..tools.cvss import base_score, check_impact_consistency
 from ..tools.fuzzer import run_fuzz_for_pipeline
 from ..tools.novelty import (Disclosure, NoveltyChecker, UpstreamRef,
                              mechanism_audit_llm)
+from ..tools.patch_variants import analyze_patch_history
 from ..tools.public_scan import scan_all
 from ..tools.seeds import load_seeds, seed_reference_block
 from ..tools.source_evidence import (DANGER_PATTERNS, SOURCE_MAP_PRESETS,
@@ -1102,6 +1103,13 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         "danger_sites": _danger,
         "danger_site_count": len(_danger),
     })
+    patch_history = analyze_patch_history(ctx.root, max_count=30)
+    ctx.write_artifact(round_no, "S1", "security-fix-history.json", patch_history)
+    ctx.write_artifact(round_no, "S1", "patch-variants.json", [
+        {k: fix[k] for k in ("short_commit", "commit", "parent", "subject",
+                             "affected_paths", "variant_hints", "probe_plan")}
+        for fix in patch_history
+    ])
 
     # ---- S2: candidates (resumable) -----------------------------------
     s2 = store.load_stage("S2")

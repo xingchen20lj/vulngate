@@ -178,6 +178,12 @@ Run stages in order. Persist every artifact under the target workspace:
     字符串编解码器漏掉）；
   - 仅当该修复点与不可信输入无关（G1 不达）才允许排除，且排除必须留证据
     （源码引用 + 为什么不可达）。
+- **补丁变体结构化记录（0.2.22+）**：确定性 S1 会把最近 30 个疑似安全修复的
+  commit 记录到 `S1/security-fix-history.json`，并提取 parent、变更文件、hunk/符号、
+  安全相关增删行和变体提示到 `S1/patch-variants.json`。S2 为尚未登记的修复生成
+  `surface=fix-completeness` 候选及 `probe_plan`；这只是待验证候选，不代表补丁不完整。
+  若历史提交只是功能开发或工程性加固，仍需依据真实 diff、可达性和运行时 cell 人工
+  排除，不能把 commit 标题直接当作漏洞证据。
 - Ask the bundled CLI for source evidence:
   `python3 scripts/agent_cli.py source-map --target-dir <path> --preset <parsers|http|expression|io|exec|config|all>`
   (grep-based: entries, danger call sites, class instantiation, reflection).

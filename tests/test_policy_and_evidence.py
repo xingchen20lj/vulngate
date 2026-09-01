@@ -15,6 +15,7 @@ from agent.tools.authz import (assert_authz_observations, authz_env,
                                authz_jvm_props, normalize_authz_case)  # noqa: E402
 from agent.tools.build import (MatrixCell, ShellMatrixRunner, ShellPOCSpec,
                                scan_source_egress, summarize_candidate)  # noqa: E402
+from agent.tools.patch_variants import analyze_patch_history  # noqa: E402
 from agent.tools.conclusion import derive_conclusion  # noqa: E402
 from agent.tools.cvss import check_impact_consistency  # noqa: E402
 
@@ -66,6 +67,27 @@ class PolicyTests(unittest.TestCase):
             ["bash", "/tmp/probe.sh"],
             {"JAVA_HOME": "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"},
             False, set()))
+
+    def test_patch_history_extracts_fix_variants_read_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            subprocess = __import__("subprocess")
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "test"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=root, check=True)
+            source = root / "Parser.java"
+            source.write_text("class Parser { int readLength(int n) { return n; } }\n", encoding="utf-8")
+            subprocess.run(["git", "add", "Parser.java"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "baseline"], cwd=root, check=True)
+            source.write_text("class Parser { int readLength(int n) { if (n < 0) throw new IllegalArgumentException(); return n; } }\n", encoding="utf-8")
+            subprocess.run(["git", "add", "Parser.java"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "fix: prevent parser overflow"], cwd=root, check=True)
+            fixes = analyze_patch_history(root, max_count=30)
+            self.assertEqual(len(fixes), 1)
+            self.assertEqual(fixes[0]["affected_paths"], ["Parser.java"])
+            self.assertTrue(fixes[0]["security_lines"])
+            self.assertIn("production-path: validate the changed production path",
+                          fixes[0]["variant_hints"])
 
 
 class EvidenceTests(unittest.TestCase):

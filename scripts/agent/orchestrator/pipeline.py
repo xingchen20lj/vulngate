@@ -62,6 +62,11 @@ def run_round(ctx: StageContext, force: bool = False, only: Optional[str] = None
     state: Dict[str, Any] = {}
     for stage in stages:
         if not force and ctx.store.load_stage(stage) and stage != only:
+            cached = ctx.store.load_stage(stage)
+            if stage == "S2" and cached and cached.get("candidates"):
+                # S2 may have materialized fix-completeness candidates from
+                # S1 git history; restore them before S3-S8 resume.
+                ctx.config.candidates = cached["candidates"]
             print("[pipeline] %s already complete (resume) - skipping" % stage)
             continue
         print("[pipeline] running %s ..." % stage)

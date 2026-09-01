@@ -20,6 +20,7 @@ from ..tools.authz import normalize_authz_case, normalize_authz_cases
 from ..tools.conclusion import derive_conclusion
 from ..tools.cvss import base_score, check_impact_consistency
 from ..tools.source_evidence import DANGER_PATTERNS, grep_hits
+from ..tools.patch_variants import analyze_patch_history, fix_completeness_candidate
 from ..tools.novelty import (Disclosure, NoveltyChecker, UpstreamRef,
                              mechanism_audit_llm)
 from ..tools.public_scan import scan_all
@@ -136,17 +137,34 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
         ][:10]
         entries.append(entry)
     gate_scan = _gate_scan(ctx)
+    patch_history = analyze_patch_history(ctx.workspace, max_count=30)
     ctx.store.write_artifact("S1", "jars.json", jars_info)
     ctx.store.write_artifact("S1", "entry-inventory.json", entries)
     ctx.store.write_artifact("S1", "gate-scan.json", gate_scan)
     ctx.store.write_artifact("S1", "version-diff.json", version_diff)
     ctx.store.write_artifact("S1", "danger-call-sites.json", danger_sites)
+    ctx.store.write_artifact("S1", "security-fix-history.json", patch_history)
+    ctx.store.write_artifact("S1", "patch-variants.json", [
+        {k: fix[k] for k in ("short_commit", "commit", "parent", "subject",
+                             "affected_paths", "variant_hints", "probe_plan")}
+        for fix in patch_history
+    ])
     return {"jars": jars_info, "entries": entries, "gate_scan_count": len(gate_scan),
-            "version_diff": version_diff, "danger_site_count": len(danger_sites)}
+            "version_diff": version_diff, "danger_site_count": len(danger_sites),
+            "security_fix_count": len(patch_history)}
 
 
 def run_s2(ctx: StageContext) -> Dict[str, Any]:
     """Attack-surface matrix: entry x input shape x logic -> candidate cells."""
+    patch_history = ctx.store.read_artifact("S1", "security-fix-history.json") or []
+    existing_ids = {str(c.get("candidate_id")) for c in ctx.config.candidates}
+    generated = []
+    for fix in patch_history:
+        candidate = fix_completeness_candidate(fix)
+        if candidate["candidate_id"] not in existing_ids:
+            ctx.config.candidates.append(candidate)
+            existing_ids.add(candidate["candidate_id"])
+            generated.append(candidate)
     matrix = []
     for cand in ctx.config.candidates:
         matrix.append({
@@ -157,9 +175,14 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
             "logic": cand.get("logic", ""),
             "authz_cases": normalize_authz_cases(cand.get("authz_cases")),
             "status": "candidate",
+            "fix_completeness": bool(cand.get("fix_completeness")),
+            "patch_commit": cand.get("patch_commit", ""),
+            "patch_variants": cand.get("patch_variants", []),
         })
     ctx.store.write_artifact("S2", "candidate-matrix.json", matrix)
-    return {"candidate_count": len(matrix), "matrix": matrix}
+    return {"candidate_count": len(matrix), "matrix": matrix,
+            "generated_fix_candidates": [c["candidate_id"] for c in generated],
+            "candidates": ctx.config.candidates}
 
 
 def run_s3(ctx: StageContext) -> Dict[str, Any]:
@@ -176,6 +199,14 @@ def run_s3(ctx: StageContext) -> Dict[str, Any]:
             "g1b": g1b.__dict__,
             "code_location": cand.get("code_location", []),
         })
+    residuals = []
+    for cand in ctx.config.candidates:
+        for residual in (cand.get("residuals") or []):
+            if isinstance(residual, dict):
+                item = dict(residual)
+                item.setdefault("candidate_id", cand["candidate_id"])
+                residuals.append(item)
+    ctx.store.write_artifact("S3", "residuals.json", residuals)
     ctx.store.write_artifact("S3", "audit-notes.json", notes)
     return {"notes": notes, "gate_scan": gate_scan}
 

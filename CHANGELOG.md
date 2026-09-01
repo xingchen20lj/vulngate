@@ -5,6 +5,21 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.22] - 2026-09-02
+
+### Added
+
+- **Patch-variant analysis**：S1 对最近 30 个疑似安全修复 commit 做只读分析，记录
+  parent、变更文件、hunk/符号、安全相关增删行和兄弟路径提示；S2 可生成保守的
+  `fix-completeness` 待验证候选与 probe plan。
+- Autonomous and config-driven runs now persist the same
+  `S1/security-fix-history.json` and `S1/patch-variants.json` artifacts.
+
+### Fixed
+
+- Reduced false remote-host blocks for local macOS/Homebrew paths containing
+  `@` (for example `openjdk@17`).
+
 ## [0.2.21] - 2026-09-02
 
 ### Added
