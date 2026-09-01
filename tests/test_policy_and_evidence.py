@@ -16,6 +16,8 @@ from agent.tools.authz import (assert_authz_observations, authz_env,
 from agent.tools.build import (MatrixCell, ShellMatrixRunner, ShellPOCSpec,
                                scan_source_egress, summarize_candidate)  # noqa: E402
 from agent.tools.patch_variants import analyze_patch_history  # noqa: E402
+from agent.tools.source_evidence import (build_source_sink_graph,
+                                         match_source_sink_paths)  # noqa: E402
 from agent.memory.ledger import render_finding_md  # noqa: E402
 from agent.tools.conclusion import derive_conclusion  # noqa: E402
 from agent.tools.cvss import check_impact_consistency  # noqa: E402
@@ -89,6 +91,26 @@ class PolicyTests(unittest.TestCase):
             self.assertTrue(fixes[0]["security_lines"])
             self.assertIn("production-path: validate the changed production path",
                           fixes[0]["variant_hints"])
+
+    def test_source_sink_graph_is_heuristic_and_line_grounded(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "src"
+            src.mkdir()
+            (src / "Handler.java").write_text(
+                "class Handler {\n"
+                "  void handle(Request request) {\n"
+                "    String payload = request.body();\n"
+                "    String value = parse(payload);\n"
+                "    checkPermission(request);\n"
+                "    Runtime.getRuntime().exec(value);\n"
+                "  }\n}\n", encoding="utf-8")
+            graph = build_source_sink_graph(["src"], root)
+            self.assertTrue(graph)
+            self.assertTrue(graph[0]["requires_manual_dataflow"])
+            self.assertIn("Handler.java", graph[0]["source"])
+            self.assertTrue(match_source_sink_paths(
+                graph, {"entry": "handle", "code_location": []}))
 
 
 class EvidenceTests(unittest.TestCase):

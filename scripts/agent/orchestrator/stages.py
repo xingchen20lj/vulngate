@@ -19,7 +19,8 @@ from ..tools.build import (JavaMatrixRunner, MatrixCell, POCSpec,
 from ..tools.authz import normalize_authz_case, normalize_authz_cases
 from ..tools.conclusion import derive_conclusion
 from ..tools.cvss import base_score, check_impact_consistency
-from ..tools.source_evidence import DANGER_PATTERNS, grep_hits
+from ..tools.source_evidence import (DANGER_PATTERNS, build_source_sink_graph,
+                                     grep_hits, match_source_sink_paths)
 from ..tools.patch_variants import analyze_patch_history, fix_completeness_candidate
 from ..tools.novelty import (Disclosure, NoveltyChecker, UpstreamRef,
                              mechanism_audit_llm)
@@ -138,6 +139,7 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
         entries.append(entry)
     gate_scan = _gate_scan(ctx)
     patch_history = analyze_patch_history(ctx.workspace, max_count=30)
+    source_sink_graph = build_source_sink_graph(ctx.config.source_dirs, ctx.workspace)
     ctx.store.write_artifact("S1", "jars.json", jars_info)
     ctx.store.write_artifact("S1", "entry-inventory.json", entries)
     ctx.store.write_artifact("S1", "gate-scan.json", gate_scan)
@@ -149,9 +151,11 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
                              "affected_paths", "variant_hints", "probe_plan")}
         for fix in patch_history
     ])
+    ctx.store.write_artifact("S1", "source-sink-graph.json", source_sink_graph)
     return {"jars": jars_info, "entries": entries, "gate_scan_count": len(gate_scan),
             "version_diff": version_diff, "danger_site_count": len(danger_sites),
-            "security_fix_count": len(patch_history)}
+            "security_fix_count": len(patch_history),
+            "source_sink_path_count": len(source_sink_graph)}
 
 
 def run_s2(ctx: StageContext) -> Dict[str, Any]:
@@ -188,16 +192,22 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
 def run_s3(ctx: StageContext) -> Dict[str, Any]:
     """Static audit per candidate: gates, dead code, default reachability."""
     gate_scan = ctx.store.read_artifact("S1", "gate-scan.json") or []
+    source_sink_graph = ctx.store.read_artifact("S1", "source-sink-graph.json") or []
     notes = []
     for cand in ctx.config.candidates:
         audit = cand.get("audit_notes", {})
         g1b = g1b_gate_blocks(audit)
+        source_to_sink = cand.get("source_to_sink") or match_source_sink_paths(
+            source_sink_graph, cand)
+        if source_to_sink:
+            cand["source_to_sink"] = source_to_sink
         notes.append({
             "candidate_id": cand["candidate_id"],
             "surface": cand["surface"],
             "audit_notes": audit,
             "g1b": g1b.__dict__,
             "code_location": cand.get("code_location", []),
+            "source_to_sink": source_to_sink,
         })
     residuals = []
     for cand in ctx.config.candidates:

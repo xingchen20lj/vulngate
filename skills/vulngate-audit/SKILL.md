@@ -266,6 +266,10 @@ Run stages in order. Persist every artifact under the target workspace:
   `Source→Transform→Validation→Authorization→Sink` 路径、范围、权限矩阵、负向结果、
   Novelty 和 CVSS。路径或运行时证据缺失时，报告只能保留“待验证”语义，不得靠模板字段
   完整性伪造确认结论。
+- **Source→Sink 图（0.2.24+）**：S1 可生成 `S1/source-sink-graph.json` 作为源码定位
+  辅助，按 `Source→Transform→Validation→Authorization→Sink` 组织带行号的启发式路径。
+  这是候选发现和人工复核索引，不是静态数据流证明；S3/S4 仍必须确认真实可达性、数据
+  传播和运行时效果。
 - **Spawn one sub-agent per candidate** (up to 3 in parallel) with a bounded task:
   write the PoC under the workspace, compile, run the matrix, and return raw cell
   outputs plus any `harness_error`. The spawn message MUST state the boundary

@@ -54,7 +54,8 @@ from ..tools.patch_variants import analyze_patch_history
 from ..tools.public_scan import scan_all
 from ..tools.seeds import load_seeds, seed_reference_block
 from ..tools.source_evidence import (DANGER_PATTERNS, SOURCE_MAP_PRESETS,
-                                     candidate_block, grep_hits, surface_block)
+                                     build_source_sink_graph, candidate_block,
+                                     grep_hits, match_source_sink_paths, surface_block)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -495,10 +496,13 @@ def audit_candidate(ctx: AutoCtx, cand: Dict[str, Any]) -> Dict[str, Any]:
     srcs = ", ".join(ctx.cfg.source_dirs)
     src_block = candidate_block(cand, ctx.cfg.entry_points, ctx.cfg.source_dirs,
                                 ctx.root, max_chars=8000)
+    flow_hints = match_source_sink_paths(
+        getattr(ctx, "_source_sink_graph", []), cand)
     user = (
         "候选：%s\n入口：%s\n逻辑：%s\n\n"
         "源码目录：%s\n\n"
         "候选相关源码片段（真实源码证据，文件+行号；以这些为准，不得臆测）：\n%s\n\n"
+        "确定性 Source→Sink 路径提示（仅启发式，必须逐行复核）：\n%s\n\n"
         "%s"
         "请静态审计并输出："
         '{"gate_status":是否被安全门控阻断, "gate_kind":如 feature-gate/cache-lookup/missing-bound-check, '
@@ -506,15 +510,19 @@ def audit_candidate(ctx: AutoCtx, cand: Dict[str, Any]) -> Dict[str, Any]:
         '"code_location":[行内引用], "audit_notes":审计笔记}'
         % (cand["candidate_id"], cand.get("entry"), cand.get("logic"), srcs,
            src_block or "（未定位到源码片段，请在审计笔记中注明）",
+           json.dumps(flow_hints, ensure_ascii=False)[:6000] or "（无启发式路径）",
            _scope_block(ctx, 2500))
     )
     try:
-        return ctx.llm.ask_json(_sec_prompt(ctx), user, max_tokens=2000)
+        result = ctx.llm.ask_json(_sec_prompt(ctx), user, max_tokens=2000)
+        result.setdefault("source_to_sink", flow_hints)
+        return result
     except ValueError as exc:
         print("[S3] LLM audit failed for %s: %s" % (cand.get("candidate_id"), exc))
         return {"gate_status": "unknown", "gate_kind": "unknown",
                 "gate_location": "", "default_config_reachable": None,
-                "code_location": [], "audit_notes": "LLM audit failed; see stderr"}
+                "code_location": [], "source_to_sink": flow_hints,
+                "audit_notes": "LLM audit failed; see stderr"}
 
 
 def generate_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
@@ -1104,12 +1112,14 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         "danger_site_count": len(_danger),
     })
     patch_history = analyze_patch_history(ctx.root, max_count=30)
+    ctx._source_sink_graph = build_source_sink_graph(ctx.cfg.source_dirs, ctx.root)
     ctx.write_artifact(round_no, "S1", "security-fix-history.json", patch_history)
     ctx.write_artifact(round_no, "S1", "patch-variants.json", [
         {k: fix[k] for k in ("short_commit", "commit", "parent", "subject",
                              "affected_paths", "variant_hints", "probe_plan")}
         for fix in patch_history
     ])
+    ctx.write_artifact(round_no, "S1", "source-sink-graph.json", ctx._source_sink_graph)
 
     # ---- S2: candidates (resumable) -----------------------------------
     s2 = store.load_stage("S2")
@@ -1163,6 +1173,16 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                                       else audit_candidate(ctx, c)) for c in candidates}
         ctx.write_artifact(round_no, "S3", "audit-notes.json", audits)
         store.save_stage("S3", {"audits": audits})
+    for candidate in candidates:
+        audit = audits.get(candidate["candidate_id"], {})
+        if not candidate.get("source_to_sink"):
+            candidate["source_to_sink"] = audit.get("source_to_sink") or match_source_sink_paths(
+                getattr(ctx, "_source_sink_graph", []), candidate)
+    ctx.write_artifact(round_no, "S3", "residuals.json", [
+        dict(residual, candidate_id=candidate["candidate_id"])
+        for candidate in candidates for residual in (candidate.get("residuals") or [])
+        if isinstance(residual, dict)
+    ])
 
     # ---- S4: PoC + matrix (resumable, rows serialized w/o spec) -------
     s4 = store.load_stage("S4")

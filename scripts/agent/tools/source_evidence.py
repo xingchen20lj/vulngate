@@ -64,6 +64,21 @@ DEFAULT_SOURCE_GLOBS: List[str] = [
     "*.php", "*.rs", "*.cs", "*.c", "*.cpp", "*.h",
 ]
 
+_FLOW_PATTERNS = {
+    "source": re.compile(
+        r"(?:request|query|param|header|body|input|payload|argv|env|config|read|load|parse|decode)", re.I),
+    "transform": re.compile(
+        r"(?:parse|decode|deserialize|unmarshal|convert|normalize|resolve|interpolat|template|eval)", re.I),
+    "validation": re.compile(
+        r"(?:validat|sanitize|allow.?list|deny.?list|check|bound|limit|schema|isValid)", re.I),
+    "authorization": re.compile(
+        r"(?:auth|permission|role|tenant|owner|access|privilege)", re.I),
+    "sink": re.compile(
+        r"(?:Runtime\.getRuntime|ProcessBuilder|\.exec\s*\(|Class\.forName|loadClass|"
+        r"InitialContext|Jndi|File(?:Output|Input)Stream|openConnection|execute(?:Query|Update)?|"
+        r"write(?:Bytes|Object)?\s*\(|render\s*\()", re.I),
+}
+
 _CLASS_DECL = re.compile(
     r"^(public\s+|protected\s+|private\s+)?(final\s+|abstract\s+|sealed\s+)?"
     r"(class|interface|enum|record)\s+\w+")
@@ -160,6 +175,69 @@ def extract_class_header(path: Path, max_chars: int = 1200) -> Optional[str]:
     if len(s) > max_chars:
         s = s[:max_chars] + "\n// ... (truncated)"
     return s
+
+
+def build_source_sink_graph(source_dirs: List[str], root: Path,
+                            max_paths: int = 160) -> List[Dict[str, object]]:
+    """Build bounded heuristic paths; every edge remains manual-review only."""
+    paths: List[Dict[str, object]] = []
+    root = root.resolve()
+    for source_dir in source_dirs:
+        directory = _safe_resolve(root, source_dir)
+        if not directory or not directory.exists():
+            continue
+        for path in sorted(p for p in directory.rglob("*")
+                           if p.is_file() and p.suffix in {".java", ".kt", ".scala", ".clj", ".py", ".go", ".js", ".ts", ".rb", ".php", ".rs", ".c", ".cpp"}):
+            lines = _read_lines(path)
+            if not lines:
+                continue
+            hits = {kind: [] for kind in _FLOW_PATTERNS}
+            for number, text in enumerate(lines, 1):
+                for kind, pattern in _FLOW_PATTERNS.items():
+                    if pattern.search(text):
+                        hits[kind].append((number, text.strip()[:200]))
+            for source in hits["source"]:
+                sink = next((item for item in hits["sink"]
+                             if item[0] >= source[0] and item[0] - source[0] <= 160), None)
+                if not sink:
+                    continue
+                transforms = [item for item in hits["transform"]
+                              if source[0] <= item[0] <= sink[0]][:4]
+                validations = [item for item in hits["validation"]
+                               if source[0] <= item[0] <= sink[0]][:3]
+                authorizations = [item for item in hits["authorization"]
+                                  if source[0] <= item[0] <= sink[0]][:3]
+                rel = str(path.relative_to(root))
+                paths.append({
+                    "source": "%s:%d %s" % (rel, source[0], source[1]),
+                    "transform": ["%s:%d %s" % (rel, n, text) for n, text in transforms],
+                    "validation": ["%s:%d %s" % (rel, n, text) for n, text in validations],
+                    "authorization": ["%s:%d %s" % (rel, n, text) for n, text in authorizations],
+                    "sink": "%s:%d %s" % (rel, sink[0], sink[1]),
+                    "confidence": "heuristic-nearby",
+                    "requires_manual_dataflow": True,
+                })
+                if len(paths) >= max_paths:
+                    return paths
+    return paths
+
+
+def match_source_sink_paths(graph: List[Dict[str, object]], candidate: Dict[str, object],
+                            max_paths: int = 8) -> List[Dict[str, object]]:
+    """Select paths near candidate evidence without upgrading their confidence."""
+    needles = [str(candidate.get("entry", ""))]
+    needles += [str(x).split(":", 1)[0] for x in (candidate.get("code_location") or [])]
+    needles = [x for x in needles if x]
+    if not needles:
+        return []
+    selected = []
+    for path in graph:
+        blob = " ".join(str(path.get(key, "")) for key in ("source", "transform", "validation", "authorization", "sink"))
+        if any(needle in blob for needle in needles):
+            selected.append(path)
+        if len(selected) >= max_paths:
+            break
+    return selected
 
 
 def _budget_trim(parts: List[str], budget: int) -> List[str]:

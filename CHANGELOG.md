@@ -5,6 +5,16 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.24] - 2026-09-02
+
+### Added
+
+- **Source→Sink evidence graph**：S1 生成带 `file:line` 的启发式 Source/Transform/
+  Validation/Authorization/Sink 路径，S3 将与候选入口匹配的路径注入审计记录；所有
+  路径明确标注需要人工数据流复核，不把邻近调用当成漏洞结论。
+- Autonomous and config-driven audits now persist the same
+  `S1/source-sink-graph.json` artifact and feed its bounded hints into S3.
+
 ## [0.2.23] - 2026-09-02
 
 ### Added
