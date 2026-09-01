@@ -48,9 +48,10 @@ research honest:
   S4 PoC matrix, S5 novelty, S6 CVSS, S7 findings, S8 ledger.
 - **Bundled deterministic CLI** — `agent_cli.py` with `source-map`,
   `source-evidence`, `matrix`, `novelty`, `cvss`, `ledger`, and `doctor`.
-- **Safety first** — JNDI/LDAP/HTTP side effects are loopback-only; non-loopback
-  egress is refused at compile time; findings stay local until maintainer
-  coordination.
+- **Safety first** — local mode keeps JNDI/LDAP/HTTP side effects loopback-only
+  and refuses remote deployment. An explicitly authorized staging/ECS run may
+  opt in with a host allowlist; public listeners and third-party traffic remain
+  out of scope, and findings stay local until maintainer coordination.
 - **Works in Codex CLI and desktop app** — both share the same plugin marketplace
   and configuration.
 

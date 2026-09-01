@@ -137,7 +137,11 @@ codex plugin add vulngate@personal
 
 - PoC 副作用仅限回环（`127.0.0.1`）；矩阵运行器会拒绝编译含非回环 URL/IP 的
   源码。
-- 外部网络与端口监听必须显式批准，并写入审批日志。
+- 默认模式下运行器硬拒绝非回环外联、SSH/SCP/远程部署、云厂商 CLI 和公网监听；明确授权
+  自有 staging/ECS 时，可通过 `--authorized-staging --staging-host <主机>` 启用白名单模式。
+  所有远程动作、策略拒绝与审批决定写入日志，第三方目标和 `0.0.0.0/0` 仍不允许。
+- staging 环境准备可使用 `agent_cli.py staging-copy` / `staging-exec`；其输出只作为环境
+  准备记录，不作为漏洞证据。
 - 发现文档只在本地生成，维护者协调完成且修复公开之前，**不会**发布任何内容。
 - 本插件自身的漏洞请按 [SECURITY.zh-CN.md](SECURITY.zh-CN.md) 报告。
 

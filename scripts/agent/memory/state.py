@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -29,7 +30,7 @@ class CheckpointStore:
         data.setdefault("stage", stage)
         data["updated_at"] = datetime.now().isoformat(timespec="seconds")
         f = self.stage_file(stage)
-        f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        self._atomic_write(f, json.dumps(data, indent=2, ensure_ascii=False))
         return f
 
     def completed_stages(self) -> List[str]:
@@ -46,10 +47,18 @@ class CheckpointStore:
     def write_artifact(self, stage: str, name: str, data: Any) -> Path:
         f = self.artifact_path(stage, name)
         if isinstance(data, (dict, list)):
-            f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            content = json.dumps(data, indent=2, ensure_ascii=False)
         else:
-            f.write_text(str(data), encoding="utf-8")
+            content = str(data)
+        self._atomic_write(f, content)
         return f
+
+    @staticmethod
+    def _atomic_write(path: Path, content: str) -> None:
+        """Prevent a killed/concurrent stage from leaving truncated evidence."""
+        tmp = path.with_name(".%s.tmp.%d" % (path.name, os.getpid()))
+        tmp.write_text(content, encoding="utf-8")
+        tmp.replace(path)
 
     def read_artifact(self, stage: str, name: str) -> Any:
         f = self.artifact_path(stage, name)

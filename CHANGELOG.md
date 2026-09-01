@@ -5,6 +5,27 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.19] - 2026-09-01
+
+### Added
+
+- **S0 execution boundary**：PoC runner 默认硬拒绝 SSH/SCP/SFTP/remote rsync、
+  cloud/container CLIs、Git 写操作、非回环目标和 wildcard 公网监听；用户明确授权自有
+  staging/ECS 后，可用主机白名单显式启用受控远程 staging，策略决定仍写入审批日志。
+- **Evidence fidelity gate**：separates capability-only instantiation/JNDI traces/
+  memory canaries from real side effects. RCE confirmation now requires an explicit
+  `EFFECT_KIND` + `EFFECT` marker; `A:H` DoS requires concurrent saturation and
+  service-unavailable evidence.
+- **Process/evidence hygiene**：timeouts kill the complete process group, matrix
+  artifacts and checkpoints use atomic replacement, and ledgers reject stale
+  safe-equivalent RCE or unsupported full-outage claims.
+
+### Fixed
+
+- Prevented unapproved host-generated remote actions while preserving explicitly
+  authorized ECS staging validation, and prevented a single-request slowdown from
+  being silently promoted to High impact.
+
 ## [0.2.15] - 2026-08-20
 
 ### Added

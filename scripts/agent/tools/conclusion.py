@@ -27,6 +27,31 @@ DENY_CLASS_HINTS = (
 )
 
 
+def _requires_real_effect(cand: Dict[str, Any]) -> bool:
+    """Whether a candidate claims code/command execution rather than parsing.
+
+    Instantiation, a JNDI lookup error, or an in-memory canary proves a chain
+    stage only. It is not RCE until the claimed execution effect is observed.
+    """
+    text = " ".join(str(cand.get(k, "")) for k in
+                    ("attack_class", "surface", "logic", "hypothesis", "impact")).lower()
+    return any(marker in text for marker in (
+        "rce", "remote code execution", "code execution", "command execution",
+        "命令执行", "远程代码执行", "processbuilder", "runtime.exec", "代码执行",
+    ))
+
+
+def _has_real_effect(summary: Dict[str, Any], cand: Optional[Dict[str, Any]] = None) -> bool:
+    effects = summary.get("effect_evidence") or []
+    if not _requires_real_effect(cand or {}):
+        return bool(effects)
+    # A successful loopback connection or a parser canary is not code
+    # execution. RCE requires an actual process/command effect marker.
+    allowed = {"command-executed", "command-marker", "process-started",
+               "code-execution", "file-marker"}
+    return any(str(e.get("kind", "")).lower() in allowed for e in effects)
+
+
 def _is_runtime_evidence(error: str) -> bool:
     """Runtime evidence that justifies 确认 (data-driven, wrapper-aware).
 
@@ -124,6 +149,12 @@ def derive_conclusion(summary: Dict[str, Any],
             % (len(env_errs), "; ".join(str(e.get("error", "")) for e in env_errs[:2])))
         return "候选（待验证）"
 
+    if _requires_real_effect(cand or {}) and not _has_real_effect(summary, cand):
+        summary.setdefault("validation_issues", []).append(
+            "RCE/code-execution claim has no labelled real side-effect evidence; "
+            "instantiation/JNDI trace/memory canary is capability-only")
+        return "候选（待验证）"
+
     if summary.get("instantiated"):
         issues = validate_confirmation(cand or {}, cells or [])
         if issues:
@@ -176,6 +207,19 @@ def derive_conclusion(summary: Dict[str, Any],
             if not sizes:
                 summary["validation_issues"] = [
                     "OOM without INPUT_BYTES evidence (amplification not established)"]
+                return "候选（待验证）"
+        soe_cells = [
+            c for c in (cells or [])
+            if "StackOverflow" in str(c.get("observations", {}).get("ERROR", ""))]
+        if soe_cells:
+            sizes = []
+            for c in soe_cells:
+                ib = str(c.get("observations", {}).get("INPUT_BYTES", "")).strip()
+                if ib.isdigit():
+                    sizes.append(int(ib))
+            if not sizes:
+                summary["validation_issues"] = [
+                    "StackOverflowError without INPUT_BYTES evidence (small-input impact not established)"]
                 return "候选（待验证）"
         return "确认"
     if summary.get("gate_blocked") or errs:

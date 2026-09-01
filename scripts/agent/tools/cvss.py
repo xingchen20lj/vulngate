@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 
 AV = {"N": 0.85, "A": 0.62, "L": 0.55, "P": 0.20}
@@ -22,6 +22,8 @@ TIER_AC = {
     "0": ["L"],
     "single-feature": ["H"],
     "app-type": ["H"],
+    "application-type": ["H"],
+    "app-cooperation": ["H"],
     "extra-primitive": ["H"],
 }
 
@@ -68,3 +70,24 @@ def check_precondition_consistency(tier: str, vector: str, implicit_default_on: 
             % (m.get("AC"), tier, "/".join(allowed))
         )
     return True, "AC:%s consistent with precondition tier '%s'" % (m.get("AC"), tier)
+
+
+def check_impact_consistency(candidate: Dict[str, Any], summary: Dict[str, Any],
+                             vector: str) -> Tuple[bool, str]:
+    """G5 supplemental check: do not claim full outage from a slow request.
+
+    A single request timeout/slowdown is not CVSS Availability:H. For a DoS
+    vector using A:H, the matrix must contain machine-readable evidence of at
+    least two concurrent workers and service unavailability. This is kept
+    separate from precondition AC checking because it validates impact, not
+    exploit setup.
+    """
+    metrics = " ".join(str(candidate.get(k, "")) for k in
+                       ("attack_class", "surface", "logic", "hypothesis", "impact")).lower()
+    is_dos = any(marker in metrics for marker in
+                 ("dos", "denial of service", "拒绝服务", "资源耗尽", "availability"))
+    if parse_vector(vector).get("A") == "H" and is_dos:
+        proof = summary.get("availability_proof") or []
+        if not proof:
+            return False, "A:H requires concurrent worker saturation plus service-unavailable evidence"
+    return True, "impact evidence consistent with vector"

@@ -42,7 +42,7 @@ def _conclusions(ctx: StageContext, summaries: Dict[str, Any]) -> Dict[str, str]
         cells = ctx.store.read_artifact(
             "S4", "matrix-runs/%s/cells.json" % cid) or []
         derived = _derive_conclusion(cand, summary, cells)
-        g4 = g4_runtime(summary, intended)
+        g4 = g4_runtime(summary, intended, cand)
         if intended == "确认" and not g4.passed and derived != "确认":
             out[cid] = "候选（待验证）"  # hard G4: never claim without runtime
         elif intended == "排除":
@@ -118,18 +118,37 @@ def _ledger_rows(ctx: StageContext, summaries: Dict[str, Any],
         }
         if cid in severities:
             row["cvss"] = {"vector": severities[cid]["vector"], "score": severities[cid]["score"]}
+            if severities[cid].get("blocked"):
+                row["conclusion"] = "候选（待验证）"
+                row.setdefault("evidence", []).append(
+                    "G5_BLOCKED=" + "; ".join(severities[cid].get("g5", {}).get("evidence", [])))
         rows.append(row)
     return rows
 
 
 def _evidence_lines(summary: Dict[str, Any]) -> list:
     lines = []
+    if summary.get("harness_error"):
+        lines.append("HARNESS_ERROR=" + str(summary["harness_error"]))
+    if summary.get("compile_error"):
+        lines.append("COMPILE_ERROR=" + str(summary["compile_error"]))
     for i in summary.get("instantiated", [])[:4]:
         lines.append("%s Safe=%s %s -> INSTANTIATED %s" % (i["version"], i["safe"], i["precondition"], i["class"]))
     for e in summary.get("errors", [])[:6]:
         lines.append("%s Safe=%s %s -> ERROR %s" % (e["version"], e["safe"], e["precondition"], e["error"]))
     for g in summary.get("gate_blocked", [])[:4]:
         lines.append("%s Safe=%s %s -> GATE_BLOCKED %s" % (g["version"], g["safe"], g["precondition"], g["class"]))
+    for c in summary.get("safe_equivalent", [])[:4]:
+        lines.append("%s Safe=%s %s -> SAFE_EQUIVALENT %s %s" % (
+            c["version"], c["safe"], c["precondition"], c["kind"], c.get("detail", "")))
+    for e in summary.get("effect_evidence", [])[:4]:
+        lines.append("%s Safe=%s %s -> EFFECT_KIND=%s EFFECT=%s" % (
+            e["version"], e["safe"], e["precondition"], e["kind"], e.get("detail", "")))
+    for a in summary.get("availability_proof", [])[:2]:
+        lines.append("%s Safe=%s %s -> AVAILABILITY_PROOF concurrency=%s service_unavailable=%s" % (
+            a["version"], a["safe"], a["precondition"], a["concurrency"], a["service_unavailable"]))
+    for issue in summary.get("validation_issues", [])[:4]:
+        lines.append("VALIDATION_ISSUE=%s" % issue)
     lines.append("cells_ran=%d" % summary.get("cells_ran", 0))
     return lines
 

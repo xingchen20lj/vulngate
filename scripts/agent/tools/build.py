@@ -9,6 +9,7 @@ runtime gate consumes.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,15 +19,25 @@ from ..sandbox.approval import ApprovalGate
 from ..sandbox.runner import CommandRunner, RunResult
 
 
+RUNNER_POLICY_VERSION = "loopback-only-v2"
+
+
 LOOPBACK_OK = {"127.0.0.1", "localhost", "0.0.0.0", "[::1]", "::1"}
 
 _URL_SCHEME = re.compile(
     r"\b(?:jar|http|https|ftp|ldap|ldaps|rmi|dns|file|tcp|udp|jdbc|nhttp|"
     r"dnslog|gopher)://([^/\"'\s:]+)", re.I)
 _IP_LITERAL = re.compile(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b")
+_REMOTE_TOOL = re.compile(
+    r"\b(?:ssh|scp|sftp|telnet|rlogin|rsync|kubectl|docker|podman|aliyun|aws|gcloud)\b",
+    re.I,
+)
+_WILDCARD_BIND = re.compile(
+    r"\b(?:bind|listen)\s*\([^)]*[\"'](?:0\.0\.0\.0|::)[\"']", re.I | re.S)
 
 
-def scan_source_egress(src_text: str, src_path: str = "") -> List[str]:
+def scan_source_egress(src_text: str, src_path: str = "",
+                       allowed_hosts: Optional[set] = None) -> List[str]:
     """Static loopback-enforcement scan (baseline fix #4).
 
     Finds non-loopback network targets in PoC source before compilation.
@@ -35,18 +46,23 @@ def scan_source_egress(src_text: str, src_path: str = "") -> List[str]:
     "loopback only" prompt-level constraint into a compile-time hard gate.
     """
     bad: List[str] = []
+    if _REMOTE_TOOL.search(src_text):
+        bad.append("remote/cloud execution primitive (line ~%d)" % (
+            src_text.count("\n", 0, _REMOTE_TOOL.search(src_text).start()) + 1))
+    if _WILDCARD_BIND.search(src_text):
+        bad.append("public wildcard listener 0.0.0.0/::")
     url_hosts = set()
     for m in _URL_SCHEME.finditer(src_text):
         host = m.group(1).strip().lower().rstrip(".")
         url_hosts.add(host)
-        if host and host not in LOOPBACK_OK and host not in bad:
+        if host and host not in LOOPBACK_OK and host not in (allowed_hosts or set()) and host not in bad:
             bad.append("%s://%s (line ~%d)" % (m.group(0).split("://")[0], host,
                                                src_text.count("\n", 0, m.start()) + 1))
     for m in _IP_LITERAL.finditer(src_text):
         ip = m.group(1)
         if ip in url_hosts:
             continue  # already reported as a URL host
-        if ip not in LOOPBACK_OK and ip not in bad:
+        if ip not in LOOPBACK_OK and ip not in (allowed_hosts or set()) and ip not in bad:
             bad.append("IP %s (line ~%d)" % (ip, src_text.count("\n", 0, m.start()) + 1))
     return sorted(set(bad))
 
@@ -93,7 +109,11 @@ def parse_observations(stdout: str, stderr: str = "") -> Dict[str, str]:
                     "SHORTNAME", "PARSED", "INPUT_BYTES", "CELL_START",
                     "DEFAULT_READER_FEATURES", "SUPPORTS_AUTOTYPE",
                     "CACHE_POLLUTED", "TYPED_ARRAY", "PRE_POLLUTION_GATE",
-                    "ENV_ERROR", "HTTP_CODE", "RESP_MATCH", "EVIDENCE"):
+                    "ENV_ERROR", "HTTP_CODE", "RESP_MATCH", "EVIDENCE",
+                    "EFFECT_KIND", "EFFECT", "SIDE_EFFECT", "CANARY",
+                    "PROCESS_START_CALLS", "COMMAND_EXECUTIONS",
+                    "NETWORK_ATTEMPTS", "NETWORK_SUCCESS", "CONCURRENCY",
+                    "SERVICE_UNAVAILABLE", "AVAILABILITY"):
             if line.startswith(key + "="):
                 obs[key] = line[len(key) + 1:]
     if "ERROR" not in obs:
@@ -112,12 +132,17 @@ def parse_observations(stdout: str, stderr: str = "") -> Dict[str, str]:
 
 class JavaMatrixRunner:
     def __init__(self, workspace: Path, target: str, round_no: int,
-                 approval: Optional[ApprovalGate] = None):
+                 approval: Optional[ApprovalGate] = None,
+                 authorized_staging: bool = False,
+                 staging_hosts: Optional[List[str]] = None):
         self.workspace = workspace.resolve()
         self.target = target
         self.round_no = round_no
         self.approval = approval or ApprovalGate()
-        self.runner = CommandRunner(workspace, approval)
+        self.authorized_staging = authorized_staging
+        self.staging_hosts = {str(h).strip().lower().rstrip(".") for h in (staging_hosts or [])}
+        self.runner = CommandRunner(workspace, approval, authorized_staging=authorized_staging,
+                                    staging_hosts=list(self.staging_hosts))
         self.src_dir = workspace / "poc" / target / ("round-%02d" % round_no) / "src"
         self.out_dir = workspace / "poc" / target / ("round-%02d" % round_no) / "out"
         self.matrix_dir = workspace / "state" / target / ("round-%02d" % round_no) / "S4" / "matrix-runs"
@@ -140,7 +165,7 @@ class JavaMatrixRunner:
                 text = Path(f).read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            egress += scan_source_egress(text, f)
+            egress += scan_source_egress(text, f, self.staging_hosts if self.authorized_staging else None)
         if egress:
             detail = "PoC 源码含非回环网络目标: %s" % "; ".join(sorted(set(egress))[:6])
             self.approval.request("external_egress", detail)
@@ -165,13 +190,25 @@ class JavaMatrixRunner:
         java_cmd += ["-Dtarget.safeMode=%s" % ("true" if cell.safe_mode else "false")]
         java_cmd += spec.module_run_opts
         java_cmd += ["-cp", cp, spec.class_name] + list(cell.args)
-        result = self.runner.run(
-            java_cmd,
-            cwd=out,
-            operation="loopback_connect",
-            operation_detail="mechanism-level PoC %s (JNDI/HTTP limited to 127.0.0.1)" % spec.class_name,
-            timeout=cell.timeout,
-        )
+        try:
+            result = self.runner.run(
+                java_cmd,
+                cwd=out,
+                operation="loopback_connect",
+                operation_detail="mechanism-level PoC %s (JNDI/HTTP limited to 127.0.0.1)" % spec.class_name,
+                timeout=cell.timeout,
+            )
+        except PermissionError as exc:
+            return {
+                "candidate_id": spec.candidate_id, "poc_class": spec.class_name,
+                "version": cell.version, "safe_mode": cell.safe_mode,
+                "features": cell.features, "precondition": cell.precondition,
+                "returncode": -3, "timed_out": False, "duration_ms": 0,
+                "observations": {"GATE_BLOCKED": "policy-denied"},
+                "harness_error": "policy_denied: %s" % exc,
+                "stderr": str(exc), "cmd": " ".join(java_cmd),
+                "runner_policy": RUNNER_POLICY_VERSION,
+            }
         obs = parse_observations(result.stdout, result.stderr)
         return {
             "candidate_id": spec.candidate_id,
@@ -187,6 +224,7 @@ class JavaMatrixRunner:
             "stdout": result.stdout,
             "stderr": result.stderr[-4000:],
             "cmd": " ".join(java_cmd),
+            "runner_policy": RUNNER_POLICY_VERSION,
         }
 
     def run_manifest(self, specs: List[POCSpec], jars_by_version: Dict[str, List[Path]]) -> Dict[str, List[Dict]]:
@@ -218,7 +256,9 @@ class JavaMatrixRunner:
     def _write_cells(self, candidate_id: str, cells: List[Dict]) -> None:
         d = self.matrix_dir / candidate_id
         d.mkdir(parents=True, exist_ok=True)
-        (d / "cells.json").write_text(json.dumps(cells, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp = d / ("cells.json.tmp.%d" % os.getpid())
+        tmp.write_text(json.dumps(cells, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(d / "cells.json")
 
 
 @dataclass
@@ -253,12 +293,17 @@ class ShellMatrixRunner:
     """
 
     def __init__(self, workspace: Path, target: str, round_no: int,
-                 approval: Optional[ApprovalGate] = None):
+                 approval: Optional[ApprovalGate] = None,
+                 authorized_staging: bool = False,
+                 staging_hosts: Optional[List[str]] = None):
         self.workspace = workspace.resolve()
         self.target = target
         self.round_no = round_no
         self.approval = approval or ApprovalGate()
-        self.runner = CommandRunner(workspace, approval)
+        self.authorized_staging = authorized_staging
+        self.staging_hosts = {str(h).strip().lower().rstrip(".") for h in (staging_hosts or [])}
+        self.runner = CommandRunner(workspace, approval, authorized_staging=authorized_staging,
+                                    staging_hosts=list(self.staging_hosts))
         self.src_dir = workspace / "poc" / target / ("round-%02d" % round_no) / "src"
         self.matrix_dir = workspace / "state" / target / ("round-%02d" % round_no) / "S4" / "matrix-runs"
 
@@ -283,7 +328,9 @@ class ShellMatrixRunner:
                 "observations": {},
                 "lang": "shell",
             }
-        egress = scan_source_egress(script.read_text(encoding="utf-8", errors="replace"), str(script))
+        egress = scan_source_egress(
+            script.read_text(encoding="utf-8", errors="replace"), str(script),
+            self.staging_hosts if self.authorized_staging else None)
         if egress:
             detail = "PoC 脚本含非回环网络目标: %s" % "; ".join(sorted(set(egress))[:6])
             self.approval.request("external_egress", detail)
@@ -306,14 +353,26 @@ class ShellMatrixRunner:
         }
         env_extra.update(spec.env)
         cmd = ["bash", str(script)] + list(cell.args)
-        result = self.runner.run(
-            cmd,
-            cwd=self.src_dir,
-            env_extra=env_extra,
-            operation="loopback_connect",
-            operation_detail="shell/HTTP PoC %s (targets limited to 127.0.0.1)" % spec.candidate_id,
-            timeout=cell.timeout,
-        )
+        try:
+            result = self.runner.run(
+                cmd,
+                cwd=self.src_dir,
+                env_extra=env_extra,
+                operation="loopback_connect",
+                operation_detail="shell/HTTP PoC %s (targets limited to 127.0.0.1)" % spec.candidate_id,
+                timeout=cell.timeout,
+            )
+        except PermissionError as exc:
+            return {
+                "candidate_id": spec.candidate_id, "poc_script": spec.script,
+                "version": cell.version, "safe_mode": cell.safe_mode,
+                "features": cell.features, "precondition": cell.precondition,
+                "returncode": -3, "timed_out": False, "duration_ms": 0,
+                "observations": {"GATE_BLOCKED": "policy-denied"},
+                "harness_error": "policy_denied: %s" % exc,
+                "stderr": str(exc), "cmd": " ".join(cmd), "lang": "shell",
+                "runner_policy": RUNNER_POLICY_VERSION,
+            }
         obs = parse_observations(result.stdout, result.stderr)
         return {
             "candidate_id": spec.candidate_id,
@@ -330,12 +389,15 @@ class ShellMatrixRunner:
             "stderr": result.stderr[-4000:],
             "cmd": " ".join(cmd),
             "lang": "shell",
+            "runner_policy": RUNNER_POLICY_VERSION,
         }
 
     def _write_cells(self, candidate_id: str, cells: List[Dict]) -> None:
         d = self.matrix_dir / candidate_id
         d.mkdir(parents=True, exist_ok=True)
-        (d / "cells.json").write_text(json.dumps(cells, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp = d / ("cells.json.tmp.%d" % os.getpid())
+        tmp.write_text(json.dumps(cells, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(d / "cells.json")
 
 
 _FALSY_MARKERS = ("", "true", "yes", "ok", "none", "null", "0", "false")
@@ -357,6 +419,9 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
     leaked = []
     env_errors = []
     http_evidence = []
+    safe_equivalent = []
+    effect_evidence = []
+    availability_proof = []
 
     def truthy(v: str) -> bool:
         # LLM-authored PoCs may emit INSTANTIATED=false / GATE_BLOCKED=none /
@@ -391,6 +456,34 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
             env_errors.append({"version": c["version"], "safe": c["safe_mode"],
                                "precondition": c["precondition"],
                                "error": obs["ENV_ERROR"]})
+        effect_kind = str(obs.get("EFFECT_KIND", "")).strip().lower()
+        effect = str(obs.get("EFFECT", obs.get("SIDE_EFFECT", ""))).strip()
+        canary = str(obs.get("CANARY", "")).strip()
+        if canary or any(marker in effect_kind for marker in
+                         ("canary", "simulat", "shape-only", "in-memory")):
+            safe_equivalent.append({
+                "version": c["version"], "safe": c["safe_mode"],
+                "precondition": c["precondition"],
+                "kind": effect_kind or "memory-canary-only",
+                "detail": (canary or effect)[:200],
+            })
+        # A side effect is evidence only when the PoC labels its effect kind.
+        # This prevents a free-form EVIDENCE/Canary line from becoming RCE.
+        if effect and effect_kind and not any(marker in effect_kind for marker in
+                                             ("canary", "simulat", "shape-only", "in-memory")):
+            effect_evidence.append({
+                "version": c["version"], "safe": c["safe_mode"],
+                "precondition": c["precondition"], "kind": effect_kind,
+                "detail": effect[:200],
+            })
+        conc = str(obs.get("CONCURRENCY", "")).strip()
+        unavailable = str(obs.get("SERVICE_UNAVAILABLE", obs.get("AVAILABILITY", ""))).strip().lower()
+        if unavailable in ("true", "yes", "full-outage", "unavailable") and conc.isdigit() and int(conc) >= 2:
+            availability_proof.append({
+                "version": c["version"], "safe": c["safe_mode"],
+                "precondition": c["precondition"], "concurrency": int(conc),
+                "service_unavailable": unavailable,
+            })
         # HTTP-layer evidence (web apps): HTTP_CODE with a digit status, and/or
         # RESP_MATCH / EVIDENCE with a concrete marker (not a placeholder).
         code = str(obs.get("HTTP_CODE", "")).strip()
@@ -416,4 +509,7 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
         "leaked": leaked,
         "env_errors": env_errors,
         "http_evidence": http_evidence,
+        "safe_equivalent": safe_equivalent,
+        "effect_evidence": effect_evidence,
+        "availability_proof": availability_proof,
     }

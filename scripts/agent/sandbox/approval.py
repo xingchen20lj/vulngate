@@ -35,6 +35,8 @@ DEFAULT_RULES: List[ApprovalRule] = [
                  "LDAP/HTTP listeners for network side-effect evidence"),
     ApprovalRule("external_egress", False, "denied",
                  "No non-loopback network egress under any PoC"),
+    ApprovalRule("policy_denied", False, "hard policy violation",
+                 "The runner refused an unsafe command or scope escape"),
 ]
 
 
@@ -75,3 +77,25 @@ class ApprovalGate:
             raise PermissionError(
                 "operation '%s' denied by approval gate: %s" % (operation, detail)
             )
+
+    def record_authorized(self, operation: str, detail: str,
+                          constraint: str = "") -> None:
+        """Record an explicit per-run user authorization.
+
+        This is intentionally separate from the default rules: authorized
+        staging is opt-in and must never silently change the normal local-only
+        policy.
+        """
+        entry = {
+            "operation": operation,
+            "allowed": True,
+            "constraint": constraint or "explicit authorized staging",
+            "detail": detail,
+            "note": "user-authorized staging exception",
+        }
+        with self._lock:
+            self.decisions.append(entry)
+            if self.log_path is not None:
+                self.log_path.parent.mkdir(parents=True, exist_ok=True)
+                with self.log_path.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(entry, ensure_ascii=False) + "\n")

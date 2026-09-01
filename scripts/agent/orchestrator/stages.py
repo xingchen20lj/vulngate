@@ -17,7 +17,7 @@ from ..tools import search as srch
 from ..tools.build import (JavaMatrixRunner, MatrixCell, POCSpec,
                            ShellMatrixRunner, ShellPOCSpec, summarize_candidate)
 from ..tools.conclusion import derive_conclusion
-from ..tools.cvss import base_score
+from ..tools.cvss import base_score, check_impact_consistency
 from ..tools.source_evidence import DANGER_PATTERNS, grep_hits
 from ..tools.novelty import (Disclosure, NoveltyChecker, UpstreamRef,
                              mechanism_audit_llm)
@@ -373,6 +373,11 @@ def run_s6(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
         tier = cand.get("precondition_tier_hint", "single-feature")
         score, severity = base_score(vector)
         g5 = g5_cvss(tier, vector, cand.get("implicit_default_on", False))
+        impact_ok, impact_reason = check_impact_consistency(cand, summaries.get(cid, {}), vector)
+        if not impact_ok:
+            g5.passed = False
+            g5.evidence = (g5.evidence or []) + [impact_reason]
+            g5.verdict = "impact evidence insufficient"
         out[cid] = {
             "vector": vector,
             "score": round(score, 1),
@@ -382,12 +387,18 @@ def run_s6(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
             "impact": cand.get("impact", []),
             "boundary": cand.get("boundary", ""),
         }
+        if not g5.passed:
+            out[cid]["blocked"] = True
     ctx.store.write_artifact("S6", "severity.json", out)
     return {"severity": out}
 
 
 def _evidence_from_summary(summary: Dict[str, Any], candidate: Dict[str, Any]) -> List[str]:
     ev = []
+    if summary.get("harness_error"):
+        ev.append("HARNESS_ERROR=" + str(summary["harness_error"]))
+    if summary.get("compile_error"):
+        ev.append("COMPILE_ERROR=" + str(summary["compile_error"]))
     for i in summary.get("instantiated", [])[:4]:
         ev.append("%s SafeMode=%s %s -> INSTANTIATED %s" % (
             i["version"], i["safe"], i["precondition"], i["class"]))
@@ -402,6 +413,17 @@ def _evidence_from_summary(summary: Dict[str, Any], candidate: Dict[str, Any]) -
     for lk in summary.get("leaked", [])[:3]:
         ev.append("%s SafeMode=%s %s -> LEAKED %s" % (
             lk["version"], lk["safe"], lk["precondition"], lk["leaked"][:120]))
+    for c in summary.get("safe_equivalent", [])[:4]:
+        ev.append("%s SafeMode=%s %s -> SAFE_EQUIVALENT %s %s" % (
+            c["version"], c["safe"], c["precondition"], c["kind"], c.get("detail", "")))
+    for e in summary.get("effect_evidence", [])[:4]:
+        ev.append("%s SafeMode=%s %s -> EFFECT_KIND=%s EFFECT=%s" % (
+            e["version"], e["safe"], e["precondition"], e["kind"], e.get("detail", "")))
+    for a in summary.get("availability_proof", [])[:2]:
+        ev.append("%s SafeMode=%s %s -> AVAILABILITY_PROOF=concurrency:%s service_unavailable:%s" % (
+            a["version"], a["safe"], a["precondition"], a["concurrency"], a["service_unavailable"]))
+    for issue in summary.get("validation_issues", [])[:4]:
+        ev.append("VALIDATION_ISSUE=" + str(issue))
     ev.append("cells_ran=%d" % summary.get("cells_ran", 0))
     return ev
 
@@ -465,6 +487,10 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
                               "increments": nv.get("increments", [])}
         if cid in severities:
             row["cvss"] = {"vector": severities[cid]["vector"], "score": severities[cid]["score"]}
+            if severities[cid].get("blocked"):
+                row["conclusion"] = "候选（待验证）"
+                row["evidence"].append(
+                    "G5_BLOCKED=" + "; ".join(severities[cid].get("g5", {}).get("evidence", [])))
         rows.append(row)
         if conclusion == "排除":
             excluded.append({

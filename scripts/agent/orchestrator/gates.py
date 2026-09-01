@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from ..tools.conclusion import _is_runtime_evidence
+from ..tools.conclusion import _has_real_effect, _is_runtime_evidence, _requires_real_effect
 
 
 @dataclass
@@ -67,7 +67,8 @@ def g3_novelty(novelty: Dict[str, Any]) -> GateResult:
     return GateResult("G3", False, "unknown novelty verdict %s" % verdict, [hits])
 
 
-def g4_runtime(summary: Dict[str, Any], intended: str = "确认") -> GateResult:
+def g4_runtime(summary: Dict[str, Any], intended: str = "确认",
+                candidate: Optional[Dict[str, Any]] = None) -> GateResult:
     instantiated = summary.get("instantiated", [])
     errors = summary.get("errors", [])
     gate_blocked = summary.get("gate_blocked", [])
@@ -77,6 +78,12 @@ def g4_runtime(summary: Dict[str, Any], intended: str = "确认") -> GateResult:
             return GateResult("G4", True, "exclusion backed by runtime", ["gate_blocked=%d errors=%d" % (len(gate_blocked), len(errors))])
         return GateResult("G4", False, "exclusion without runtime evidence", [])
     if intended == "确认":
+        if _requires_real_effect(candidate or {}) and not _has_real_effect(summary, candidate):
+            return GateResult(
+                "G4", False,
+                "RCE/code-execution claim lacks real side-effect evidence",
+                ["safe-equivalent or capability-only evidence cannot confirm RCE"],
+            )
         if instantiated:
             return GateResult("G4", True, "runtime instantiation observed",
                               ["instantiated=%s" % ", ".join(i["class"] for i in instantiated)])

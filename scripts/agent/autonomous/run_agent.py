@@ -45,7 +45,7 @@ from ..tools.build import (JavaMatrixRunner, MatrixCell, POCSpec,
                            ShellMatrixRunner, ShellPOCSpec, summarize_candidate)
 from ..tools.conclusion import (DENY_CLASS_HINTS, derive_conclusion,
                                 validate_confirmation)
-from ..tools.cvss import base_score
+from ..tools.cvss import base_score, check_impact_consistency
 from ..tools.fuzzer import run_fuzz_for_pipeline
 from ..tools.novelty import (Disclosure, NoveltyChecker, UpstreamRef,
                              mechanism_audit_llm)
@@ -59,6 +59,8 @@ ROOT = Path(__file__).resolve().parents[2]
 SYSTEM_SECURITY = (
     "你是资深 Java 安全研究员，擅长反序列化/解析库的 0day 挖掘。"
     "所有结论必须基于可运行时验证的假设；严禁声称未经验证的 0day。"
+    "只能审计当前 target 目录；禁止切换产品、使用远程主机、SSH/SCP/远程 rsync、云 CLI、"
+    "公网监听或向第三方发送验证流量。无法本地回环复现的条件标记为待验证。"
     "输出严格 JSON，不要 Markdown 围栏。"
 )
 
@@ -73,6 +75,8 @@ SYSTEM_SECURITY_WEB = (
     "你是资深 Web 应用安全研究员，擅长 Web 框架的路由/鉴权、SQL 注入、SSRF、"
     "模板注入、命令注入、信息泄露与业务逻辑漏洞挖掘。"
     "所有结论必须基于可运行时验证的假设；严禁声称未经验证的 0day。"
+    "只能审计当前 target 目录；禁止切换产品、使用远程主机、SSH/SCP/远程 rsync、云 CLI、"
+    "公网监听或向第三方发送验证流量。无法本地回环复现的条件标记为待验证。"
     "输出严格 JSON，不要 Markdown 围栏。"
 )
 
@@ -85,7 +89,8 @@ SYSTEM_POC_WEB = (
     "GATE_BLOCKED=<原因>\nERROR=<异常>\n"
     "目标 base URL 必须从环境变量 VULNGATE_TARGET_URL 读取（脚本内使用该变量拼接路径，"
     "禁止硬编码其他主机；网络目标只允许 127.0.0.1/localhost）。"
-    "允许使用 curl 与 python3。禁止输出解释性文本。"
+    "允许使用 curl 与 python3，但只能访问明确的回环 URL；禁止 SSH/SCP/远程 rsync、云 CLI、"
+    "公网监听和部署。禁止输出解释性文本。"
 )
 
 
@@ -532,6 +537,9 @@ def generate_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
         "NETWORK=<带 :// 的真实外联地址，如 ldap://127.0.0.1:1389>\n"
         "LEAKED=<实际泄露/回显的内容片段或文件路径，如 /etc/passwd 首行或 SSRF 响应特征>"
         "（只有真实把敏感内容带出到 stdout 时才输出；解析成功不算泄露，禁止输出该行）\n"
+        "EFFECT_KIND=<真实副作用类型：command-executed/process-started/command-marker/file-marker>\n"
+        "EFFECT=<只有实际调用副作用后才输出的具体证据；Canary.mark 或对象实例化不得填写>\n"
+        "CANARY=<仅内存 canary/能力链验证时填写，不能与 RCE 确认等同>\n"
         "PARSED=...\n"
         "禁止真实外联网络（只能尝试 127.0.0.1）。只输出 Java 源码，无 Markdown 围栏。"
         "输出不超过 200 行，只允许 ASCII 字符（禁止全角中文标点），禁止解释性文本。"
@@ -636,6 +644,8 @@ def generate_shell_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
         "- 必须打印机器可读观测行（基于真实运行结果）：\n"
         "  HTTP_CODE=<状态码>\n  RESP_MATCH=<响应中的特征串>\n"
         "  EVIDENCE=<副作用证据，如会话接管后 /api/user/current 返回的管理员身份>\n"
+        "  EFFECT_KIND=<真实副作用类型，如 session-marker/file-marker>\n"
+        "  EFFECT=<真实副作用证据；响应状态码或猜测不能代替副作用>\n"
         "  GATE_BLOCKED=<未触发的原因>\n  ERROR=<异常>\n"
         "- 只允许访问 VULNGATE_TARGET_URL 指向的主机（回环 127.0.0.1）；禁止外联；\n"
         "- 禁止解释性输出，只输出脚本本身。"
@@ -1208,6 +1218,11 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             vector = row["candidate"].get("cvss_vector") or cvss_for_tier(tier)
             score, severity = base_score(vector)
             g5_ok, g5_reason = check_precondition_consistency(tier, vector)
+            impact_ok, impact_reason = check_impact_consistency(
+                row["candidate"], row.get("summary", {}), vector)
+            if not impact_ok:
+                g5_ok = False
+                g5_reason = g5_reason + "; " + impact_reason
             row["cvss"] = {"vector": vector, "score": score,
                            "severity": severity, "tier": tier,
                            "g5": {"passed": g5_ok, "reason": g5_reason}}
@@ -1322,6 +1337,10 @@ def _evidence_text(row: Dict[str, Any]) -> str:
 def _evidence_lines(row: Dict[str, Any]) -> List[str]:
     s = row.get("summary", {})
     lines = []
+    if s.get("harness_error"):
+        lines.append("HARNESS_ERROR=" + str(s["harness_error"]))
+    if s.get("compile_error"):
+        lines.append("COMPILE_ERROR=" + str(s["compile_error"]))
     for e in s.get("errors", []):
         lines.append("%s SafeMode=%s %s -> ERROR %s"
                      % (e.get("version"), e.get("safe"), e.get("precondition"), e.get("error")))
@@ -1334,6 +1353,20 @@ def _evidence_lines(row: Dict[str, Any]) -> List[str]:
         lines.append("%s SafeMode=%s %s -> LEAKED %s"
                      % (lk.get("version"), lk.get("safe"), lk.get("precondition"),
                         str(lk.get("leaked"))[:120]))
+    for c in s.get("safe_equivalent", []):
+        lines.append("%s SafeMode=%s %s -> SAFE_EQUIVALENT %s %s" % (
+            c.get("version"), c.get("safe"), c.get("precondition"),
+            c.get("kind"), c.get("detail", "")))
+    for e in s.get("effect_evidence", []):
+        lines.append("%s SafeMode=%s %s -> EFFECT_KIND=%s EFFECT=%s" % (
+            e.get("version"), e.get("safe"), e.get("precondition"),
+            e.get("kind"), e.get("detail", "")))
+    for a in s.get("availability_proof", []):
+        lines.append("%s SafeMode=%s %s -> AVAILABILITY_PROOF=concurrency:%s service_unavailable:%s" % (
+            a.get("version"), a.get("safe"), a.get("precondition"),
+            a.get("concurrency"), a.get("service_unavailable")))
+    for issue in s.get("validation_issues", []):
+        lines.append("VALIDATION_ISSUE=" + str(issue))
     if s.get("cells_ran") is not None:
         lines.append("cells_ran=%d" % s["cells_ran"])
     return lines
