@@ -5,6 +5,13 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.26] - 2026-09-02
+
+### Added
+
+- **Report redaction**：账本与本地发现报告渲染时遮蔽 Bearer/Basic、cookie、password、
+  token、API key、常见 GitHub token 和敏感查询参数；脱敏只影响展示，不参与结论判定。
+
 ## [0.2.25] - 2026-09-02
 
 ### Added

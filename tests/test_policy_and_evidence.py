@@ -19,6 +19,7 @@ from agent.tools.patch_variants import analyze_patch_history  # noqa: E402
 from agent.tools.source_evidence import (build_source_sink_graph,
                                          match_source_sink_paths)  # noqa: E402
 from agent.tools.project_profile import build_project_profile  # noqa: E402
+from agent.tools.redaction import redact_text  # noqa: E402
 from agent.memory.ledger import render_finding_md  # noqa: E402
 from agent.tools.conclusion import derive_conclusion  # noqa: E402
 from agent.tools.cvss import check_impact_consistency  # noqa: E402
@@ -126,6 +127,13 @@ class PolicyTests(unittest.TestCase):
                                        security_fix_count=3)
         self.assertGreaterEqual(profile["score"], 30)
         self.assertIn("不是漏洞存在概率", profile["meaning"])
+
+    def test_report_redaction_masks_common_credentials(self):
+        text = redact_text("Authorization: Bearer abc.def; token=secret123; ghp_abc123")
+        self.assertNotIn("abc.def", text)
+        self.assertNotIn("secret123", text)
+        self.assertNotIn("ghp_abc123", text)
+        self.assertIn("[REDACTED]", text)
 
 
 class EvidenceTests(unittest.TestCase):

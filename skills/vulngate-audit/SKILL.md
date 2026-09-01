@@ -273,6 +273,8 @@ Run stages in order. Persist every artifact under the target workspace:
 - **项目价值与 Novelty 覆盖（0.2.25+）**：S1 的 `project-profile.json` 仅用于比较
   审计优先级，不是漏洞概率；S5 的 `novelty-coverage.json` 必须记录实际关键词、结果
   上限、扫描渠道、错误和权威性。任何渠道失败或离线运行都不能被描述为“未发现公开漏洞”。
+- **报告脱敏（0.2.26+）**：账本和报告渲染必须经过本地脱敏，遮蔽凭据与敏感查询参数；
+  脱敏不能回写或改变原始运行判定，原始证据是否保留应遵守当前项目的本地存储策略。
 - **Spawn one sub-agent per candidate** (up to 3 in parallel) with a bounded task:
   write the PoC under the workspace, compile, run the matrix, and return raw cell
   outputs plus any `harness_error`. The spawn message MUST state the boundary

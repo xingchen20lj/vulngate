@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from ..tools.finding import normalize_finding
+from ..tools.redaction import redact_text
 
 
 L10N = {
@@ -105,8 +106,8 @@ def _t(lang: str) -> Dict[str, str]:
 def _fmt_evidence(row: Dict) -> str:
     ev = row.get("evidence", [])
     if isinstance(ev, list):
-        return "<br>".join(str(e) for e in ev)
-    return str(ev)
+        return "<br>".join(redact_text(e) for e in ev)
+    return redact_text(ev)
 
 
 def render_ledger_md(rows: List[Dict], round_no: int, target: str,
@@ -224,7 +225,7 @@ def render_finding_md(finding: Dict, lang: str = "zh") -> str:
         "",
         t["summary"],
         "",
-        finding.get("summary", ""),
+        redact_text(finding.get("summary", "")),
         "",
         t["scope"],
         "",
@@ -253,13 +254,13 @@ def render_finding_md(finding: Dict, lang: str = "zh") -> str:
         t["repro"],
         "",
         "```",
-        finding.get("repro", ""),
+        redact_text(finding.get("repro", "")),
         "```",
         "",
         t["evidence"],
         "",
         "```",
-        finding.get("evidence", ""),
+        redact_text(finding.get("evidence", "")),
         "```",
         "",
         t["preconditions"],
