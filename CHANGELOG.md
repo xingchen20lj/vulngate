@@ -5,6 +5,13 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.28] - 2026-09-02
+
+### Fixed
+
+- **Novelty query integrity**：GitHub 普通网络错误不再静默退化为空结果；S5 记录
+  `query_errors` 并将查询标记为不具备权威性，避免把“查询失败”误报成“没有公开记录”。
+
 ## [0.2.27] - 2026-09-02
 
 ### Added

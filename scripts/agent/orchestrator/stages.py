@@ -367,6 +367,11 @@ def run_s5(ctx: StageContext) -> Dict[str, Any]:
         "public_scan_channels": pub.get("channels", {}),
         "public_scan_errors": pub.get("errors", []),
         "public_disclosure_count": len(pub.get("disclosures", [])),
+        "configured_public_channels": bool(
+            (ctx.config.public_scan or {}).get("maven_package")
+            or (ctx.config.public_scan or {}).get("nvd_keywords")
+            or (ctx.config.public_scan or {}).get("advisories_repo")
+            or ctx.config.upstream_repo),
         "candidates": [],
     }
     for cand in ctx.config.candidates:
@@ -420,7 +425,7 @@ def run_s5(ctx: StageContext) -> Dict[str, Any]:
         # Baseline #7: when any public-info channel failed (or the run is
         # offline / rate-limited), absence of a record is NOT a 0day claim.
         query_failed = bool(pub.get("errors")) or checker.last_rate_limit is not None \
-            or ctx.offline
+            or bool(checker.query_errors) or ctx.offline
         nv = checker.evaluate(refs, disclosures, ctx.config.discovery_date,
                               increments_hint=cand.get("increments_hint", []),
                               query_failed=query_failed)
@@ -451,11 +456,19 @@ def run_s5(ctx: StageContext) -> Dict[str, Any]:
                 }
     if checker.last_rate_limit:
         results["api_rate_limit"] = checker.last_rate_limit
+    if checker.query_errors:
+        results["api_query_errors"] = sorted(set(checker.query_errors))
     results["public_scan"] = {
         "channels": pub["channels"], "errors": pub["errors"],
         "disclosure_ids": [d.id for d in pub["disclosures"]],
     }
-    coverage["authoritative"] = not bool(pub.get("errors")) and not ctx.offline
+    coverage["github_query_errors"] = sorted(set(checker.query_errors))
+    coverage["authoritative"] = bool(coverage["configured_public_channels"])
+    coverage["authoritative"] = (coverage["authoritative"]
+                                  and not bool(pub.get("errors"))
+                                  and not checker.query_errors
+                                  and checker.last_rate_limit is None
+                                  and not ctx.offline)
     ctx.store.write_artifact("S5", "novelty-coverage.json", coverage)
     ctx.store.write_artifact("S5", "novelty.json", results)
     return {"novelty": results}

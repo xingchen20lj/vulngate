@@ -21,6 +21,7 @@ from agent.tools.source_evidence import (build_source_sink_graph,
 from agent.tools.project_profile import build_project_profile  # noqa: E402
 from agent.tools.redaction import redact_text  # noqa: E402
 from agent.tools.target_rules import composite_chain_hints, patterns_for  # noqa: E402
+from agent.tools.novelty import NoveltyChecker  # noqa: E402
 from agent.memory.ledger import render_finding_md  # noqa: E402
 from agent.tools.conclusion import derive_conclusion  # noqa: E402
 from agent.tools.cvss import check_impact_consistency  # noqa: E402
@@ -146,6 +147,14 @@ class PolicyTests(unittest.TestCase):
         }])
         self.assertEqual(hints[0]["confidence"], "heuristic-nearby")
         self.assertTrue(hints[0]["requires_manual_dataflow"])
+
+    def test_novelty_network_error_is_recorded(self):
+        import urllib.error
+        checker = NoveltyChecker(offline=False)
+        checker._api = lambda _path: (_ for _ in ()).throw(
+            urllib.error.URLError("offline"))
+        self.assertEqual(checker.search("org/repo", "security"), [])
+        self.assertTrue(checker.query_errors)
 
 
 class EvidenceTests(unittest.TestCase):

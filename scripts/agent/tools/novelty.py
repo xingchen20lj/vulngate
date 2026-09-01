@@ -91,6 +91,7 @@ class NoveltyChecker:
         self.token = resolve_github_token(token)
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.last_rate_limit: Optional[dict] = None
+        self.query_errors: List[str] = []
 
     # ---- live API -------------------------------------------------------
     def _api(self, path: str, ttl_seconds: int = 6 * 3600) -> dict:
@@ -218,6 +219,7 @@ class NoveltyChecker:
                     body=data.get("body", ""),
                 )
             except (RateLimited, urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+                self.query_errors.append("fetch_ref:%s" % type(exc).__name__)
                 self._warn_fallback(exc)
         return self._fixture_ref(repo, number, kind)
 
@@ -229,6 +231,7 @@ class NoveltyChecker:
                 data = self._api("/search/issues?q=" + urllib.parse.quote(q))
                 return data.get("items", [])
             except (RateLimited, urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+                self.query_errors.append("search:%s" % type(exc).__name__)
                 self._warn_fallback(exc)
         return self._fixture_search(repo, query)
 

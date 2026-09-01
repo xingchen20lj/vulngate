@@ -278,6 +278,8 @@ Run stages in order. Persist every artifact under the target workspace:
 - **目标类型与组合链（0.2.27+）**：S1 根据 `target_type` 选择 Web、RPC、中间件、日志、
   表达式或库的专项规则，并把 `Authorization→Sink` 组合路径单独列为启发式提示。专项命中
   和组合链只负责提高候选覆盖率，仍必须经过真实源码可达性、前置条件和 S4 运行时验证。
+- **Novelty 查询完整性（0.2.28+）**：GitHub 查询的网络错误、限流和离线状态都必须
+  进入覆盖记录；回退到空 fixture 不能视为“没有公开记录”，也不能支持 0day 结论。
 - **Spawn one sub-agent per candidate** (up to 3 in parallel) with a bounded task:
   write the PoC under the workspace, compile, run the matrix, and return raw cell
   outputs plus any `harness_error`. The spawn message MUST state the boundary
