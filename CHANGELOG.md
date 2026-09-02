@@ -5,6 +5,24 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-09-03
+
+This is the first formal VulnGate release. It promotes the previously validated
+0.2.x development line to a stable plugin release.
+
+### Included
+
+- Complete S1→S8 source-audit workflow for libraries, frameworks, middleware,
+  logging libraries, expression engines, message/RPC stacks, and applications.
+- Runtime-backed S4 PoC matrix evidence with version, SafeMode, precondition,
+  authorization, and per-cell JDK tracking.
+- Isolated PoC execution environments with explicit network and side-effect
+  boundaries.
+- Novelty-query provenance, retry/error recording, upstream issue/PR metadata,
+  CVSS consistency checks, and disclosure-ready ledger/report output.
+- Regression coverage for matrix convergence, runtime selection, environment
+  isolation, novelty failures, and conclusion parsing.
+
 ## [0.2.29] - 2026-09-03
 
 ### Fixed
