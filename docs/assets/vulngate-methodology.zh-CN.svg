@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1060" viewBox="0 0 1800 1060">
+<defs>
+<style>
+.bg{fill:#f8fafc}
+.title{font:700 44px 'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',Arial,sans-serif;fill:#0f172a}
+.sub{font:500 21px 'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',Arial,sans-serif;fill:#475569}
+.h2{font:700 24px 'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',Arial,sans-serif;fill:#0f172a}
+.h3{font:700 18px 'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',Arial,sans-serif;fill:#0f172a}
+.body{font:500 15px 'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',Arial,sans-serif;fill:#334155}
+.small{font:500 13px 'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',Arial,sans-serif;fill:#64748b}
+.tiny{font:600 11.5px 'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',Arial,sans-serif;fill:#475569}
+.claim{font:700 15.5px 'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',Arial,sans-serif;fill:#0f172a}
+.pill{font:600 12.5px 'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',Arial,sans-serif;fill:#334155}
+.arrow{stroke:#64748b;stroke-width:1.35;fill:none;marker-end:url(#arrowhead);stroke-linecap:round}
+</style>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="8.4" refY="5" markerWidth="3.4" markerHeight="3.4" orient="auto">
+<path d="M0 0 L10 5 L0 10 z" fill="#64748b"/>
+</marker>
+<linearGradient id="brand" x1="0" x2="1"><stop offset="0" stop-color="#0f766e"/><stop offset="1" stop-color="#2563eb"/></linearGradient>
+</defs>
+<rect width="1800" height="1060" rx="26" class="bg"/>
+<text x="70" y="68" class="title">VulnGate 方法论架构</text>
+<text x="70" y="104" class="sub">面向 AI 安全智能体的证据闸门式漏洞研究与结论治理</text>
+<rect x="70" y="128" width="1660" height="62" rx="18" fill="url(#brand)"/>
+<text x="900" y="168" class="h2" text-anchor="middle" style="fill:#fff">模型可以提出漏洞，但证据决定这个结论能够走多远。</text>
+
+<rect x="70" y="220" width="430" height="120" rx="18" fill="#fff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="95" y="254" class="h2">宿主 Agent（LLM）</text>
+<text x="95" y="284" class="body"><tspan x="95">开放式推理</tspan><tspan x="95" dy="23">攻击路径 · 漏洞假设 · 证据解释</tspan><tspan x="95" dy="23">可提出结论，但不能自行授权升级。</tspan></text>
+<rect x="540" y="220" width="1190" height="120" rx="18" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="565" y="254" class="h2">确定性证据层</text>
+<text x="565" y="284" class="body"><tspan x="565">源码事实 · PoC 执行 · 公开信息覆盖 · CVSS 一致性 · Checkpoint / Ledger</tspan><tspan x="565" dy="27">可重复组件保留证据语义，并约束结论升级。</tspan></text>
+<path d="M500 280 L540 280" class="arrow"/>
+
+<text x="70" y="392" class="h2">S1–S8 研究生命周期</text>
+<rect x="70" y="418" width="188" height="132" rx="15" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/><text x="164" y="448" class="h3" text-anchor="middle">S1</text><text x="164" y="476" class="claim" text-anchor="middle">攻击面</text><text x="164" y="502" class="tiny" text-anchor="middle"><tspan x="164">入口 · 默认配置</tspan><tspan x="164" dy="20">修复历史 · 目标规则</tspan></text>
+<path d="M258 484 L278 484" class="arrow"/>
+<rect x="278" y="418" width="188" height="132" rx="15" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/><text x="372" y="448" class="h3" text-anchor="middle">S2</text><text x="372" y="476" class="claim" text-anchor="middle">候选</text><text x="372" y="502" class="tiny" text-anchor="middle"><tspan x="372">机制 · 链路</tspan><tspan x="372" dy="20">候选矩阵</tspan></text>
+<path d="M466 484 L486 484" class="arrow"/>
+<rect x="486" y="418" width="188" height="132" rx="15" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/><text x="580" y="448" class="h3" text-anchor="middle">S3</text><text x="580" y="476" class="claim" text-anchor="middle">源码审计</text><text x="580" y="502" class="tiny" text-anchor="middle"><tspan x="580">file:line 证据</tspan><tspan x="580" dy="20">residual · 路径提示</tspan></text>
+<path d="M674 484 L694 484" class="arrow"/>
+<rect x="694" y="418" width="188" height="132" rx="15" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/><text x="788" y="448" class="h3" text-anchor="middle">S4</text><text x="788" y="476" class="claim" text-anchor="middle">PoC 矩阵</text><text x="788" y="502" class="tiny" text-anchor="middle"><tspan x="788">版本 · Feature</tspan><tspan x="788" dy="20">前置条件 · 授权维度</tspan></text>
+<path d="M882 484 L902 484" class="arrow"/>
+<rect x="902" y="418" width="188" height="132" rx="15" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/><text x="996" y="448" class="h3" text-anchor="middle">S5</text><text x="996" y="476" class="claim" text-anchor="middle">Novelty</text><text x="996" y="502" class="tiny" text-anchor="middle"><tspan x="996">上游 · 公开披露</tspan><tspan x="996" dy="20">查询覆盖完整性</tspan></text>
+<path d="M1090 484 L1110 484" class="arrow"/>
+<rect x="1110" y="418" width="188" height="132" rx="15" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.5"/><text x="1204" y="448" class="h3" text-anchor="middle">S6</text><text x="1204" y="476" class="claim" text-anchor="middle">严重性</text><text x="1204" y="502" class="tiny" text-anchor="middle"><tspan x="1204">CVSS · 影响</tspan><tspan x="1204" dy="20">前置条件一致性</tspan></text>
+<path d="M1298 484 L1318 484" class="arrow"/>
+<rect x="1318" y="418" width="188" height="132" rx="15" fill="#f5f3ff" stroke="#8b5cf6" stroke-width="1.5"/><text x="1412" y="448" class="h3" text-anchor="middle">S7</text><text x="1412" y="476" class="claim" text-anchor="middle">发现文档</text><text x="1412" y="502" class="tiny" text-anchor="middle"><tspan x="1412">自包含</tspan><tspan x="1412" dy="20">本地 · 披露冻结</tspan></text>
+<path d="M1506 484 L1526 484" class="arrow"/>
+<rect x="1526" y="418" width="188" height="132" rx="15" fill="#f5f3ff" stroke="#8b5cf6" stroke-width="1.5"/><text x="1620" y="448" class="h3" text-anchor="middle">S8</text><text x="1620" y="476" class="claim" text-anchor="middle">证据账本</text><text x="1620" y="502" class="tiny" text-anchor="middle"><tspan x="1620">可追溯 · 排除项</tspan><tspan x="1620" dy="20">轮次汇总</tspan></text>
+
+<text x="70" y="606" class="h2">证据闸门与结论资格</text>
+<rect x="70" y="632" width="176" height="126" rx="14" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5"/><text x="158" y="660" class="h3" text-anchor="middle">G0</text><text x="158" y="686" class="claim" text-anchor="middle">死代码</text><text x="158" y="711" class="small" text-anchor="middle"><tspan x="158">阻断无支撑的</tspan><tspan x="158" dy="18">攻击面</tspan></text>
+<path d="M246 695 L262 695" class="arrow"/>
+<rect x="262" y="632" width="176" height="126" rx="14" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5"/><text x="350" y="660" class="h3" text-anchor="middle">G1</text><text x="350" y="686" class="claim" text-anchor="middle">可达性</text><text x="350" y="711" class="small" text-anchor="middle"><tspan x="350">必须存在</tspan><tspan x="350" dy="18">不可信输入路径</tspan></text>
+<path d="M438 695 L454 695" class="arrow"/>
+<rect x="454" y="632" width="200" height="126" rx="14" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/><text x="554" y="660" class="h3" text-anchor="middle">G1b</text><text x="554" y="686" class="claim" text-anchor="middle">默认配置</text><text x="554" y="711" class="small" text-anchor="middle"><tspan x="554">检查安全门控</tspan><tspan x="554" dy="18">与默认可达性</tspan></text>
+<path d="M654 695 L670 695" class="arrow"/>
+<rect x="670" y="632" width="340" height="126" rx="14" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/><text x="840" y="660" class="h3" text-anchor="middle">G4</text><text x="840" y="686" class="claim" text-anchor="middle">运行时证据</text><text x="840" y="711" class="tiny" text-anchor="middle"><tspan x="840">未执行 · 运行失败 · 门禁阻断</tspan><tspan x="840" dy="18">前置不可用 · 执行无效果</tspan><tspan x="840" dy="18">执行并观察到效果</tspan></text>
+<path d="M1010 695 L1026 695" class="arrow"/>
+<rect x="1026" y="632" width="292" height="126" rx="14" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/><text x="1172" y="660" class="h3" text-anchor="middle">G3</text><text x="1172" y="686" class="claim" text-anchor="middle">Novelty 资格</text><text x="1172" y="711" class="tiny" text-anchor="middle"><tspan x="1172">候选 0day · 已知同族</tspan><tspan x="1172" dy="18">上游已修复</tspan><tspan x="1172" dy="18">查询失败 / 不完整</tspan></text>
+<path d="M1318 695 L1334 695" class="arrow"/>
+<rect x="1334" y="632" width="242" height="126" rx="14" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.5"/><text x="1455" y="660" class="h3" text-anchor="middle">G5</text><text x="1455" y="686" class="claim" text-anchor="middle">一致性</text><text x="1455" y="711" class="tiny" text-anchor="middle"><tspan x="1455">前置条件 vs CVSS</tspan><tspan x="1455" dy="18">影响 vs 实际证据</tspan><tspan x="1455" dy="18">不一致则降级</tspan></text>
+<path d="M1576 695 L1592 695" class="arrow"/>
+<rect x="1592" y="632" width="180" height="126" rx="14" fill="#f5f3ff" stroke="#8b5cf6" stroke-width="1.5"/><text x="1682" y="670" class="claim" text-anchor="middle">结论资格</text><text x="1682" y="702" class="small" text-anchor="middle"><tspan x="1682">确认</tspan><tspan x="1682" dy="18">排除 · 待验证</tspan></text>
+
+<rect x="70" y="800" width="1070" height="190" rx="18" fill="#fff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="95" y="836" class="h2">结论升级必须单调、可解释</text>
+<rect x="92" y="856" width="150" height="38" rx="11" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2"/><text x="167" y="881" class="pill" text-anchor="middle">假设</text><path d="M242 875 L267 875" class="arrow"/>
+<rect x="267" y="856" width="150" height="38" rx="11" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2"/><text x="342" y="881" class="pill" text-anchor="middle">源码支撑</text><path d="M417 875 L442 875" class="arrow"/>
+<rect x="442" y="856" width="150" height="38" rx="11" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2"/><text x="517" y="881" class="pill" text-anchor="middle">运行时确认</text><path d="M592 875 L617 875" class="arrow"/>
+<rect x="617" y="856" width="150" height="38" rx="11" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2"/><text x="692" y="881" class="pill" text-anchor="middle">Novelty 合格</text><path d="M767 875 L792 875" class="arrow"/>
+<rect x="792" y="856" width="150" height="38" rx="11" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2"/><text x="867" y="881" class="pill" text-anchor="middle">严重性一致</text><path d="M942 875 L967 875" class="arrow"/>
+<rect x="967" y="856" width="150" height="38" rx="11" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2"/><text x="1042" y="881" class="pill" text-anchor="middle">可发布结论</text>
+<text x="95" y="920" class="small"><tspan x="95">更强的标签必须有更强的证据；缺失证据只保留不确定性，不会自动授权升级。</tspan><tspan x="95" dy="24">运行时确认受效果语义约束：实例化 != RCE；lookup 轨迹 != 代码执行；环境失败 != 漏洞排除。</tspan><tspan x="95" dy="24">负面证据必须区分“没执行”“运行失败”“前置不可用”和“执行无效果”。</tspan></text>
+
+<rect x="1170" y="800" width="560" height="190" rx="18" fill="#fff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="1195" y="836" class="h2">研究不变量</text>
+<circle cx="1200" cy="871" r="5" fill="#10b981"/><text x="1216" y="876" class="body">证据忠实度</text>
+<circle cx="1200" cy="909" r="5" fill="#10b981"/><text x="1216" y="914" class="body">结论资格</text>
+<circle cx="1200" cy="947" r="5" fill="#10b981"/><text x="1216" y="952" class="body">前置条件诚实性</text>
+<circle cx="1460" cy="871" r="5" fill="#10b981"/><text x="1476" y="876" class="body">保守 Novelty</text>
+<circle cx="1460" cy="909" r="5" fill="#10b981"/><text x="1476" y="914" class="body">负证据分型</text>
+<circle cx="1460" cy="947" r="5" fill="#10b981"/><text x="1476" y="952" class="body">可复现证据账本</text>
+</svg>
