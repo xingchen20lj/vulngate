@@ -15,8 +15,9 @@ may be reported to vendors or used in coordination.
   must preserve the rule: a "confirmed" finding requires runtime PoC output.
 - **Conservative novelty.** Upstream hits degrade claims. Incomplete queries must
   not be treated as authoritative.
-- **No sensitive material in this repository.** Do not commit real target names,
-  vendor coordination threads, disclosure drafts, or credentials.
+- **No sensitive material in this repository.** Do not commit undisclosed target
+  identities, private vendor coordination threads, disclosure drafts, real
+  credentials, or other confidential research artifacts.
 
 ## Development workflow
 
@@ -47,8 +48,8 @@ may be reported to vendors or used in coordination.
 - `.codex-plugin/plugin.json` — plugin manifest
 - `skills/vulngate-audit/SKILL.md` — host-agent execution manual (S1–S8, G0–G5)
 - `scripts/agent_cli.py` — deterministic helper CLI
-- `scripts/agent/` — bundled framework (mirrored from the parent project; keep in
-  sync when framework logic changes)
+- `scripts/agent/` — bundled deterministic framework; when framework behavior
+  changes, keep the plugin contract, documentation, and regression tests in sync
 - `scripts/run_pipeline.sh` — autonomous mode launcher
 - `docs/` — user and architecture documentation
 
