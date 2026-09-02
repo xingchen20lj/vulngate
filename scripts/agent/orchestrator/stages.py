@@ -15,9 +15,10 @@ from ..sandbox.approval import ApprovalGate
 from ..sandbox.runner import CommandRunner
 from ..tools import search as srch
 from ..tools.build import (JavaMatrixRunner, MatrixCell, POCSpec,
-                           ShellMatrixRunner, ShellPOCSpec, summarize_candidate)
+                           ShellMatrixRunner, ShellPOCSpec, summarize_candidate,
+                           converge_s4_cells)
 from ..tools.authz import normalize_authz_case, normalize_authz_cases
-from ..tools.conclusion import derive_conclusion
+from ..tools.conclusion import conclusion_status, derive_conclusion, is_confirmed_conclusion
 from ..tools.cvss import base_score, check_impact_consistency
 from ..tools.source_evidence import (DANGER_PATTERNS, build_source_sink_graph,
                                      grep_hits, match_source_sink_paths)
@@ -251,6 +252,9 @@ def _poc_specs(ctx: StageContext) -> List[POCSpec]:
                 version=c["version"], safe_mode=c["safe_mode"],
                 features=c.get("features", []), precondition=c.get("precondition", "none"),
                 args=c.get("args", []), jvm=c.get("jvm", {}),
+                timeout=c.get("timeout"),
+                required_runtime=str(c.get("required_runtime", c.get("requested_runtime", ""))),
+                java_bin=str(c.get("java_bin", "")), java_home=str(c.get("java_home", "")),
                 authz=normalize_authz_case(c.get("authz") or
                                            (candidate_cases[0] if len(candidate_cases) == 1 else {})),
             ) for c in poc.get("cells", [])]
@@ -282,6 +286,8 @@ def _shell_poc_specs(ctx: StageContext) -> List[ShellPOCSpec]:
                 features=c.get("features", []), precondition=c.get("precondition", "none"),
                 args=c.get("args", []), jvm=c.get("jvm", {}),
                 timeout=c.get("timeout"),
+                required_runtime=str(c.get("required_runtime", c.get("requested_runtime", ""))),
+                java_bin=str(c.get("java_bin", "")), java_home=str(c.get("java_home", "")),
                 authz=normalize_authz_case(c.get("authz") or
                                            (candidate_cases[0] if len(candidate_cases) == 1 else {})),
             ) for c in poc.get("cells", [])]
@@ -320,18 +326,22 @@ def run_s4(ctx: StageContext) -> Dict[str, Any]:
     java_specs = _poc_specs(ctx)
     if java_specs:
         matrix_runner = JavaMatrixRunner(ctx.workspace, ctx.target, ctx.round_no, ctx.approval)
-        results.update(matrix_runner.run_manifest(java_specs, jars_by_version))
+        for cid, cells in matrix_runner.run_manifest(java_specs, jars_by_version).items():
+            results.setdefault(cid, []).extend(cells)
     shell_specs = _shell_poc_specs(ctx)
     if shell_specs:
         shell_runner = ShellMatrixRunner(ctx.workspace, ctx.target, ctx.round_no, ctx.approval)
-        results.update(shell_runner.run_manifest(shell_specs))
+        for cid, cells in shell_runner.run_manifest(shell_specs).items():
+            results.setdefault(cid, []).extend(cells)
     summaries = {}
     authz_matrix = []
     for cand in ctx.config.candidates:
         cid = cand["candidate_id"]
-        cells = results.get(cid, [])
+        cells, convergence = converge_s4_cells(
+            ctx.workspace, ctx.target, ctx.round_no, cid, results.get(cid, []))
         summaries[cid] = summarize_candidate(cells)
-        summaries[cid]["cells_ran"] = len(cells)
+        summaries[cid]["s4_result_sources"] = convergence["sources"]
+        summaries[cid]["s4_persisted_matrix"] = convergence["persisted_matrix"]
         for cell in cells:
             assertion = cell.get("authz_assertion")
             if assertion and assertion.get("status") != "not_applicable":
@@ -344,6 +354,13 @@ def run_s4(ctx: StageContext) -> Dict[str, Any]:
                     "assertion": assertion,
                 })
     ctx.store.write_artifact("S4", "verification-matrix.json", summaries)
+    ctx.store.write_artifact("S4", "execution-status.json", {
+        cid: {
+            key: value for key, value in summary.items()
+            if key.endswith("_count") or key in ("execution_state", "cells_ran", "s4_result_sources")
+        }
+        for cid, summary in summaries.items()
+    })
     ctx.store.write_artifact("S4", "authz-matrix.json", authz_matrix)
     return {"summaries": summaries}
 
@@ -424,14 +441,18 @@ def run_s5(ctx: StageContext) -> Dict[str, Any]:
         disclosures += pub["disclosures"]
         # Baseline #7: when any public-info channel failed (or the run is
         # offline / rate-limited), absence of a record is NOT a 0day claim.
+        query_metadata = checker.query_metadata()
         query_failed = bool(pub.get("errors")) or checker.last_rate_limit is not None \
-            or bool(checker.query_errors) or ctx.offline
+            or bool(checker.query_errors) or ctx.offline or bool(query_metadata.get("query_failed"))
         nv = checker.evaluate(refs, disclosures, ctx.config.discovery_date,
                               increments_hint=cand.get("increments_hint", []),
                               query_failed=query_failed)
         g3 = g3_novelty(nv.__dict__)
         nv_dict = dataclasses.asdict(nv)
-        results[cand["candidate_id"]] = {"novelty": nv_dict, "g3": g3.__dict__}
+        results[cand["candidate_id"]] = {
+            "novelty": nv_dict, "g3": g3.__dict__,
+            "query_metadata": query_metadata,
+        }
         if getattr(ctx.config, "llm_audit", False) and ctx.llm is not None:
             audit = mechanism_audit_llm(
                 ctx.llm, "你是资深安全研究员，判断上游记录与候选是否同一漏洞机制。",
@@ -453,6 +474,7 @@ def run_s5(ctx: StageContext) -> Dict[str, Any]:
                 results[cand["candidate_id"]] = {
                     "novelty": nv_dict, "g3": g3.__dict__,
                     "mechanism_audit": audit,
+                    "query_metadata": checker.query_metadata(),
                 }
     if checker.last_rate_limit:
         results["api_rate_limit"] = checker.last_rate_limit
@@ -462,7 +484,9 @@ def run_s5(ctx: StageContext) -> Dict[str, Any]:
         "channels": pub["channels"], "errors": pub["errors"],
         "disclosure_ids": [d.id for d in pub["disclosures"]],
     }
+    results["github_query"] = checker.query_metadata()
     coverage["github_query_errors"] = sorted(set(checker.query_errors))
+    coverage["github_query"] = checker.query_metadata()
     coverage["authoritative"] = bool(coverage["configured_public_channels"])
     coverage["authoritative"] = (coverage["authoritative"]
                                   and not bool(pub.get("errors"))
@@ -511,6 +535,10 @@ def _evidence_from_summary(summary: Dict[str, Any], candidate: Dict[str, Any]) -
         ev.append("HARNESS_ERROR=" + str(summary["harness_error"]))
     if summary.get("compile_error"):
         ev.append("COMPILE_ERROR=" + str(summary["compile_error"]))
+    if summary.get("execution_state"):
+        ev.append("S4_EXECUTION_STATE=" + str(summary["execution_state"]))
+    if summary.get("s4_result_sources"):
+        ev.append("S4_RESULT_SOURCES=" + ",".join(summary["s4_result_sources"]))
     for i in summary.get("instantiated", [])[:4]:
         ev.append("%s SafeMode=%s %s -> INSTANTIATED %s" % (
             i["version"], i["safe"], i["precondition"], i["class"]))
@@ -556,10 +584,10 @@ def run_s7(ctx: StageContext, rows: List[Dict[str, Any]], summaries: Dict[str, A
     idx = 0
     for cand in ctx.config.candidates:
         cid = cand["candidate_id"]
-        if cand.get("conclusion_override", "确认") != "确认":
+        if conclusion_status(cand.get("conclusion_override", "确认")) != "confirmed":
             continue
         row = next((r for r in rows if r.get("candidate_id") == cid), {})
-        if row.get("conclusion") != "确认":
+        if not is_confirmed_conclusion(row.get("conclusion")):
             continue
         idx += 1
         sev = severities.get(cid, {})
@@ -613,6 +641,7 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
             "candidate_id": cid,
             "surface": cand["surface"],
             "conclusion": conclusion,
+            "status": conclusion_status(conclusion),
             "evidence": _evidence_from_summary(summary, cand),
             "precondition_tier": cand.get("precondition_tier_hint", ""),
             "code_location": cand.get("code_location", []),
@@ -628,14 +657,15 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
                 row["conclusion"] = "候选（待验证）"
                 row["evidence"].append(
                     "G5_BLOCKED=" + "; ".join(severities[cid].get("g5", {}).get("evidence", [])))
+        row["status"] = conclusion_status(row.get("conclusion"))
         rows.append(row)
-        if conclusion == "排除":
+        if conclusion_status(conclusion) == "excluded":
             excluded.append({
                 "surface": cand["surface"],
                 "conclusion": "排除（%s）" % cand.get("exclusion_reason", "门控/受控异常"),
                 "evidence": row["evidence"],
             })
-    confirmed_rows = [r for r in rows if r["conclusion"] == "确认"]
+    confirmed_rows = [r for r in rows if is_confirmed_conclusion(r.get("conclusion"))]
     novelty_misses = len([
         r for r in confirmed_rows
         if (r.get("novelty") or {}).get("verdict") == "candidate-0day"
@@ -644,7 +674,7 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
     metrics = {
         "候选数": len(ctx.config.candidates),
         "确认数": len(confirmed_rows),
-        "排除数": len([r for r in rows if r["conclusion"] == "排除"]),
+        "排除数": len([r for r in rows if conclusion_status(r.get("conclusion")) == "excluded"]),
         "候选->PoC 转化率": "%d/%d" % (len(confirmed_rows), len(ctx.config.candidates)),
         "Novelty 漏检数（必须=0）": novelty_misses,
         "前置分布": _precondition_distribution(rows),
@@ -664,5 +694,6 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
 
 def _precondition_distribution(rows: List[Dict[str, Any]]) -> str:
     from collections import Counter
-    c = Counter(r.get("precondition_tier", "?") for r in rows if r["conclusion"] == "确认")
+    c = Counter(r.get("precondition_tier", "?") for r in rows
+                if is_confirmed_conclusion(r.get("conclusion")))
     return ", ".join("%s=%d" % (k, v) for k, v in sorted(c.items()))

@@ -27,6 +27,27 @@ DENY_CLASS_HINTS = (
 )
 
 
+def conclusion_status(value: object) -> str:
+    """Normalize human-readable conclusion strings to a stable status.
+
+    Ledger producers may append severity, novelty or review notes after the
+    state (for example ``确认；High；已知机制增量；非 RCE``).  Exact equality
+    with ``确认`` would silently drop such a row from summaries.
+    """
+    text = str(value or "").strip()
+    if text.startswith("确认"):
+        return "confirmed"
+    if text.startswith("排除"):
+        return "excluded"
+    if text.startswith("候选") or text.startswith("待验证"):
+        return "candidate"
+    return "unknown"
+
+
+def is_confirmed_conclusion(value: object) -> bool:
+    return conclusion_status(value) == "confirmed"
+
+
 def _requires_real_effect(cand: Dict[str, Any]) -> bool:
     """Whether a candidate claims code/command execution rather than parsing.
 

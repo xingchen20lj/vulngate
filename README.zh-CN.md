@@ -121,7 +121,7 @@ codex plugin add vulngate@personal
 | S1 | 攻击面测绘（入口、危险调用点、默认配置、近期修复变体、项目价值画像、目标类型规则） | `S1/entry-inventory.json`、`S1/security-fix-history.json`、`S1/patch-variants.json`、`S1/project-profile.json`、`S1/target-rules.json`、`S1/composite-chain-hints.json` | G0 死代码、G1 可达性 |
 | S2 | 候选矩阵（攻击面 × 入口 × 输入 × 逻辑） | `S2/candidate-matrix.json` | — |
 | S3 | 对照真实源码审计（带 file:line 证据） | `S3/audit-notes.json` | G1b 默认配置门控 |
-| S4 | PoC 矩阵：版本 × 安全开关 × 前置条件；Web/授权候选增加身份 × 角色 × 租户 × 对象 | `S4/matrix-runs/<c>/cells.json`、`S4/authz-matrix.json` | G4 运行时证据 |
+| S4 | PoC 矩阵：版本 × 安全开关 × 前置条件；Web/授权候选增加身份 × 角色 × 租户 × 对象 | `S4/matrix-runs/<c>/cells.json`、`S4/execution-status.json`、`S4/authz-matrix.json` | G4 运行时证据 |
 | S5 | Novelty：上游 PR/issue + 公开披露扫描与覆盖记录 | `S5/novelty.json`、`S5/novelty-coverage.json` | G3 硬降级 |
 | S6 | CVSS 计算 + 前置一致性校验 | `S6/severity.json` | G5 分级↔AC 一致 |
 | S7 | 自包含发现文档（仅本地） | `reports/<target>/…` | 披露冻结 |

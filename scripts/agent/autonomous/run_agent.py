@@ -42,9 +42,11 @@ from ..orchestrator.config import TargetConfig
 from ..orchestrator.gates import g3_novelty
 from ..sandbox.approval import ApprovalGate
 from ..tools.build import (JavaMatrixRunner, MatrixCell, POCSpec,
-                           ShellMatrixRunner, ShellPOCSpec, summarize_candidate)
+                           ShellMatrixRunner, ShellPOCSpec, summarize_candidate,
+                           converge_s4_cells)
 from ..tools.authz import normalize_authz_case, normalize_authz_cases
-from ..tools.conclusion import (DENY_CLASS_HINTS, derive_conclusion,
+from ..tools.conclusion import (DENY_CLASS_HINTS, conclusion_status,
+                                derive_conclusion, is_confirmed_conclusion,
                                 validate_confirmation)
 from ..tools.cvss import base_score, check_impact_consistency
 from ..tools.fuzzer import run_fuzz_for_pipeline
@@ -451,6 +453,7 @@ def propose_candidates(ctx: AutoCtx, round_no: int,
         'logic(攻击逻辑), hypothesis, precondition_tier_hint("0"|"single-feature"|"application-type"|"extra-primitive"), '
         'preconditions(数组,如 ["无"] 或 ["调用方开启 SupportAutoType"]), '
         'entry_feature(默认开关名或 ""), poc_class(Java 类名; Web 候选填 ""), jvm(对象,如 {"Xmx":"256m"}), '
+        'required_runtime(可选,如 jdk8), java_bin/java_home(可选,按 cell 选择实际 JDK), '
         'target_classes(数组，预期实例化的目标类全限定名，如 ["com.example.Exploit"]；'
         '类型混淆/DoS 类候选可为 []), '
         'authz_cases(可选数组；每项仅含 case_id、principal、role、tenant_id、object_id、object_tenant_id、'
@@ -732,9 +735,10 @@ def _verify_web_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
     runner = ShellMatrixRunner(ctx.root, ctx.cfg.name, round_no, approval=approval)
     try:
         results = runner.run_manifest([spec])
-        cells = results.get(cid, [])
+        cells, convergence = converge_s4_cells(
+            ctx.root, ctx.cfg.name, round_no, cid, results.get(cid, []))
         summary = summarize_candidate(cells)
-        summary["cells_ran"] = len(cells)
+        summary["s4_result_sources"] = convergence["sources"]
         for _repair_round in range(2):
             needs_repair = (not summary.get("http_evidence")
                             and not summary.get("gate_blocked")
@@ -751,11 +755,16 @@ def _verify_web_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
                 break
             script_file.write_text(fixed, encoding="utf-8")
             results = runner.run_manifest([spec])
-            cells = results.get(cid, [])
+            cells, convergence = converge_s4_cells(
+                ctx.root, ctx.cfg.name, round_no, cid, results.get(cid, []))
             summary = summarize_candidate(cells)
-            summary["cells_ran"] = len(cells)
+            summary["s4_result_sources"] = convergence["sources"]
     except Exception as exc:
-        summary = {"harness_error": "%s: %s" % (type(exc).__name__, exc)}
+        cells, convergence = converge_s4_cells(
+            ctx.root, ctx.cfg.name, round_no, cid, [])
+        summary = summarize_candidate(cells)
+        summary["harness_error"] = "%s: %s" % (type(exc).__name__, exc)
+        summary["s4_result_sources"] = convergence["sources"]
     conclusion = _derive(summary, cand, cells)
     return {"candidate": cand, "audit": audit, "summary": summary,
             "conclusion": conclusion, "spec": spec}
@@ -786,6 +795,9 @@ def build_cells(ctx: AutoCtx, cand: Dict[str, Any]) -> List[MatrixCell]:
     cells = []
     features = ["SupportAutoType"] if cand.get("entry_feature") == "SupportAutoType" else []
     jvm = dict(cand.get("jvm") or {})
+    required_runtime = str(cand.get("required_runtime", cand.get("requested_runtime", "")))
+    java_bin = str(cand.get("java_bin", ""))
+    java_home = str(cand.get("java_home", ""))
     # DoS/resource-exhaustion candidates need a small heap or the OOM path
     # is never exercised under the matrix default JVM. If the LLM did not
     # declare Xmx, inject a 256m heap when the surface/logic hints at it.
@@ -802,7 +814,9 @@ def build_cells(ctx: AutoCtx, cand: Dict[str, Any]) -> List[MatrixCell]:
             for pre in preconditions:
                 for authz in authz_cases:
                     cells.append(MatrixCell(version=v, safe_mode=safe, features=features,
-                                        precondition=pre, jvm=jvm, authz=authz))
+                                        precondition=pre, jvm=jvm, authz=authz,
+                                        required_runtime=required_runtime,
+                                        java_bin=java_bin, java_home=java_home))
     return cells
 
 
@@ -878,9 +892,10 @@ def verify_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
     cells: List[Dict[str, Any]] = []
     try:
         results = runner.run_manifest([spec], ctx.jars_by_version())
-        cells = results.get(cid, [])
-        summary = summarize_candidate(results[cid])
-        summary["cells_ran"] = len(results[cid])
+        cells, convergence = converge_s4_cells(
+            ctx.root, ctx.cfg.name, round_no, cid, results.get(cid, []))
+        summary = summarize_candidate(cells)
+        summary["s4_result_sources"] = convergence["sources"]
         for _repair_round in range(2):
             inst_fqcn = ""
             if summary.get("instantiated"):
@@ -918,11 +933,16 @@ def verify_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
                 break
             src_file.write_text(fixed, encoding="utf-8")
             results = runner.run_manifest([spec], ctx.jars_by_version())
-            cells = results.get(cid, [])
-            summary = summarize_candidate(results[cid])
-            summary["cells_ran"] = len(results[cid])
+            cells, convergence = converge_s4_cells(
+                ctx.root, ctx.cfg.name, round_no, cid, results.get(cid, []))
+            summary = summarize_candidate(cells)
+            summary["s4_result_sources"] = convergence["sources"]
     except Exception as exc:  # compile failure / harness error -> honest 待验证
-        summary = {"harness_error": "%s: %s" % (type(exc).__name__, exc)}
+        cells, convergence = converge_s4_cells(
+            ctx.root, ctx.cfg.name, round_no, cid, cells)
+        summary = summarize_candidate(cells)
+        summary["harness_error"] = "%s: %s" % (type(exc).__name__, exc)
+        summary["s4_result_sources"] = convergence["sources"]
     conclusion = _derive(summary, cand, cells)
     return {"candidate": cand, "audit": audit, "summary": summary,
             "conclusion": conclusion, "spec": spec}
@@ -963,12 +983,17 @@ def _verify_fuzz_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
                               / ("round-%02d" % round_no) / "approval-log.jsonl"))
     try:
         results = runner.run_manifest([spec], ctx.jars_by_version())
-        summary = summarize_candidate(results[cid])
-        summary["cells_ran"] = len(results[cid])
-        cells = results[cid]
+        cells, convergence = converge_s4_cells(
+            ctx.root, ctx.cfg.name, round_no, cid, results.get(cid, []))
+        summary = summarize_candidate(cells)
+        summary["s4_result_sources"] = convergence["sources"]
     except Exception as exc:
-        summary = {"harness_error": "%s: %s" % (type(exc).__name__, exc)}
-        cells = []
+        persisted_cells, convergence = converge_s4_cells(
+            ctx.root, ctx.cfg.name, round_no, cid, [])
+        cells = persisted_cells
+        summary = summarize_candidate(cells)
+        summary["harness_error"] = "%s: %s" % (type(exc).__name__, exc)
+        summary["s4_result_sources"] = convergence["sources"]
     if fz.get("bucket") == "crash":
         # Runtime anomaly observed in discovery, but mechanism-level
         # confirmation (exact code path / exploitability) is still pending.
@@ -1040,8 +1065,10 @@ def novelty_check(ctx: AutoCtx, row: Dict[str, Any]) -> Dict[str, Any]:
     pub = ctx.public_disclosures()
     disclosures += pub["disclosures"]
     # Baseline #7: query failure/offline must not silently become "0day".
+    query_metadata = checker.query_metadata()
     query_failed = bool(pub.get("errors")) or checker.last_rate_limit is not None \
-        or ctx.offline
+        or bool(checker.query_errors) or ctx.offline \
+        or bool(query_metadata.get("query_failed"))
     nv = checker.evaluate(refs, disclosures, ctx.cfg.discovery_date,
                           increments_hint=cand.get("increments_hint", []),
                           query_failed=query_failed)
@@ -1069,7 +1096,8 @@ def novelty_check(ctx: AutoCtx, row: Dict[str, Any]) -> Dict[str, Any]:
             "refs": [dataclasses.asdict(r) for r in refs],
             "disclosures": [dataclasses.asdict(d) for d in disclosures],
             "public_scan": _jsonable(pub),
-            "mechanism_audit": audit}
+            "mechanism_audit": audit,
+            "query_metadata": checker.query_metadata()}
 
 
 def mechanism_audit(ctx: AutoCtx, cand: Dict[str, Any], refs: List[UpstreamRef],
@@ -1228,11 +1256,16 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                 try:
                     row = fut.result()
                 except Exception as exc:
+                    persisted_cells, convergence = converge_s4_cells(
+                        ctx.root, ctx.cfg.name, round_no,
+                        cand["candidate_id"], [])
+                    failed_summary = summarize_candidate(persisted_cells)
+                    failed_summary["harness_error"] = "%s: %s" % (type(exc).__name__, exc)
+                    failed_summary["s4_result_sources"] = convergence["sources"]
                     row = {"candidate": cand, "audit": audits[cand["candidate_id"]],
-                           "summary": {"harness_error": "%s: %s"
-                                       % (type(exc).__name__, exc)},
+                           "summary": failed_summary,
                            "conclusion": "候选（待验证）"}
-                if row["conclusion"] == "确认":
+                if is_confirmed_conclusion(row.get("conclusion")):
                     rows.append(row)
                 else:
                     excluded.append({
@@ -1319,7 +1352,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         written = []
         idx = 0
         for row in rows:
-            if row.get("conclusion") != "确认":
+            if not is_confirmed_conclusion(row.get("conclusion")):
                 continue
             idx += 1
             cand = row["candidate"]
@@ -1370,6 +1403,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             "candidate_id": r["candidate"]["candidate_id"],
             "surface": r["candidate"].get("surface"),
             "conclusion": r.get("conclusion", "确认"),
+            "status": conclusion_status(r.get("conclusion", "确认")),
             "evidence": _evidence_lines(r),
             "precondition_tier": r["candidate"].get("precondition_tier_hint"),
             "code_location": r.get("audit", {}).get("code_location", []),
@@ -1416,6 +1450,10 @@ def _evidence_lines(row: Dict[str, Any]) -> List[str]:
         lines.append("HARNESS_ERROR=" + str(s["harness_error"]))
     if s.get("compile_error"):
         lines.append("COMPILE_ERROR=" + str(s["compile_error"]))
+    if s.get("execution_state"):
+        lines.append("S4_EXECUTION_STATE=" + str(s["execution_state"]))
+    if s.get("s4_result_sources"):
+        lines.append("S4_RESULT_SOURCES=" + ",".join(s["s4_result_sources"]))
     for e in s.get("errors", []):
         lines.append("%s SafeMode=%s %s -> ERROR %s"
                      % (e.get("version"), e.get("safe"), e.get("precondition"), e.get("error")))

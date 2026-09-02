@@ -5,6 +5,21 @@ All notable changes to VulnGate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.29] - 2026-09-03
+
+### Fixed
+
+- **S4 execution convergence**：持久化矩阵与 host-sequential 回退结果覆盖代理/探针超时，
+  同一候选的多个 PoC 不再互相覆盖，并明确区分未执行、运行失败、门禁阻断、前置不可用、
+  已执行但无效果和已执行有效果。
+- **PoC environment isolation**：PoC 只接收最小显式环境，agent 的 API URL、代理和密钥不会
+  参与回环网络判定或传入子进程；Novelty 继续使用独立的 GitHub API 通道。
+- **Per-cell JDK selection**：矩阵 cell 支持 `required_runtime`、`java_bin`、`java_home`，
+  实际 `java/javac` 路径和版本逐 cell 落盘；声明 JDK8 但不可用时记录
+  `precondition-unavailable`，不再静默使用默认 JDK。
+- **Ledger status parsing**：`确认；High；...` 等带附加字段的结论按确认处理，且 Novelty
+  查询持久化认证来源、重试、错误和 issue/PR 标题/状态等元数据。
+
 ## [0.2.28] - 2026-09-02
 
 ### Fixed

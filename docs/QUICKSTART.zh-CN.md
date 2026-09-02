@@ -74,6 +74,17 @@ Feature）——它决定了每一条发现的前置分级。
 
 结果落在 `state/<target>/`、`reports/<target>/`、`ledger/<target>/` 下。
 
+### S4 运行状态与 JDK 前置
+
+`S4/execution-status.json` 以实际 `cells.json` 为准，状态包括：
+`unexecuted`（没有 cell）、`run-failed`（运行失败）、`gate-blocked`（门禁阻断）、
+`precondition-unavailable`（声明的运行时不可用）、`executed-no-effect`（已执行但没有漏洞效果）
+和 `executed-with-effect`。宿主代理或 spawn 通道超时不会覆盖已经落盘的矩阵结果。
+
+需要 JDK8 时，在矩阵 cell 中显式写 `required_runtime: "jdk8"` 与 `java_home: "/path/to/jdk8"`
+（也可写 `java_bin`）。VulnGate 会用该 cell 的 `java` 和同一 JDK 的 `javac`，并在
+`cells.json` 记录实际路径与版本；找不到或版本不匹配时只记录前置不可用，不会假装用默认 JDK。
+
 ## 5. 运行管线（自主模式）
 
 需要无人值守运行，并愿意使用自己的 LLM API Key 时：

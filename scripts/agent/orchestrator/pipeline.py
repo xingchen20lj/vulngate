@@ -20,6 +20,7 @@ from typing import Any, Dict, Optional
 
 from .config import TargetConfig
 from .gates import g4_runtime, g5_cvss
+from ..tools.conclusion import conclusion_status
 from .stages import (StageContext, run_s1, run_s2, run_s3, run_s4, run_s5,
                      run_s6, run_s7, run_s8, _derive_conclusion)
 
@@ -120,6 +121,7 @@ def _ledger_rows(ctx: StageContext, summaries: Dict[str, Any],
             "evidence": _evidence_lines(summary),
             "precondition_tier": cand.get("precondition_tier_hint", ""),
             "code_location": cand.get("code_location", []),
+            "status": conclusion_status(conclusions.get(cid, "候选（待验证）")),
         }
         if cid in severities:
             row["cvss"] = {"vector": severities[cid]["vector"], "score": severities[cid]["score"]}
@@ -127,6 +129,7 @@ def _ledger_rows(ctx: StageContext, summaries: Dict[str, Any],
                 row["conclusion"] = "候选（待验证）"
                 row.setdefault("evidence", []).append(
                     "G5_BLOCKED=" + "; ".join(severities[cid].get("g5", {}).get("evidence", [])))
+                row["status"] = conclusion_status(row["conclusion"])
         rows.append(row)
     return rows
 
@@ -137,6 +140,10 @@ def _evidence_lines(summary: Dict[str, Any]) -> list:
         lines.append("HARNESS_ERROR=" + str(summary["harness_error"]))
     if summary.get("compile_error"):
         lines.append("COMPILE_ERROR=" + str(summary["compile_error"]))
+    if summary.get("execution_state"):
+        lines.append("S4_EXECUTION_STATE=" + str(summary["execution_state"]))
+    if summary.get("s4_result_sources"):
+        lines.append("S4_RESULT_SOURCES=" + ",".join(summary["s4_result_sources"]))
     for i in summary.get("instantiated", [])[:4]:
         lines.append("%s Safe=%s %s -> INSTANTIATED %s" % (i["version"], i["safe"], i["precondition"], i["class"]))
     for e in summary.get("errors", [])[:6]:

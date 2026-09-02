@@ -118,10 +118,35 @@ Two operating modes:
 
 ## 2. Locating the plugin root
 
-Plugin root is the directory containing `.codex-plugin/plugin.json`. Resolve it with
-`codex plugin list`, or locate `skills/vulngate-audit/SKILL.md` inside the plugin
-directory. Let `PLUGIN_ROOT` be that directory. All script paths below are relative
-to `PLUGIN_ROOT`.
+The path of the skill loaded into the current thread is authoritative. Plugin
+marketplaces and installed caches commonly use different directory layouts:
+
+- the marketplace source is often an unversioned directory such as
+  `/Users/<user>/plugins/vulngate`;
+- the installed cache is versioned, for example
+  `.../plugins/cache/.../vulngate/<version>/`;
+- the loaded skill path is the actual `.../<version>/skills/vulngate-audit/SKILL.md`
+  used by this thread.
+
+These paths may legitimately differ after a plugin update. Do not pause, degrade,
+or skip S1–S8 because a message, marketplace entry, and loaded skill show
+different version directories. Derive `PLUGIN_ROOT` from the loaded skill file,
+not from a stale path in a previous message or cache listing:
+
+```bash
+LOADED_SKILL_FILE="${LOADED_SKILL_FILE:-}"
+if [ -z "$LOADED_SKILL_FILE" ]; then
+  # Set this to the absolute path of the SKILL.md supplied to the current thread.
+  LOADED_SKILL_FILE="/absolute/path/to/skills/vulngate-audit/SKILL.md"
+fi
+PLUGIN_ROOT="$(cd "$(dirname "$LOADED_SKILL_FILE")/../.." && pwd)"
+test -f "$PLUGIN_ROOT/.codex-plugin/plugin.json"
+```
+
+If an absolute loaded path is not exposed, locate the matching `SKILL.md` under
+the currently installed plugin reported by `codex plugin list`; do not substitute
+an older versioned cache or the marketplace source merely because its path is
+more familiar. All script paths below are relative to `PLUGIN_ROOT`.
 
 ```bash
 export PYTHONPATH="$PLUGIN_ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}"

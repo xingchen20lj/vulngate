@@ -17,7 +17,7 @@ import time
 from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from .approval import ApprovalGate
 
@@ -43,6 +43,38 @@ REMOTE_URL_RE = re.compile(r"\b(?:https?|ftp|ldap|ldaps|rmi|tcp|udp|gopher)://[^
 HOST_ASSIGNMENT_RE = re.compile(r"(?:https?|ftp|ldap|ldaps|rmi|tcp|udp|gopher)://[^\s'\"]+", re.I)
 USER_AT_HOST_RE = re.compile(r"^[^/\s:@]+@[^/\s:@]+(?::\d+)?$")
 IP_LITERAL_RE = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
+
+# Agent processes commonly carry service URLs, proxy settings, API keys and
+# other unrelated values in their environment.  They are not part of a PoC's
+# execution contract and must not affect the loopback policy (or be inherited
+# by generated code).  Keep only values needed to locate tools and write
+# temporary output; explicit PoC variables are added by ``minimal_poc_env``.
+POC_ENV_POLICY_VERSION = "poc-minimal-v1"
+POC_INHERITED_ENV_KEYS = (
+    "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE",
+    "JAVA_HOME",
+)
+
+
+def minimal_poc_env(env_extra: Optional[dict] = None) -> Dict[str, str]:
+    """Build the explicit environment contract for a generated PoC.
+
+    ``env_extra`` is caller-supplied target context (for example
+    ``VULNGATE_TARGET_URL``), not the host agent's environment.  No full
+    environment dump is returned or logged, and agent API/proxy credentials
+    never cross the process boundary.
+    """
+    env: Dict[str, str] = {}
+    for key in POC_INHERITED_ENV_KEYS:
+        value = os.environ.get(key)
+        if value:
+            env[key] = value
+    for key, value in (env_extra or {}).items():
+        if key and value is not None:
+            env[str(key)] = str(value)
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    env["VULNGATE_ENV_POLICY"] = POC_ENV_POLICY_VERSION
+    return env
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -112,6 +144,10 @@ def validate_poc_command(cmd: List[str], env: dict,
     if global_violation:
         return global_violation
 
+    # ``env`` is deliberately the explicit PoC environment supplied by the
+    # caller.  CommandRunner passes only env_extra here, never the inherited
+    # agent environment.  This keeps an unrelated value such as
+    # ANTHROPIC_BASE_URL from becoming a fake PoC target.
     values = [str(x) for x in cmd] + [str(v) for v in env.values()]
     hosts = [h for value in values for h in _hosts_in_value(value)]
     bad_hosts = [h for h in hosts if not _is_loopback_host(h) and
@@ -211,16 +247,18 @@ class CommandRunner:
 
     def run(self, cmd: List[str], *, cwd: Optional[Path] = None, timeout: Optional[int] = None,
             env_extra: Optional[dict] = None, operation: Optional[str] = None,
-            operation_detail: str = "") -> RunResult:
+            operation_detail: str = "", minimal_env: bool = False) -> RunResult:
         cwd = (cwd or self.workspace).resolve()
         self._check_cwd(cwd)
         if operation:
             self.approval.assert_allowed(operation, operation_detail)
-        env = dict(os.environ)
-        if env_extra:
-            env.update(env_extra)
-        env.setdefault("PYTHONUNBUFFERED", "1")
         normalized_cmd = [str(c) for c in cmd]
+        is_poc_operation = minimal_env or operation in {
+            "loopback_connect", "port_listen", "external_egress"}
+        env = minimal_poc_env(env_extra) if is_poc_operation else dict(os.environ)
+        if env_extra and not is_poc_operation:
+            env.update({str(k): str(v) for k, v in env_extra.items()})
+        env.setdefault("PYTHONUNBUFFERED", "1")
         global_violation = validate_global_command(
             normalized_cmd, self.authorized_staging, self.staging_hosts)
         if global_violation:
@@ -228,7 +266,8 @@ class CommandRunner:
             raise PermissionError("command denied by hard policy: %s" % global_violation)
         if operation in {"loopback_connect", "port_listen", "external_egress"}:
             violation = validate_poc_command(
-                normalized_cmd, env, self.authorized_staging, self.staging_hosts)
+                normalized_cmd, {str(k): str(v) for k, v in (env_extra or {}).items()},
+                self.authorized_staging, self.staging_hosts)
             if violation:
                 self.approval.request("policy_denied", violation)
                 raise PermissionError("PoC command denied by hard policy: %s" % violation)

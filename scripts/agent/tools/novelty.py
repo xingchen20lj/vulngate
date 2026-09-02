@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from ..llm.adapter import BudgetExceeded
-from .github_auth import resolve_github_token
+from .github_auth import github_token_source, resolve_github_token
 
 
 class RateLimited(Exception):
@@ -77,6 +77,7 @@ class NoveltyResult:
     refs: List[UpstreamRef] = field(default_factory=list)
     disclosures: List[Disclosure] = field(default_factory=list)
     checked_at: str = ""
+    query_metadata: Dict[str, object] = field(default_factory=dict)
 
 
 class NoveltyChecker:
@@ -89,9 +90,11 @@ class NoveltyChecker:
         self.offline = offline
         # Prefer explicit/env credentials, then the logged-in gh keychain.
         self.token = resolve_github_token(token)
+        self.auth_source = github_token_source(token)
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.last_rate_limit: Optional[dict] = None
         self.query_errors: List[str] = []
+        self.query_attempts: List[Dict[str, object]] = []
 
     # ---- live API -------------------------------------------------------
     def _api(self, path: str, ttl_seconds: int = 6 * 3600) -> dict:
@@ -104,6 +107,8 @@ class NoveltyChecker:
 
         fresh = cached is not None and time.time() - cached["fetched_at"] < ttl_seconds
         if fresh:
+            self.query_attempts.append({"path": path[:300], "attempt": 0,
+                                       "status": "cache-hit", "source": "cache"})
             return cached["data"]
 
         headers = dict(self.UA)
@@ -119,12 +124,23 @@ class NoveltyChecker:
                 with urllib.request.urlopen(req, timeout=20) as resp:
                     self._observe_limits(resp.headers)
                     if resp.status == 304 and cached is not None:
+                        self.query_attempts.append({
+                            "path": path[:300], "attempt": attempt + 1,
+                            "status": 304, "source": "github-api-cache"})
                         self._write_cache(cache_file, path, cached["data"], cached.get("etag"), time.time())
                         return cached["data"]
                     data = json.loads(resp.read().decode("utf-8"))
+                    self.query_attempts.append({
+                        "path": path[:300], "attempt": attempt + 1,
+                        "status": int(getattr(resp, "status", 200)),
+                        "source": "github-api"})
                     self._write_cache(cache_file, path, data, resp.headers.get("ETag"))
                     return data
             except urllib.error.HTTPError as exc:
+                self.query_attempts.append({
+                    "path": path[:300], "attempt": attempt + 1,
+                    "status": int(exc.code), "source": "github-api",
+                    "error": type(exc).__name__})
                 if exc.code == 304 and cached is not None:
                     self._write_cache(cache_file, path, cached["data"], cached.get("etag"), time.time())
                     return cached["data"]
@@ -138,12 +154,40 @@ class NoveltyChecker:
                     continue
                 raise
             except (urllib.error.URLError, TimeoutError) as exc:
+                self.query_attempts.append({
+                    "path": path[:300], "attempt": attempt + 1,
+                    "status": "error", "source": "github-api",
+                    "error": type(exc).__name__})
                 if attempt == 0:
                     last_exc = exc
                     time.sleep(1.5)
-                    continue
+                continue
+            except (json.JSONDecodeError, ValueError) as exc:
+                self.query_attempts.append({
+                    "path": path[:300], "attempt": attempt + 1,
+                    "status": "error", "source": "github-api",
+                    "error": type(exc).__name__})
                 raise
         raise last_exc if last_exc is not None else RuntimeError("unreachable")
+
+    def query_metadata(self) -> Dict[str, object]:
+        """Return safe, persisted query provenance (never the token)."""
+        errors = sorted(set(self.query_errors))
+        attempts = len([a for a in self.query_attempts
+                        if a.get("status") != "cache-hit"])
+        retries = sum(1 for a in self.query_attempts if int(a.get("attempt", 0) or 0) > 1)
+        return {
+            "channel": "github-api",
+            "auth_source": self.auth_source,
+            "authenticated": bool(self.token),
+            "offline": self.offline,
+            "attempts": attempts,
+            "retries": retries,
+            "errors": errors,
+            "rate_limit": self.last_rate_limit,
+            "query_failed": bool(errors or self.last_rate_limit or (self.offline and not self.query_attempts)),
+            "attempt_log": list(self.query_attempts),
+        }
 
     def _observe_limits(self, headers) -> None:
         remaining = headers.get("X-RateLimit-Remaining")
@@ -218,7 +262,7 @@ class NoveltyChecker:
                     merged_at=data.get("merged_at"),
                     body=data.get("body", ""),
                 )
-            except (RateLimited, urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+            except Exception as exc:
                 self.query_errors.append("fetch_ref:%s" % type(exc).__name__)
                 self._warn_fallback(exc)
         return self._fixture_ref(repo, number, kind)
@@ -230,7 +274,7 @@ class NoveltyChecker:
                 import urllib.parse
                 data = self._api("/search/issues?q=" + urllib.parse.quote(q))
                 return data.get("items", [])
-            except (RateLimited, urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+            except Exception as exc:
                 self.query_errors.append("search:%s" % type(exc).__name__)
                 self._warn_fallback(exc)
         return self._fixture_search(repo, query)
@@ -276,6 +320,9 @@ class NoveltyChecker:
     def evaluate(self, refs: List[UpstreamRef], disclosures: List[Disclosure],
                  discovery_date: str, increments_hint: Optional[List[str]] = None,
                  query_failed: bool = False) -> NoveltyResult:
+        # A caller must not be able to accidentally turn an API failure into a
+        # candidate-0day result by omitting the flag.
+        query_failed = bool(query_failed or self.query_errors or self.last_rate_limit)
         checked = datetime.now().isoformat(timespec="seconds")
         predating = [r for r in refs if r.predates(discovery_date)]
         open_refs = [r for r in refs if r.state in ("open",)]
@@ -305,6 +352,7 @@ class NoveltyChecker:
                     refs=refs,
                     disclosures=disclosures,
                     checked_at=checked,
+                    query_metadata=self.query_metadata(),
                 )
             return NoveltyResult(
                 verdict="candidate-0day",
@@ -313,6 +361,7 @@ class NoveltyChecker:
                 refs=refs,
                 disclosures=disclosures,
                 checked_at=checked,
+                query_metadata=self.query_metadata(),
             )
 
         # Hard downgrade: any hit -> never candidate-0day.
@@ -340,6 +389,7 @@ class NoveltyChecker:
             refs=refs,
             disclosures=disclosures,
             checked_at=checked,
+            query_metadata=self.query_metadata(),
         )
 
 

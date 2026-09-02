@@ -134,6 +134,9 @@ def _matrix_cell(c: Dict[str, Any]) -> MatrixCell:
         jvm=dict(c.get("jvm", {})),
         timeout=c.get("timeout"),
         authz=dict(c.get("authz", {})),
+        required_runtime=str(c.get("required_runtime", c.get("requested_runtime", ""))),
+        java_bin=str(c.get("java_bin", "")),
+        java_home=str(c.get("java_home", "")),
     )
 
 
@@ -272,7 +275,9 @@ def cmd_novelty(args: argparse.Namespace) -> int:
         data = json.loads(Path(args.evidence).read_text(encoding="utf-8"))
         refs = [UpstreamRef(ref=r["ref"], kind=r.get("kind", "issue"), title=r.get("title", ""),
                             state=r.get("state", "open"), created_at=r["created_at"],
-                            url=r.get("url", ""), coverage_note=r.get("coverage_note", ""))
+                            url=r.get("url", ""), coverage_note=r.get("coverage_note", ""),
+                            evidence_source=r.get("evidence_source", ""),
+                            repo=r.get("repo", ""))
                 for r in data.get("refs", [])]
         disclosures = [Disclosure(id=d["id"], source=d.get("source", "advisory"),
                                   title=d.get("title", ""), date=d["date"],
@@ -284,9 +289,14 @@ def cmd_novelty(args: argparse.Namespace) -> int:
                                   query_failed=bool(data.get("query_failed", False)))
         _out({"verdict": result.verdict, "reason": result.reason,
               "increments": result.increments,
-              "refs": [r.ref for r in result.refs],
+              "refs": [{"ref": r.ref, "kind": r.kind, "title": r.title,
+                        "state": r.state, "created_at": r.created_at,
+                        "url": r.url, "evidence_source": r.evidence_source}
+                       for r in result.refs],
               "disclosures": [d.id for d in result.disclosures],
-              "checked_at": result.checked_at})
+              "checked_at": result.checked_at,
+              "query_failed": bool(data.get("query_failed", False)),
+              "query_metadata": result.query_metadata})
         return 0
 
     data = json.loads(Path(args.query).read_text(encoding="utf-8"))
@@ -295,7 +305,7 @@ def cmd_novelty(args: argparse.Namespace) -> int:
     checker = NoveltyChecker(fixtures_dir=fixtures, offline=args.offline,
                              cache_dir=Path(args.cache).resolve() if args.cache else None)
     refs: List[UpstreamRef] = []
-    query_failed = False
+    query_failed = bool(args.offline)
     for num in data.get("issue_numbers", []):
         r = checker.fetch_ref(repo, num, "issues")
         if r:
@@ -317,9 +327,14 @@ def cmd_novelty(args: argparse.Namespace) -> int:
                               query_failed=query_failed)
     _out({"verdict": result.verdict, "reason": result.reason,
           "increments": result.increments,
-          "refs": [r.ref for r in result.refs],
+          "refs": [{"ref": r.ref, "kind": r.kind, "title": r.title,
+                    "state": r.state, "created_at": r.created_at,
+                    "url": r.url, "evidence_source": r.evidence_source}
+                   for r in result.refs],
           "checked_at": result.checked_at,
-          "rate_limit": checker.last_rate_limit})
+          "rate_limit": checker.last_rate_limit,
+          "query_failed": bool(query_failed or checker.query_errors or checker.last_rate_limit),
+          "query_metadata": checker.query_metadata()})
     return 0
 
 

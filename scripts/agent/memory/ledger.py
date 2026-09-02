@@ -13,6 +13,7 @@ from typing import Any, Dict, List
 
 from ..tools.finding import normalize_finding
 from ..tools.redaction import redact_text
+from ..tools.conclusion import is_confirmed_conclusion
 
 
 L10N = {
@@ -315,7 +316,7 @@ def write_round_artifacts(workspace: Path, target: str, round_no: int,
         render_exclusions_md(excluded, round_no, target, lang), encoding="utf-8")
     (out / (t["sum_file"] % round_no)).write_text(
         render_round_summary_md(round_no, target,
-                                [r for r in rows if r.get("conclusion") == "确认"],
+                                [r for r in rows if is_confirmed_conclusion(r.get("conclusion"))],
                                 excluded, summary.get("metrics", {}),
                                 summary.get("next_round", []), lang),
         encoding="utf-8")
