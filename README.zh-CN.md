@@ -12,7 +12,7 @@ VulnGate 的核心原则很简单：
 
 > **模型可以提出漏洞，但证据决定这个结论能够走多远。**
 
-![VulnGate 方法论：宿主 Agent 推理、确定性证据收集、S1-S8 研究生命周期、G0-G5 证据闸门与结论资格](docs/assets/vulngate-methodology.svg)
+![VulnGate 方法论：宿主 Agent 推理、确定性证据收集、S1-S8 研究生命周期、G0-G5 证据闸门与结论资格](docs/assets/vulngate-methodology.zh-CN.svg)
 
 *VulnGate 方法论：宿主 Agent 负责提出假设；确定性证据与显式闸门约束安全结论能够升级到什么程度。*
 
