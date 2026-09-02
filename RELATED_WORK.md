@@ -9,7 +9,7 @@ This list is intentionally non-exhaustive. Inclusion does not imply code reuse, 
 Project Naptime publicly described an LLM-assisted vulnerability research architecture in 2024 with specialized tools, interactive reasoning, and a strong emphasis on verification. Big Sleep continued that line of work on real vulnerability research.
 
 - Project Naptime: https://projectzero.google/2024/06/project-naptime.html
-- Big Sleep: https://projectzero.google/2024/11/from-naptime-to-big-sleep.html
+- Big Sleep: https://projectzero.google/2024/10/from-naptime-to-big-sleep.html
 
 **Overlap with VulnGate**
 

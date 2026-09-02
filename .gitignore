@@ -4,9 +4,22 @@ __pycache__/
 .venv/
 dist/
 build/
+
+# Local credentials and private key material
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# VulnGate local audit artifacts
 state/
 ledger/
 reports/
 poc/
 targets/
 approval-log.jsonl
+
+# Cached public-disclosure API responses
+agent/regression/cache/api/
