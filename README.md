@@ -12,6 +12,10 @@ The core principle is simple:
 
 > **The model may propose a vulnerability. Evidence decides how far the claim is allowed to go.**
 
+![VulnGate methodology: host-agent reasoning, deterministic evidence collection, S1-S8 research lifecycle, G0-G5 evidence gates, and claim eligibility](docs/assets/vulngate-methodology.svg)
+
+*VulnGate's methodology: host reasoning proposes hypotheses; deterministic evidence and explicit gates constrain how far a security claim may be promoted.*
+
 VulnGate does not treat *plausible*, *triggered*, *confirmed*, *novel*, and *critical* as interchangeable states. Its S1–S8 research lifecycle and G0–G5 evidence-gate family constrain when a candidate may be promoted into a confirmed vulnerability, a novel finding, or a particular severity level.
 
 ## Why VulnGate
