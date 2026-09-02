@@ -4,6 +4,16 @@ All notable changes to VulnGate are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-09-03
+
+### Fixed
+
+- **Thread-safe skill cache updates:** the installer preserves compatibility
+  aliases for previously installed versioned cache paths, so an audit task that
+  was already running does not lose its loaded `SKILL.md` when a newer plugin
+  version is installed. A missing thread-bound skill path is now treated as a
+  cache error rather than silently switching versions.
+
 ## [1.0.0] - 2026-09-03
 
 This is the first formal VulnGate release. It promotes the previously validated 0.2.x development line to a stable plugin release.

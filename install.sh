@@ -137,11 +137,60 @@ find_codex() {
   return 1
 }
 
+# Codex binds a skill path when a thread starts. A reinstall changes the
+# versioned cache directory, so preserve aliases for all cache versions that
+# existed before the reinstall. This lets in-progress threads keep resolving
+# their original path while new threads use the new version.
+CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
+CACHE_ROOT="$CODEX_HOME_DIR/plugins/cache/personal/vulngate"
+OLD_CACHE_VERSIONS="$(mktemp "${TMPDIR:-/tmp}/vulngate-cache-versions.XXXXXX")"
+cleanup_cache_versions() {
+  rm -f "$OLD_CACHE_VERSIONS"
+}
+trap cleanup_cache_versions EXIT
+
+capture_cache_versions() {
+  : > "$OLD_CACHE_VERSIONS"
+  if [ -d "$CACHE_ROOT" ]; then
+    find "$CACHE_ROOT" -mindepth 1 -maxdepth 1 \
+      \( -type d -o -type l \) -exec basename {} \; \
+      | sort -u > "$OLD_CACHE_VERSIONS"
+  fi
+}
+
+restore_cache_aliases() {
+  local active_version="$1"
+  local old_version
+  if [ ! -d "$CACHE_ROOT/$active_version" ]; then
+    return 0
+  fi
+  while IFS= read -r old_version; do
+    [ -n "$old_version" ] || continue
+    [ "$old_version" = "$active_version" ] && continue
+    if [ -L "$CACHE_ROOT/$old_version" ]; then
+      rm -f "$CACHE_ROOT/$old_version"
+      ln -s "$CACHE_ROOT/$active_version" "$CACHE_ROOT/$old_version"
+      echo "    refreshed cache path: $old_version -> $active_version"
+    elif [ ! -e "$CACHE_ROOT/$old_version" ]; then
+      ln -s "$CACHE_ROOT/$active_version" "$CACHE_ROOT/$old_version"
+      echo "    preserved cache path: $old_version -> $active_version"
+    fi
+  done < "$OLD_CACHE_VERSIONS"
+}
+
 if [ "$ENABLE" = "1" ]; then
   CODEX="$(find_codex || true)"
   if [ -n "$CODEX" ]; then
+    ACTIVE_VERSION="$(python3 - "$DEST" <<'PYEOF'
+import json, sys
+from pathlib import Path
+print(json.loads((Path(sys.argv[1]) / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"])
+PYEOF
+)"
+    capture_cache_versions
     echo "[5/5] Enabling plugin in Codex (via $CODEX)"
     "$CODEX" plugin add vulngate@personal
+    restore_cache_aliases "$ACTIVE_VERSION"
   else
     echo
     echo "!! 未找到 codex 命令，插件已安装但未启用。"

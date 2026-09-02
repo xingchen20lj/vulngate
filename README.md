@@ -117,6 +117,12 @@ cd vulngate
 
 > **Open a new thread after installation.** Plugin skills are loaded at thread start.
 
+For an existing installation, rerun `./install.sh` to update it. The installer
+preserves compatibility aliases for older versioned skill-cache paths, so an
+audit task that is already running does not lose its `SKILL.md` during the
+update. Avoid running a bare `codex plugin add vulngate@personal` while an audit
+task is active.
+
 ### Manual install
 
 ```bash
@@ -194,7 +200,7 @@ Developer quick reference:
 Local iteration:
 
 ```bash
-./install.sh && codex plugin add vulngate@personal
+./install.sh
 ```
 
 Then start a new thread. Contribution guidance is in [CONTRIBUTING.md](CONTRIBUTING.md).

@@ -89,12 +89,21 @@ Before starting a target service, check the relevant port and process list. Reus
 
 ## 4. Locating the plugin root
 
-The path of the `SKILL.md` loaded into the current thread is authoritative. Marketplace source paths and installed cache paths may legitimately differ after updates.
+The path of the `SKILL.md` loaded into the current thread is authoritative and is
+captured when that thread starts. Marketplace source paths and installed cache
+paths may legitimately differ after updates. The installer preserves aliases for
+previously installed cache paths so an in-progress thread does not lose its
+skill file during a reinstall.
 
 Derive `PLUGIN_ROOT` from the loaded skill rather than from a stale path:
 
 ```bash
 LOADED_SKILL_FILE="${LOADED_SKILL_FILE:-}"
+if [ -n "$LOADED_SKILL_FILE" ] && [ ! -f "$LOADED_SKILL_FILE" ]; then
+  echo "error: the thread-bound VulnGate skill path is missing: $LOADED_SKILL_FILE" >&2
+  echo "error: repair the plugin cache before starting or continuing the audit" >&2
+  exit 2
+fi
 if [ -z "$LOADED_SKILL_FILE" ]; then
   LOADED_SKILL_FILE="/absolute/path/to/skills/vulngate-audit/SKILL.md"
 fi
@@ -103,7 +112,7 @@ test -f "$PLUGIN_ROOT/.codex-plugin/plugin.json"
 export PYTHONPATH="$PLUGIN_ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
-If no absolute loaded path is exposed, locate the matching installed skill reported by `codex plugin list`. Do not substitute an older cache or marketplace source merely because its path is familiar.
+If no absolute loaded path is exposed, locate the matching installed skill reported by `codex plugin list` and require that exact file to exist before proceeding. If an exposed thread-bound path is missing, stop and report a cache/install error; do not substitute an older cache, a newer cache, or the marketplace source merely because its path is familiar.
 
 ## 5. Prerequisites
 
@@ -548,10 +557,15 @@ state/<target>/round-NN/S4/heartbeat-<candidate>.log
 
 ## 4. 定位插件根目录
 
-以当前线程实际加载的 `SKILL.md` 路径为准。Marketplace 源目录与安装缓存路径更新后可以不同。
+以当前线程实际加载的 `SKILL.md` 路径为准。该路径在线程启动时确定；Marketplace 源目录与安装缓存路径更新后可以不同。安装脚本会为旧缓存路径保留兼容别名，避免更新插件时正在运行的线程丢失技能文件。
 
 ```bash
 LOADED_SKILL_FILE="${LOADED_SKILL_FILE:-}"
+if [ -n "$LOADED_SKILL_FILE" ] && [ ! -f "$LOADED_SKILL_FILE" ]; then
+  echo "error: 当前线程绑定的 VulnGate 技能路径不存在：$LOADED_SKILL_FILE" >&2
+  echo "error: 请先修复插件缓存，再开始或继续审计" >&2
+  exit 2
+fi
 if [ -z "$LOADED_SKILL_FILE" ]; then
   LOADED_SKILL_FILE="/absolute/path/to/skills/vulngate-audit/SKILL.md"
 fi
@@ -560,7 +574,7 @@ test -f "$PLUGIN_ROOT/.codex-plugin/plugin.json"
 export PYTHONPATH="$PLUGIN_ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
-如果宿主没有暴露绝对加载路径，则从 `codex plugin list` 的当前已安装插件定位匹配技能；不要因为旧缓存路径更熟悉就替换当前版本。
+如果宿主没有暴露绝对加载路径，则从 `codex plugin list` 的当前已安装插件定位匹配技能，并在继续前确认该文件确实存在。如果已暴露的线程绑定路径不存在，必须停止并报告缓存/安装错误；禁止因为旧缓存、新缓存或 Marketplace 源目录路径更熟悉就静默替换版本。
 
 ## 5. 前置条件
 

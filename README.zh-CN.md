@@ -117,6 +117,10 @@ cd vulngate
 
 > **安装后必须新建线程。** 插件技能在线程启动时加载。
 
+已有安装需要更新时，请重新执行 `./install.sh`。安装脚本会为旧版缓存路径
+保留兼容别名，避免更新期间正在运行的审计任务丢失 `SKILL.md`。审计任务运行
+时不要直接执行单独的 `codex plugin add vulngate@personal`。
+
 ### 手动安装
 
 ```bash
@@ -194,7 +198,7 @@ VulnGate 由 **xingchen20lj** 独立设计和维护，开发过程中使用 Chat
 本地迭代：
 
 ```bash
-./install.sh && codex plugin add vulngate@personal
+./install.sh
 ```
 
 然后新建线程。贡献指南见 [CONTRIBUTING.zh-CN.md](CONTRIBUTING.zh-CN.md)。
