@@ -80,7 +80,7 @@ Evidence Gates
 确认 / 排除 / 候选（待验证）
 ```
 
-G0–G5 是一套证据闸门体系，其中 G1b 是默认配置安全门控的子闸门。编号代表稳定的研究决策点，而不是“每个数字都必须恰好对应一个同级闸门”的营销计数。
+当前使用的闸门标识为 **G0、G1、G1b、G3、G4、G5**，其中 G1b 是默认配置子闸门。
 
 ## 功能特性
 
@@ -175,28 +175,15 @@ VulnGate 面向经过授权的安全研究。
 
 本插件自身漏洞请按 [SECURITY.zh-CN.md](SECURITY.zh-CN.md) 报告。
 
-## 开发与溯源
+## 开发、溯源与贡献
 
 VulnGate 由 **xingchen20lj** 独立设计和维护，开发过程中使用 ChatGPT 与 Codex 进行 AI-assisted development。AI 工具作为实现和设计辅助；关键研究决策通过真实审计行为进行验证，并逐步固化为确定性规则与回归测试。
 
 公开 Git 历史从 2026-08-09 的 VulnGate 0.1.0 开始。后续提交持续记录由实际审计暴露的问题，例如 Metabase 审计轮次经验、fix-completeness gate、spawn 诊断、patch variant analysis、Novelty 查询失败保留，以及 S4 evidence convergence/runtime isolation。
 
-这条历史用于说明项目如何演化，并不主张 VulnGate 使用的所有广义思想都起源于本项目。详见 [PROVENANCE.md](PROVENANCE.md) 与 [CHANGELOG.md](CHANGELOG.md)。
+这条历史用于说明项目如何演化，并不主张 VulnGate 使用的所有广义思想都起源于本项目。详见 [PROVENANCE.md](PROVENANCE.md)、[CHANGELOG.md](CHANGELOG.md) 与 [RELATED_WORK.md](RELATED_WORK.md)。
 
-## 相关工作
-
-VulnGate 所处的是一个正在快速发展的研究方向。具有代表性的相关系统包括：
-
-- Google Project Zero — **Project Naptime / Big Sleep**：使用专门工具与强验证原则进行 LLM 辅助漏洞研究。
-- **MCPwner**：通过 deterministic PoC oracle 与持久化 findings ledger 支撑自主漏洞研究。
-- **Prowl**：确定性 reconnaissance、LLM hypothesis/triage，以及针对真实构建/运行目标的 exploit validation。
-- **Frame**：将 LLM reasoning 与 sound/static、symbolic analysis 结合。
-
-列出这些工作是为了明确技术背景与重合边界，不代表项目等价。VulnGate 当前更强调跨越运行时效果、Novelty 查询完整性、前置条件、严重性一致性、修复完整性与可复现研究记录的**证据/结论生命周期治理**。
-
-链接、时间、范围和对比说明见 [RELATED_WORK.md](RELATED_WORK.md)。
-
-## 开发
+开发者快速参考：
 
 - `scripts/smoke_test.sh` —— 环境与确定性助手冒烟测试
 - `.codex-plugin/plugin.json` —— 插件清单
@@ -210,7 +197,7 @@ VulnGate 所处的是一个正在快速发展的研究方向。具有代表性�
 ./install.sh && codex plugin add vulngate@personal
 ```
 
-然后新建线程。详见 [CONTRIBUTING.zh-CN.md](CONTRIBUTING.zh-CN.md)。
+然后新建线程。贡献指南见 [CONTRIBUTING.zh-CN.md](CONTRIBUTING.zh-CN.md)。
 
 ## 许可
 
