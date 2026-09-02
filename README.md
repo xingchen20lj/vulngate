@@ -80,7 +80,7 @@ Evidence gates
 Confirmed / Excluded / Candidate (pending validation)
 ```
 
-The G0–G5 gate family includes the G1b default-configuration sub-gate. The identifiers are stable research decisions rather than a promise that every numeric slot represents one independent top-level gate.
+Current gate identifiers are **G0, G1, G1b, G3, G4, and G5**; G1b is the default-configuration sub-gate.
 
 ## Features
 
@@ -175,28 +175,15 @@ VulnGate is intended for authorized security research.
 
 Report vulnerabilities in VulnGate itself through [SECURITY.md](SECURITY.md).
 
-## Development and provenance
+## Development, provenance, and contribution
 
 VulnGate is independently designed and maintained by **xingchen20lj** with AI-assisted development using ChatGPT and Codex. AI tools are used as implementation and design aids; project decisions are tested against real audit behavior and encoded into deterministic rules and regression tests.
 
 The public Git history starts with VulnGate 0.1.0 on 2026-08-09. Subsequent commits record audit-driven changes such as Metabase-run lessons, fix-completeness gates, spawn diagnostics, patch-variant analysis, novelty-query failure preservation, and S4 evidence convergence/runtime isolation.
 
-This history is evidence of project evolution, not a claim that every broad idea used by VulnGate originated here. See [PROVENANCE.md](PROVENANCE.md) and [CHANGELOG.md](CHANGELOG.md).
+This history is evidence of project evolution, not a claim that every broad idea used by VulnGate originated here. See [PROVENANCE.md](PROVENANCE.md), [CHANGELOG.md](CHANGELOG.md), and [RELATED_WORK.md](RELATED_WORK.md).
 
-## Related work
-
-VulnGate exists in an active research area. Relevant systems include:
-
-- Google Project Zero — **Project Naptime / Big Sleep**: LLM-assisted vulnerability research with specialized tooling and strong verification principles.
-- **MCPwner**: autonomous vulnerability discovery with deterministic PoC oracles and a persistent findings ledger.
-- **Prowl**: deterministic reconnaissance, LLM hypothesis/triage, and exploit validation against built/running targets.
-- **Frame**: combines LLM reasoning with sound/static and symbolic analysis.
-
-The overlap is intentional to acknowledge the field, not to claim equivalence. VulnGate's current emphasis is the evidence/claim lifecycle spanning runtime effects, novelty completeness, preconditions, severity consistency, fix completeness, and reproducible research records.
-
-For links, dates, scope, and caveats, see [RELATED_WORK.md](RELATED_WORK.md).
-
-## Development
+Developer quick reference:
 
 - `scripts/smoke_test.sh` — environment and deterministic-helper smoke tests
 - `.codex-plugin/plugin.json` — plugin manifest
@@ -210,7 +197,7 @@ Local iteration:
 ./install.sh && codex plugin add vulngate@personal
 ```
 
-Then start a new thread. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Then start a new thread. Contribution guidance is in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
