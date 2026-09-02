@@ -1,0 +1,120 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="940" viewBox="0 0 1600 940">
+  <defs>
+    <style>
+      .bg{fill:#f8fafc}.panel{fill:#ffffff;stroke:#cbd5e1;stroke-width:2}.panel2{fill:#f1f5f9;stroke:#cbd5e1;stroke-width:2}
+      .title{font:700 42px -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:#0f172a}
+      .sub{font:500 20px -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:#475569}
+      .h2{font:700 23px -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:#0f172a}
+      .h3{font:700 18px -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:#0f172a}
+      .body{font:500 15px -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:#334155}
+      .small{font:500 13px -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:#475569}
+      .mono{font:600 13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#334155}
+      .green{fill:#ecfdf5;stroke:#10b981}.blue{fill:#eff6ff;stroke:#3b82f6}.amber{fill:#fffbeb;stroke:#f59e0b}.violet{fill:#f5f3ff;stroke:#8b5cf6}.red{fill:#fef2f2;stroke:#ef4444}.slate{fill:#f8fafc;stroke:#94a3b8}
+      .stage{stroke-width:2}.gate{stroke-width:2}.arrow{stroke:#64748b;stroke-width:2.5;fill:none;marker-end:url(#arrow)}
+      .dash{stroke:#94a3b8;stroke-width:2;stroke-dasharray:8 6;fill:none;marker-end:url(#arrow)}
+      .claim{font:700 16px -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:#0f172a}
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#64748b"/></marker>
+    <linearGradient id="brand" x1="0" x2="1"><stop offset="0" stop-color="#0f766e"/><stop offset="1" stop-color="#2563eb"/></linearGradient>
+  </defs>
+
+  <rect class="bg" width="1600" height="940" rx="26"/>
+
+  <text x="72" y="72" class="title">VulnGate Methodology</text>
+  <text x="72" y="108" class="sub">Evidence-gated claim governance for agentic vulnerability research</text>
+  <rect x="72" y="132" width="1456" height="58" rx="18" fill="url(#brand)"/>
+  <text x="800" y="169" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif" font-size="22" font-weight="700" fill="#ffffff">The model may propose a vulnerability. Evidence decides how far the claim is allowed to go.</text>
+
+  <rect x="72" y="220" width="332" height="116" rx="18" class="panel"/>
+  <text x="96" y="253" class="h2">Host Agent (LLM)</text>
+  <text x="96" y="283" class="body">Open-ended reasoning</text>
+  <text x="96" y="307" class="body">attack paths • hypotheses • interpretation</text>
+  <text x="96" y="329" class="small">May propose. Does not self-authorize stronger claims.</text>
+
+  <rect x="430" y="220" width="1098" height="116" rx="18" class="panel2"/>
+  <text x="456" y="253" class="h2">Deterministic Evidence Layer</text>
+  <text x="456" y="283" class="body">source facts • PoC execution • public-information coverage • CVSS consistency • checkpoints / ledger</text>
+  <text x="456" y="313" class="small">Repeatable components preserve evidence semantics and gate claim promotion.</text>
+  <path d="M404 278 L430 278" class="arrow"/>
+
+  <text x="72" y="382" class="h2">S1–S8 Research Lifecycle</text>
+
+  <g>
+    <rect x="72" y="405" width="165" height="112" rx="16" class="stage blue"/>
+    <text x="154" y="435" text-anchor="middle" class="h3">S1</text><text x="154" y="461" text-anchor="middle" class="claim">Attack Surface</text><text x="154" y="486" text-anchor="middle" font-family="Arial,sans-serif" font-size="12" font-weight="500" fill="#475569">entries / defaults / fixes</text>
+
+    <rect x="253" y="405" width="165" height="112" rx="16" class="stage blue"/>
+    <text x="335" y="435" text-anchor="middle" class="h3">S2</text><text x="335" y="461" text-anchor="middle" class="claim">Candidates</text><text x="335" y="486" text-anchor="middle" font-family="Arial,sans-serif" font-size="12" font-weight="500" fill="#475569">mechanisms / chains</text>
+
+    <rect x="434" y="405" width="165" height="112" rx="16" class="stage blue"/>
+    <text x="516" y="435" text-anchor="middle" class="h3">S3</text><text x="516" y="461" text-anchor="middle" class="claim">Source Audit</text><text x="516" y="486" text-anchor="middle" font-family="Arial,sans-serif" font-size="12" font-weight="500" fill="#475569">file:line / residuals</text>
+
+    <rect x="615" y="405" width="165" height="112" rx="16" class="stage green"/>
+    <text x="697" y="435" text-anchor="middle" class="h3">S4</text><text x="697" y="461" text-anchor="middle" class="claim">PoC Matrix</text><text x="697" y="486" text-anchor="middle" font-family="Arial,sans-serif" font-size="11" font-weight="500" fill="#475569">version / feature / precondition</text>
+
+    <rect x="796" y="405" width="165" height="112" rx="16" class="stage green"/>
+    <text x="878" y="435" text-anchor="middle" class="h3">S5</text><text x="878" y="461" text-anchor="middle" class="claim">Novelty</text><text x="878" y="486" text-anchor="middle" font-family="Arial,sans-serif" font-size="11" font-weight="500" fill="#475569">upstream / disclosure / coverage</text>
+
+    <rect x="977" y="405" width="165" height="112" rx="16" class="stage amber"/>
+    <text x="1059" y="435" text-anchor="middle" class="h3">S6</text><text x="1059" y="461" text-anchor="middle" class="claim">Severity</text><text x="1059" y="486" text-anchor="middle" font-family="Arial,sans-serif" font-size="11" font-weight="500" fill="#475569">CVSS / preconditions</text>
+
+    <rect x="1158" y="405" width="165" height="112" rx="16" class="stage violet"/>
+    <text x="1240" y="435" text-anchor="middle" class="h3">S7</text><text x="1240" y="461" text-anchor="middle" class="claim">Finding</text><text x="1240" y="486" text-anchor="middle" font-family="Arial,sans-serif" font-size="12" font-weight="500" fill="#475569">self-contained / local</text>
+
+    <rect x="1339" y="405" width="189" height="112" rx="16" class="stage violet"/>
+    <text x="1433" y="435" text-anchor="middle" class="h3">S8</text><text x="1433" y="461" text-anchor="middle" class="claim">Evidence Ledger</text><text x="1433" y="486" text-anchor="middle" font-family="Arial,sans-serif" font-size="11" font-weight="500" fill="#475569">traceability / exclusions / summary</text>
+
+    <path d="M237 461 L253 461" class="arrow"/><path d="M418 461 L434 461" class="arrow"/><path d="M599 461 L615 461" class="arrow"/><path d="M780 461 L796 461" class="arrow"/><path d="M961 461 L977 461" class="arrow"/><path d="M1142 461 L1158 461" class="arrow"/><path d="M1323 461 L1339 461" class="arrow"/>
+  </g>
+
+  <text x="72" y="566" class="h2">Evidence Gates and Claim Eligibility</text>
+  <g>
+    <rect x="72" y="590" width="150" height="92" rx="14" class="gate slate"/>
+    <text x="147" y="618" text-anchor="middle" class="h3">G0</text><text x="147" y="642" text-anchor="middle" class="claim">Dead Code</text><text x="147" y="664" text-anchor="middle" font-family="Arial,sans-serif" font-size="11" font-weight="500" fill="#475569">block unsupported surface</text>
+
+    <rect x="238" y="590" width="150" height="92" rx="14" class="gate slate"/>
+    <text x="313" y="618" text-anchor="middle" class="h3">G1</text><text x="313" y="642" text-anchor="middle" class="claim">Reachability</text><text x="313" y="664" text-anchor="middle" font-family="Arial,sans-serif" font-size="11" font-weight="500" fill="#475569">untrusted path required</text>
+
+    <rect x="404" y="590" width="170" height="92" rx="14" class="gate blue"/>
+    <text x="489" y="618" text-anchor="middle" class="h3">G1b</text><text x="489" y="642" text-anchor="middle" class="claim">Default Config</text><text x="489" y="664" text-anchor="middle" font-family="Arial,sans-serif" font-size="11" font-weight="500" fill="#475569">security gate semantics</text>
+
+    <rect x="590" y="590" width="290" height="92" rx="14" class="gate green"/>
+    <text x="735" y="616" text-anchor="middle" class="h3">G4 Runtime Evidence</text>
+    <text x="735" y="638" text-anchor="middle" font-family="Arial,sans-serif" font-size="11" font-weight="600" fill="#334155">unexecuted / run-failed / gate-blocked</text>
+    <text x="735" y="658" text-anchor="middle" font-family="Arial,sans-serif" font-size="10.5" font-weight="600" fill="#334155">precondition-unavailable / executed-no-effect</text>
+    <text x="735" y="676" text-anchor="middle" font-family="Arial,sans-serif" font-size="10.5" font-weight="600" fill="#334155">executed-with-effect</text>
+
+    <rect x="896" y="590" width="248" height="92" rx="14" class="gate green"/>
+    <text x="1020" y="616" text-anchor="middle" class="h3">G3 Novelty Eligibility</text>
+    <text x="1020" y="640" text-anchor="middle" font-family="Arial,sans-serif" font-size="11" font-weight="600" fill="#334155">candidate-0day / known-family</text>
+    <text x="1020" y="660" text-anchor="middle" font-family="Arial,sans-serif" font-size="10.5" font-weight="600" fill="#334155">upstream-fixed / unknown-query-failed</text>
+
+    <rect x="1160" y="590" width="200" height="92" rx="14" class="gate amber"/>
+    <text x="1260" y="618" text-anchor="middle" class="h3">G5 Consistency</text><text x="1260" y="642" text-anchor="middle" class="claim">Precondition vs CVSS</text><text x="1260" y="664" text-anchor="middle" font-family="Arial,sans-serif" font-size="11" font-weight="500" fill="#475569">downgrade if inconsistent</text>
+
+    <rect x="1376" y="590" width="152" height="92" rx="14" class="gate violet"/>
+    <text x="1452" y="620" text-anchor="middle" class="h3">Claim Result</text><text x="1452" y="646" text-anchor="middle" class="claim">Confirmed</text><text x="1452" y="668" text-anchor="middle" font-family="Arial,sans-serif" font-size="11" font-weight="500" fill="#475569">Excluded / Pending</text>
+
+    <path d="M222 636 L238 636" class="arrow"/><path d="M388 636 L404 636" class="arrow"/><path d="M574 636 L590 636" class="arrow"/><path d="M880 636 L896 636" class="arrow"/><path d="M1144 636 L1160 636" class="arrow"/><path d="M1360 636 L1376 636" class="arrow"/>
+  </g>
+
+  <rect x="72" y="720" width="918" height="154" rx="18" class="panel"/>
+  <text x="96" y="753" class="h2">Claim Promotion Is Monotonic</text>
+  <text x="96" y="785" class="body">Hypothesis</text><path d="M188 780 L256 780" class="arrow"/>
+  <text x="274" y="785" class="body">Source-supported</text><path d="M416 780 L484 780" class="arrow"/>
+  <text x="502" y="785" class="body">Runtime-confirmed</text><path d="M650 780 L718 780" class="arrow"/>
+  <text x="736" y="785" class="body">Novelty-qualified</text><path d="M870 780 L938 780" class="arrow"/>
+  <text x="96" y="820" class="small">A stronger label requires stronger evidence. Missing evidence preserves uncertainty; it does not authorize promotion.</text>
+  <text x="96" y="848" class="small">Runtime confirmation is effect-limited: instantiation != RCE, lookup trace != code execution, environment failure != exclusion.</text>
+
+  <rect x="1014" y="720" width="514" height="154" rx="18" class="panel"/>
+  <text x="1038" y="753" class="h2">Research Invariants</text>
+  <text x="1038" y="784" font-family="Arial,sans-serif" font-size="14" font-weight="500" fill="#334155">Evidence Fidelity</text>
+  <text x="1270" y="784" font-family="Arial,sans-serif" font-size="14" font-weight="500" fill="#334155">Precondition Honesty</text>
+  <text x="1038" y="814" font-family="Arial,sans-serif" font-size="14" font-weight="500" fill="#334155">Conservative Novelty</text>
+  <text x="1270" y="814" font-family="Arial,sans-serif" font-size="14" font-weight="500" fill="#334155">Typed Negative Evidence</text>
+  <text x="1038" y="844" font-family="Arial,sans-serif" font-size="14" font-weight="500" fill="#334155">Fix-Completeness Testing</text>
+  <text x="1270" y="844" font-family="Arial,sans-serif" font-size="14" font-weight="500" fill="#334155">Reproducible Ledger</text>
+
+  <text x="800" y="912" text-anchor="middle" class="small">VulnGate v1.0 — host reasoning on top, deterministic evidence underneath, claim promotion constrained by gates.</text>
+</svg>
