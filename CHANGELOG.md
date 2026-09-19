@@ -4,6 +4,21 @@ All notable changes to VulnGate are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Composite source-to-sink paths that include an authorization boundary are now
+  promoted from S1 hints into deterministic `chain-*` S2 candidates. The
+  candidates carry credential-free authorization cases, source locations and
+  heuristic provenance, and are scheduled identically by the config-driven and
+  autonomous pipelines.
+- S4 cells now support a bounded stateful/race experiment contract: declared
+  step identifiers, concurrency and availability probes are passed to Java and
+  Shell PoCs, while ordered `STEP`/`STEP_EVIDENCE`/`STATE` traces and the
+  declaration are persisted. Declarations remain metadata; A:H still requires
+  observed concurrent saturation and service unavailability.
+
 ## [1.1.0] - 2026-09-16
 
 ### Added

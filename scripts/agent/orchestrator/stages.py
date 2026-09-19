@@ -25,6 +25,7 @@ from ..tools.source_evidence import (DANGER_PATTERNS, build_source_sink_graph,
                                      grep_hits, match_source_sink_paths)
 from ..tools.patch_variants import analyze_patch_history, fix_completeness_candidate
 from ..tools.project_profile import build_project_profile
+from ..tools.research_strategies import composite_chain_candidates
 from ..tools.target_rules import collect_target_rule_hits, composite_chain_hints
 from ..tools.novelty import (Disclosure, NoveltyChecker, UpstreamRef,
                              mechanism_audit_llm)
@@ -265,6 +266,7 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
     target_rule_hits = collect_target_rule_hits(
         ctx.config.target_type, ctx.config.source_dirs, ctx.workspace)
     chain_hints = composite_chain_hints(source_sink_graph)
+    chain_candidates = composite_chain_candidates(chain_hints)
     project_profile = build_project_profile(
         ctx.config, ctx.workspace, danger_site_count=len(danger_sites),
         source_sink_path_count=len(source_sink_graph),
@@ -287,6 +289,8 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
         "hits": target_rule_hits,
     })
     ctx.store.write_artifact("S1", "composite-chain-hints.json", chain_hints)
+    ctx.store.write_artifact("S1", "composite-chain-candidates.json",
+                             chain_candidates)
     # S1 -> Inventory / Coverage Index (spec §21.3).  Best-effort: a coverage
     # failure must not abort an audit round, but the reason is recorded so the
     # gap is visible rather than silent.
@@ -301,6 +305,7 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
             "source_sink_path_count": len(source_sink_graph),
             "target_rule_hit_count": len(target_rule_hits),
             "composite_chain_hint_count": len(chain_hints),
+            "composite_chain_candidate_count": len(chain_candidates),
             "coverage": coverage_index,
             "project_profile": project_profile}
 
@@ -329,6 +334,22 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
             ctx.config.candidates.append(candidate)
             existing_ids.add(candidate["candidate_id"])
             generated.append(candidate)
+    # Composite paths used to be written only as an S1 prompt hint.  Promote
+    # them into the ordinary S2 pool so the scheduler, S3 source audit and S4
+    # authz/effect matrix can test whether the observed authorization still
+    # protects the transformed object at the sink.
+    chain_candidates = []
+    if bool(getattr(ctx.config, "static_candidates", True)):
+        chain_candidates = ctx.store.read_artifact(
+            "S1", "composite-chain-candidates.json") or []
+    generated_chain = []
+    for candidate in chain_candidates:
+        cid = str(candidate.get("candidate_id", ""))
+        if not cid or cid in existing_ids:
+            continue
+        ctx.config.candidates.append(candidate)
+        existing_ids.add(cid)
+        generated_chain.append(candidate)
     pool, static_added = _merge_static_candidates(ctx, list(ctx.config.candidates))
     selected, plan, schedule_note = _schedule_round(ctx, pool)
     matrix = []
@@ -340,6 +361,9 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
             "input_shape": cand.get("input_shape", ""),
             "logic": cand.get("logic", ""),
             "authz_cases": normalize_authz_cases(cand.get("authz_cases")),
+            "sequence": cand.get("sequence", []),
+            "concurrency": cand.get("concurrency", 1),
+            "availability_probe": cand.get("availability_probe", False),
             "status": "candidate",
             "fix_completeness": bool(cand.get("fix_completeness")),
             "patch_commit": cand.get("patch_commit", ""),
@@ -351,6 +375,8 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
         ctx.store.write_artifact("S2", "candidate-schedule.json", plan.as_dict())
     result = {"candidate_count": len(matrix), "matrix": matrix,
               "generated_fix_candidates": [c["candidate_id"] for c in generated],
+              "generated_chain_candidates": [c["candidate_id"]
+                                              for c in generated_chain],
               "static_candidates": static_added,
               "candidates": selected,
               "pool_size": len(pool),
@@ -458,11 +484,17 @@ def _poc_specs(ctx: StageContext) -> List[POCSpec]:
         for poc in cand.get("pocs", []):
             if "script" in poc:
                 continue  # shell PoCs are collected separately
+            poc_sequence = poc.get("sequence", cand.get("sequence", []))
+            poc_concurrency = poc.get("concurrency", cand.get("concurrency", 1))
+            poc_probe = poc.get("availability_probe", cand.get("availability_probe", False))
             cells = [MatrixCell(
                 version=c["version"], safe_mode=c["safe_mode"],
                 features=c.get("features", []), precondition=c.get("precondition", "none"),
                 args=c.get("args", []), jvm=c.get("jvm", {}),
                 timeout=c.get("timeout"),
+                sequence=c.get("sequence", poc_sequence),
+                concurrency=c.get("concurrency", poc_concurrency),
+                availability_probe=c.get("availability_probe", poc_probe),
                 required_runtime=str(c.get("required_runtime", c.get("requested_runtime", ""))),
                 java_bin=str(c.get("java_bin", "")), java_home=str(c.get("java_home", "")),
                 authz=normalize_authz_case(c.get("authz") or
@@ -491,11 +523,17 @@ def _shell_poc_specs(ctx: StageContext) -> List[ShellPOCSpec]:
         for poc in cand.get("pocs", []):
             if "script" not in poc:
                 continue
+            poc_sequence = poc.get("sequence", cand.get("sequence", []))
+            poc_concurrency = poc.get("concurrency", cand.get("concurrency", 1))
+            poc_probe = poc.get("availability_probe", cand.get("availability_probe", False))
             cells = [MatrixCell(
                 version=c["version"], safe_mode=c["safe_mode"],
                 features=c.get("features", []), precondition=c.get("precondition", "none"),
                 args=c.get("args", []), jvm=c.get("jvm", {}),
                 timeout=c.get("timeout"),
+                sequence=c.get("sequence", poc_sequence),
+                concurrency=c.get("concurrency", poc_concurrency),
+                availability_probe=c.get("availability_probe", poc_probe),
                 required_runtime=str(c.get("required_runtime", c.get("requested_runtime", ""))),
                 java_bin=str(c.get("java_bin", "")), java_home=str(c.get("java_home", "")),
                 authz=normalize_authz_case(c.get("authz") or
@@ -772,6 +810,17 @@ def _evidence_from_summary(summary: Dict[str, Any], candidate: Dict[str, Any]) -
     for a in summary.get("availability_proof", [])[:2]:
         ev.append("%s SafeMode=%s %s -> AVAILABILITY_PROOF=concurrency:%s service_unavailable:%s" % (
             a["version"], a["safe"], a["precondition"], a["concurrency"], a["service_unavailable"]))
+    for x in summary.get("experiment_evidence", [])[:4]:
+        ev.append("%s SafeMode=%s %s -> EXPERIMENT sequence=%s sequence_status=%s "
+                  "declared_concurrency=%s probe=%s STEP=%s STATE=%s STEP_EVIDENCE=%s" % (
+                      x.get("version"), x.get("safe"), x.get("precondition"),
+                      ",".join(str(s) for s in x.get("declared_sequence", [])) or "-",
+                      x.get("sequence_status", "unknown"),
+                      x.get("declared_concurrency", 1),
+                      x.get("declared_availability_probe", False),
+                      "|".join(str(s) for s in x.get("step_trace", [])[:8]) or "-",
+                      "|".join(str(s) for s in x.get("state_trace", [])[:8]) or "-",
+                      "|".join(str(s) for s in x.get("step_evidence", [])[:4]) or "-"))
     for a in summary.get("authz_results", [])[:8]:
         az = a.get("authz", {})
         ev.append("%s SafeMode=%s %s -> AUTHZ_CASE=%s principal=%s role=%s tenant=%s object=%s assertion=%s boundary_violation=%s" % (

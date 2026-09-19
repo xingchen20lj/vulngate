@@ -2,8 +2,8 @@
 
 Runs `{version} x {safe-mode on/off} x {precondition}` cells for a candidate,
 captures stdout/stderr per cell, and extracts machine-readable observations
-(GATE_BLOCKED / INSTANTIATED / ERROR / NETWORK / PARSED lines) that the G4
-runtime gate consumes.
+(GATE_BLOCKED / INSTANTIATED / ERROR / NETWORK / PARSED plus bounded
+STEP/STEP_EVIDENCE/STATE traces) that the G4 runtime gate consumes.
 """
 
 from __future__ import annotations
@@ -15,11 +15,13 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from ..sandbox.approval import ApprovalGate
 from ..sandbox.runner import CommandRunner, RunResult, minimal_poc_env
 from .authz import assert_authz_observations, authz_env, authz_jvm_props, normalize_authz_case
+from .experiment import (experiment_metadata, normalize_experiment,
+                         sequence_trace_status)
 
 
 RUNNER_POLICY_VERSION = "loopback-only-v2"
@@ -85,6 +87,39 @@ class MatrixCell:
     required_runtime: str = ""                           # e.g. jdk8 / java21
     java_bin: str = ""                                   # explicit .../bin/java
     java_home: str = ""                                  # explicit JDK home
+    # Bounded stateful/race experiment declaration.  The PoC owns the actual
+    # local requests and transitions; the runner exposes only these identifiers
+    # and persists the declaration with the observed cell evidence.
+    sequence: List[str] = field(default_factory=list)
+    concurrency: int = 1
+    availability_probe: bool = False
+    experiment_warnings: List[str] = field(default_factory=list, init=False)
+
+    def __post_init__(self) -> None:
+        (self.sequence, self.concurrency, self.availability_probe,
+         self.experiment_warnings) = normalize_experiment(
+            self.sequence, self.concurrency, self.availability_probe)
+
+
+def _cell_experiment_env(cell: MatrixCell) -> Dict[str, str]:
+    """Expose only bounded experiment metadata to a PoC process."""
+    return {
+        "VULNGATE_SEQUENCE": json.dumps(cell.sequence, ensure_ascii=False),
+        "VULNGATE_CONCURRENCY": str(cell.concurrency),
+        "VULNGATE_AVAILABILITY_PROBE": (
+            "true" if cell.availability_probe else "false"),
+    }
+
+
+def _cell_metadata(cell: MatrixCell) -> Dict[str, Any]:
+    """Common persisted metadata for Java and Shell cells."""
+    meta = experiment_metadata(cell)
+    return {
+        "sequence": meta["sequence"],
+        "concurrency": meta["concurrency"],
+        "availability_probe": meta["availability_probe"],
+        "experiment": meta,
+    }
 
 
 @dataclass
@@ -235,10 +270,23 @@ def resolve_java_runtime(cell: MatrixCell) -> Dict[str, str]:
             "java_version": version, "java_version_line": probe.get("version_line", "")}
 
 
-def parse_observations(stdout: str, stderr: str = "") -> Dict[str, str]:
-    obs: Dict[str, str] = {}
+def parse_observations(stdout: str, stderr: str = "") -> Dict[str, Any]:
+    """Parse scalar observations plus bounded state/step evidence traces."""
+    obs: Dict[str, Any] = {}
     combined = stdout + "\n" + stderr
     for line in combined.splitlines():
+        for source_key, trace_key in (
+                ("STEP", "STEP_TRACE"),
+                ("STEP_EVIDENCE", "STEP_EVIDENCE"),
+                ("STATE", "STATE_TRACE")):
+            if line.startswith(source_key + "="):
+                values = obs.setdefault(trace_key, [])
+                if not isinstance(values, list):
+                    values = []
+                    obs[trace_key] = values
+                if len(values) < 32:
+                    values.append(line[len(source_key) + 1:len(source_key) + 241])
+                break
         for key in ("GATE_BLOCKED", "INSTANTIATED", "ERROR", "NETWORK", "LEAKED",
                     "SHORTNAME", "PARSED", "INPUT_BYTES", "CELL_START",
                     "DEFAULT_READER_FEATURES", "SUPPORTS_AUTOTYPE",
@@ -344,6 +392,7 @@ class JavaMatrixRunner:
             "cmd": "",
             "runner_policy": RUNNER_POLICY_VERSION,
         }
+        result.update(_cell_metadata(cell))
         result.update(self._runtime_fields(runtime))
         return result
 
@@ -372,6 +421,7 @@ class JavaMatrixRunner:
             result = self.runner.run(
                 java_cmd,
                 cwd=out,
+                env_extra=_cell_experiment_env(cell),
                 operation="loopback_connect",
                 operation_detail="mechanism-level PoC %s (JNDI/HTTP limited to 127.0.0.1)" % spec.class_name,
                 timeout=cell.timeout,
@@ -389,6 +439,7 @@ class JavaMatrixRunner:
                 "stderr": str(exc), "cmd": " ".join(java_cmd),
                 "runner_policy": RUNNER_POLICY_VERSION,
             }
+            denied.update(_cell_metadata(cell))
             denied.update(self._runtime_fields(runtime))
             return denied
         obs = parse_observations(result.stdout, result.stderr)
@@ -412,6 +463,7 @@ class JavaMatrixRunner:
             "cmd": " ".join(java_cmd),
             "runner_policy": RUNNER_POLICY_VERSION,
         }
+        result_payload.update(_cell_metadata(cell))
         result_payload.update(self._runtime_fields(runtime))
         return result_payload
 
@@ -453,6 +505,7 @@ class JavaMatrixRunner:
                         "observations": {},
                         "cmd": " ".join(compiled.cmd),
                         }
+                        item.update(_cell_metadata(cell))
                         item.update(self._runtime_fields(runtime))
                         results.append(item)
                     continue
@@ -495,11 +548,15 @@ class ShellMatrixRunner:
       EVIDENCE=<text>           side-effect proof (marker file / DB row / log line)
       GATE_BLOCKED=<reason>     config/precondition blocked the path
       ERROR=<exception>         runtime error observed
+      STEP=<step-id>            ordered state/operation step reached
+      STEP_EVIDENCE=<detail>    evidence for that step
+      STATE=<state-id>          observed state checkpoint
 
     Loopback-only egress is enforced by the same static source scan used for
     Java PoCs; any non-loopback URL/IP in the script is refused before run.
     Cells receive VULNGATE_VERSION / VULNGATE_SAFE_MODE / VULNGATE_PRECONDITION
-    / VULNGATE_FEATURES via environment.
+    / VULNGATE_FEATURES plus bounded sequence/concurrency metadata via
+    environment.
     """
 
     def __init__(self, workspace: Path, target: str, round_no: int,
@@ -529,7 +586,7 @@ class ShellMatrixRunner:
     def run_cell(self, spec: ShellPOCSpec, cell: MatrixCell) -> Dict:
         script = self.src_dir / spec.script
         if not script.exists():
-            return {
+            result = {
                 "candidate_id": spec.candidate_id,
                 "poc_script": spec.script,
                 "version": cell.version,
@@ -540,13 +597,15 @@ class ShellMatrixRunner:
                 "authz_assertion": assert_authz_observations(cell.authz, {}),
                 "lang": "shell",
             }
+            result.update(_cell_metadata(cell))
+            return result
         egress = scan_source_egress(
             script.read_text(encoding="utf-8", errors="replace"), str(script),
             self.staging_hosts if self.authorized_staging else None)
         if egress:
             detail = "PoC 脚本含非回环网络目标: %s" % "; ".join(sorted(set(egress))[:6])
             self.approval.request("external_egress", detail)
-            return {
+            result = {
                 "candidate_id": spec.candidate_id,
                 "poc_script": spec.script,
                 "version": cell.version,
@@ -556,6 +615,8 @@ class ShellMatrixRunner:
                 "stderr": "EGRESS_DENIED " + detail,
                 "lang": "shell",
             }
+            result.update(_cell_metadata(cell))
+            return result
         env_extra = {
             "VULNGATE_VERSION": cell.version,
             "VULNGATE_SAFE_MODE": "true" if cell.safe_mode else "false",
@@ -564,6 +625,9 @@ class ShellMatrixRunner:
             "VULNGATE_TARGET_URL": spec.urls.get(cell.version, spec.env.get("VULNGATE_TARGET_URL", "")),
         }
         env_extra.update(spec.env)
+        # Structured experiment metadata wins over free-form PoC environment
+        # values, just like the authorization context below.
+        env_extra.update(_cell_experiment_env(cell))
         # Structured authorization context wins over free-form PoC env values;
         # credentials are never part of this contract.
         env_extra.update(authz_env(cell.authz))
@@ -578,7 +642,7 @@ class ShellMatrixRunner:
                 timeout=cell.timeout,
             )
         except PermissionError as exc:
-            return {
+            denied = {
                 "candidate_id": spec.candidate_id, "poc_script": spec.script,
                 "version": cell.version, "safe_mode": cell.safe_mode,
                 "features": cell.features, "precondition": cell.precondition,
@@ -589,9 +653,11 @@ class ShellMatrixRunner:
                 "stderr": str(exc), "cmd": " ".join(cmd), "lang": "shell",
                 "runner_policy": RUNNER_POLICY_VERSION,
             }
+            denied.update(_cell_metadata(cell))
+            return denied
         obs = parse_observations(result.stdout, result.stderr)
         authz_assertion = assert_authz_observations(cell.authz, obs)
-        return {
+        result_payload = {
             "candidate_id": spec.candidate_id,
             "poc_script": spec.script,
             "version": cell.version,
@@ -610,6 +676,8 @@ class ShellMatrixRunner:
             "lang": "shell",
             "runner_policy": RUNNER_POLICY_VERSION,
         }
+        result_payload.update(_cell_metadata(cell))
+        return result_payload
 
     def _write_cells(self, candidate_id: str, cells: List[Dict]) -> None:
         d = self.matrix_dir / candidate_id
@@ -780,6 +848,7 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
     safe_equivalent = []
     effect_evidence = []
     availability_proof = []
+    experiment_evidence = []
     authz_results = []
     authz_boundary_violations = []
 
@@ -790,6 +859,46 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
 
     for c in cells:
         obs = c.get("observations", {})
+        if not isinstance(obs, dict):
+            obs = {}
+        experiment = c.get("experiment") or {}
+        declared_sequence = c.get("sequence", experiment.get("sequence", [])) or []
+        declared_concurrency = c.get(
+            "concurrency", experiment.get("concurrency", 1))
+        declared_probe = c.get(
+            "availability_probe", experiment.get("availability_probe", False))
+        if not isinstance(declared_sequence, list):
+            declared_sequence = [str(declared_sequence)] if declared_sequence else []
+        try:
+            declared_workers = int(declared_concurrency or 1)
+        except (TypeError, ValueError):
+            declared_workers = 1
+        step_trace = obs.get("STEP_TRACE", [])
+        step_evidence = obs.get("STEP_EVIDENCE", [])
+        state_trace = obs.get("STATE_TRACE", [])
+        if not isinstance(step_trace, list):
+            step_trace = [str(step_trace)] if step_trace else []
+        if not isinstance(step_evidence, list):
+            step_evidence = [str(step_evidence)] if step_evidence else []
+        if not isinstance(state_trace, list):
+            state_trace = [str(state_trace)] if state_trace else []
+        if declared_sequence or declared_workers > 1 or declared_probe \
+                or step_trace or step_evidence or state_trace:
+            experiment_evidence.append({
+                "version": c.get("version"),
+                "safe": c.get("safe_mode"),
+                "precondition": c.get("precondition"),
+                "declared_sequence": list(declared_sequence),
+                "declared_concurrency": declared_workers,
+                "declared_availability_probe": bool(declared_probe),
+                "sequence_status": sequence_trace_status(
+                    [str(step) for step in declared_sequence],
+                    [str(step) for step in step_trace]),
+                "step_trace": [str(x)[:240] for x in step_trace[:32]],
+                "step_evidence": [str(x)[:240] for x in step_evidence[:32]],
+                "state_trace": [str(x)[:240] for x in state_trace[:32]],
+                "warnings": list(experiment.get("warnings", [])),
+            })
         assertion = c.get("authz_assertion")
         if assertion is None and c.get("authz"):
             assertion = assert_authz_observations(c.get("authz"), obs)
@@ -889,6 +998,7 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
         "safe_equivalent": safe_equivalent,
         "effect_evidence": effect_evidence,
         "availability_proof": availability_proof,
+        "experiment_evidence": experiment_evidence,
         "authz_results": authz_results,
         "authz_boundary_violations": authz_boundary_violations,
         "cells_ran": len(cells),

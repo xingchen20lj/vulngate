@@ -36,6 +36,11 @@ VulnGate 是一个围绕确定性研究框架的轻量原生插件。设计原�
 - 安全模型（仅回环、审批日志、修复前不披露）；
 - 前置分级 → CVSS 映射。
 
+S1 中包含授权边界和危险 Sink 的启发式 Source→Sink 路径会写入
+`composite-chain-candidates.json`，并在 S2 进入与模型候选、控制图候选、同族差分候选相同的调度池。它们始终保留
+`heuristic-nearby` / `requires_manual_dataflow=true`，只能作为审计和 PoC
+验证任务，不能直接升级为漏洞结论。
+
 ## 两种运行模式
 
 | 模式 | 推理方 | 配置 | 典型用途 |
@@ -64,6 +69,8 @@ PARSED=true
 - `ERROR` 区分库行为（`JSONException`、OOM、`StackOverflowError`）与环境错误
   （`ENV_ERROR` 族：`NoClassDefFoundError` 等）；
 - 编译失败的单元格属于 harness 问题，不算结论。
+- 有状态/竞态候选可以声明有界 `sequence × concurrency × availability_probe`；运行器会保留
+  `STEP`、`STEP_EVIDENCE`、`STATE` 的有序 trace，但声明本身不构成漏洞或 `A:H` 证据。
 
 ## 闸门
 

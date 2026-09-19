@@ -88,6 +88,7 @@ Current gate identifiers are **G0, G1, G1b, G3, G4, and G5**; G1b is the default
 - **S1–S8 research lifecycle** — attack surface → candidates → source audit → PoC matrix → novelty → severity → finding document → evidence ledger.
 - **Deterministic helper CLI** — `agent_cli.py` provides source mapping/evidence, matrix execution, novelty checks, CVSS consistency, ledger rendering, dependency checks, probe diagnostics, and staging helpers.
 - **Version × feature × precondition validation** — PoCs are evaluated across explicit cells rather than a single best-effort run.
+- **Stateful/race experiment contract** — cells can declare bounded step sequences, concurrency, and an availability probe; ordered `STEP`/`STATE` evidence is retained without treating declarations as proof.
 - **Authorization-aware matrices** — web/application candidates can include identity × role × tenant × object context.
 - **Per-cell runtime requirements** — a required JDK/runtime must actually be available; otherwise the cell is recorded as `precondition-unavailable` instead of silently falling back.
 - **Evidence convergence** — persisted matrix evidence is not overwritten by agent/spawn timeout metadata.
@@ -183,10 +184,10 @@ For an autonomous run using your own compatible LLM API key:
 
 | Stage | Purpose | Representative outputs | Gate |
 |---|---|---|---|
-| S1 | Attack-surface mapping, entry inventory, danger sites, fix history/variants, project profile, target rules | `S1/entry-inventory.json`, `S1/security-fix-history.json`, `S1/patch-variants.json`, `S1/project-profile.json`, `S1/target-rules.json`, `S1/composite-chain-hints.json` | G0 dead code, G1 reachability |
+| S1 | Attack-surface mapping, entry inventory, danger sites, fix history/variants, project profile, target rules, composite-chain candidates | `S1/entry-inventory.json`, `S1/security-fix-history.json`, `S1/patch-variants.json`, `S1/project-profile.json`, `S1/target-rules.json`, `S1/composite-chain-hints.json`, `S1/composite-chain-candidates.json` | G0 dead code, G1 reachability |
 | S2 | Candidate matrix: surface × entry × input × mechanism | `S2/candidate-matrix.json` | — |
 | S3 | Source audit with file:line evidence, source-to-sink hints, residuals | `S3/audit-notes.json`, `S3/residuals.json` | G1b default-config gating |
-| S4 | PoC matrix: version × safe mode × precondition; optional authz context | `S4/matrix-runs/<c>/cells.json`, `S4/execution-status.json`, `S4/authz-matrix.json` | G4 runtime evidence |
+| S4 | PoC matrix: version × safe mode × precondition; optional authz and bounded state/concurrency context | `S4/matrix-runs/<c>/cells.json`, `S4/execution-status.json`, `S4/authz-matrix.json` | G4 runtime evidence |
 | S5 | Novelty: upstream issue/PR/fix + public disclosure search and coverage | `S5/novelty.json`, `S5/novelty-coverage.json` | G3 novelty / downgrade |
 | S6 | CVSS + precondition/impact consistency | `S6/severity.json` | G5 consistency |
 | S7 | Self-contained local finding document | `reports/<target>/…` | disclosure hold |

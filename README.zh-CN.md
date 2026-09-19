@@ -177,16 +177,16 @@ npm install -g @openai/codex
 
 | 阶段 | 目的 | 代表性输出 | 闸门 |
 |---|---|---|---|
-| S1 | 攻击面、入口、危险调用点、修复历史/变体、项目画像、目标类型规则 | `S1/entry-inventory.json`、`S1/security-fix-history.json`、`S1/patch-variants.json`、`S1/project-profile.json`、`S1/target-rules.json`、`S1/composite-chain-hints.json` | G0 死代码、G1 可达性 |
+| S1 | 攻击面、入口、危险调用点、修复历史/变体、项目画像、目标类型规则、复合攻击链候选 | `S1/entry-inventory.json`、`S1/security-fix-history.json`、`S1/patch-variants.json`、`S1/project-profile.json`、`S1/target-rules.json`、`S1/composite-chain-hints.json`、`S1/composite-chain-candidates.json` | G0 死代码、G1 可达性 |
 | S2 | 候选矩阵：surface × entry × input × mechanism | `S2/candidate-matrix.json` | — |
 | S3 | 带 file:line 证据的源码审计、Source→Sink hints、residuals | `S3/audit-notes.json`、`S3/residuals.json` | G1b 默认配置门控 |
-| S4 | PoC 矩阵：版本 × safe mode × 前置条件；可选 authz context | `S4/matrix-runs/<c>/cells.json`、`S4/execution-status.json`、`S4/authz-matrix.json` | G4 运行时证据 |
+| S4 | PoC 矩阵：版本 × safe mode × 前置条件；可选 authz 与有界状态/并发实验 | `S4/matrix-runs/<c>/cells.json`、`S4/execution-status.json`、`S4/authz-matrix.json` | G4 运行时证据 |
 | S5 | Novelty：上游 issue/PR/fix + 公开披露搜索与覆盖记录 | `S5/novelty.json`、`S5/novelty-coverage.json` | G3 Novelty / 强制降级 |
 | S6 | CVSS + 前置条件/影响一致性 | `S6/severity.json` | G5 一致性 |
 | S7 | 自包含本地发现文档 | `reports/<target>/…` | 披露冻结 |
 | S8 | Evidence Ledger、排除项、轮次汇总 | `ledger/<target>/…` | 最终一致性检查 |
 
-Source→Sink 图刻意保持保守：启发式邻近路径会明确标记为 `heuristic-nearby` 与 `requires_manual_dataflow=true`，不会冒充严格语义数据流证明。
+Source→Sink 图刻意保持保守：启发式邻近路径会明确标记为 `heuristic-nearby` 与 `requires_manual_dataflow=true`，不会冒充严格语义数据流证明。包含授权边界和危险 Sink 的路径会进一步生成 `chain-*` S2 候选，交给源码审计和授权/效果矩阵验证，而不是停留在提示文件中。
 
 详细设计见 [docs/ARCHITECTURE.zh-CN.md](docs/ARCHITECTURE.zh-CN.md) 与 [docs/AUDIT-PLAYBOOK.md](docs/AUDIT-PLAYBOOK.md)。
 

@@ -159,6 +159,7 @@ Run stages in order unless a hard gate or explicit scope rule ends a candidate.
 - **Advisory/fix-diff reverse analysis:** when a recent advisory exists, obtain the affected/patched range and inspect the fix diff. Treat the old path as a high-priority candidate, but do not treat the existence of a patch as runtime proof.
 - **Security-fix history:** even without an advisory, inspect recent security-oriented commits. Persist `S1/security-fix-history.json` and `S1/patch-variants.json`; generate `surface=fix-completeness` candidates for credible fixes and sibling paths.
 - **Source→Sink evidence graph:** `S1/source-sink-graph.json` is a heuristic locator using `Source→Transform→Validation→Authorization→Sink`. Paths such as `heuristic-nearby` must carry `requires_manual_dataflow=true`. They are not semantic/interprocedural proof.
+- **Composite-chain candidates:** paths containing both an authorization boundary and a dangerous sink are also materialized as deterministic `chain-*` candidates in `S1/composite-chain-candidates.json` and merged into S2. They must retain `heuristic-nearby` / `requires_manual_dataflow=true`; their purpose is to force S3/S4 validation of subject binding, transformed objects and final effects, never to bypass G1/G4.
 - Generate `project-profile.json`, `target-rules.json`, and `composite-chain-hints.json` when applicable. These prioritize research and improve candidate coverage; they are not conclusions.
 - **Host-native coverage bootstrap:** `source-map` is a bounded digest, not the coverage index. In Mode A, explicitly build the full index once in S1 (and rebuild after changing source or scope):
 
@@ -329,6 +330,21 @@ Web/application candidates may also add:
 identity × role × tenant × object ownership
 ```
 
+Stateful and race-oriented candidates may additionally declare a bounded
+experiment contract per cell:
+
+```text
+sequence (step identifiers, max 16) × concurrency (1..64) × availability_probe
+```
+
+The runner exposes these declarations as `VULNGATE_SEQUENCE`,
+`VULNGATE_CONCURRENCY`, and `VULNGATE_AVAILABILITY_PROBE`, and persists them
+with the cell. PoCs may emit repeated `STEP=`, `STEP_EVIDENCE=`, and `STATE=`
+lines; the runner preserves ordered traces. A declared concurrency or probe is
+metadata, not runtime proof: `A:H` still requires observed
+`CONCURRENCY>=2` plus `SERVICE_UNAVAILABLE=true` (or an equivalent accepted
+observation).
+
 Keep every cell, including harness failures and negative observations.
 
 #### Typed execution states
@@ -371,6 +387,9 @@ VULNGATE_PRECONDITION
 VULNGATE_FEATURES
 VULNGATE_TARGET_URL
 VULNGATE_AUTHZ_*
+VULNGATE_SEQUENCE
+VULNGATE_CONCURRENCY
+VULNGATE_AVAILABILITY_PROBE
 ```
 
 Use:
@@ -722,6 +741,7 @@ reports/<target>/round-NN/...
 - 有近期通告时先做 advisory/fix-diff 反查；旧路径成为高优先候选，但“有补丁”不是运行时证据。
 - 无通告也检查近期安全修复 commit，落盘 `S1/security-fix-history.json`、`S1/patch-variants.json`，对可信修复与兄弟路径生成 `surface=fix-completeness` 候选。
 - `S1/source-sink-graph.json` 只是一张 `Source→Transform→Validation→Authorization→Sink` 启发式定位图；`heuristic-nearby` 必须带 `requires_manual_dataflow=true`，不能冒充语义/跨过程数据流证明。
+- **复合攻击链候选：** 同时包含授权边界和危险 Sink 的路径会额外确定性生成 `chain-*` 候选，写入 `S1/composite-chain-candidates.json` 并合并进 S2。它们必须保留 `heuristic-nearby` / `requires_manual_dataflow=true`；用途是强制 S3/S4 验证 subject binding、变换后的对象和最终效果，不能绕过 G1/G4。
 - 按需生成 `project-profile.json`、`target-rules.json`、`composite-chain-hints.json`；这些只用于优先级与覆盖率，不是漏洞结论。
 - **宿主原生模式的覆盖索引初始化：** `source-map` 只是有上限的摘要，不会构建覆盖索引。Mode A 在 S1 显式执行一次完整索引；源码或范围变更后重新构建：
 
@@ -874,6 +894,18 @@ Web/应用类还可增加：
 身份 × 角色 × 租户 × 对象归属
 ```
 
+有状态/竞态类候选还可为每个 cell 声明有界实验契约：
+
+```text
+sequence（步骤标识，最多 16 个）× concurrency（1..64）× availability_probe
+```
+
+运行器会把它们以 `VULNGATE_SEQUENCE`、`VULNGATE_CONCURRENCY`、
+`VULNGATE_AVAILABILITY_PROBE` 传给 PoC，并和 cell 一起落盘。PoC 可以重复
+输出 `STEP=`、`STEP_EVIDENCE=`、`STATE=`，运行器会保留有序 trace。声明的
+并发度或探针只是元数据，不是运行时证明；`A:H` 仍必须有实际观测到的
+`CONCURRENCY>=2` 与 `SERVICE_UNAVAILABLE=true`（或等价已接受观测）。
+
 所有 cell 都保留，包括 harness error 和负向观测。
 
 #### 执行状态必须分型
@@ -914,6 +946,9 @@ VULNGATE_PRECONDITION
 VULNGATE_FEATURES
 VULNGATE_TARGET_URL
 VULNGATE_AUTHZ_*
+VULNGATE_SEQUENCE
+VULNGATE_CONCURRENCY
+VULNGATE_AVAILABILITY_PROBE
 ```
 
 运行：

@@ -54,6 +54,7 @@ from ..tools.novelty import (Disclosure, NoveltyChecker, UpstreamRef,
                              mechanism_audit_llm)
 from ..tools.patch_variants import analyze_patch_history
 from ..tools.project_profile import build_project_profile
+from ..tools.research_strategies import composite_chain_candidates
 from ..tools.target_rules import collect_target_rule_hits, composite_chain_hints
 from ..tools.public_scan import scan_all
 from ..tools.seeds import load_seeds, seed_reference_block
@@ -501,13 +502,16 @@ def schedule_candidates(ctx: AutoCtx, round_no: int,
     return selected, note
 
 
-def static_candidates(ctx: AutoCtx) -> Tuple[List[Dict[str, Any]], List[str]]:
+def static_candidates(ctx: AutoCtx, round_no: Optional[int] = None
+                      ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Index-derived candidates from the persisted coverage store (spec §11/§12).
 
     Returns ``(candidates, added_ids)``.  Best-effort by contract: a missing or
     partial coverage store means "none this round", never a failed round --
     these are leads the static layer already produced, not a precondition for
-    the LLM proposal.
+    the LLM proposal.  S1 composite-chain candidates are merged here as well
+    so the autonomous and config-driven pipelines schedule the same research
+    strategies.
     """
     if not bool(getattr(ctx.cfg, "static_candidates", True)):
         return [], []
@@ -518,7 +522,23 @@ def static_candidates(ctx: AutoCtx) -> Tuple[List[Dict[str, Any]], List[str]]:
         candidates = ctl.static_candidates(store)
     except Exception as exc:  # pragma: no cover - defensive
         print("[S2] static candidates unavailable: %s: %s" % (type(exc).__name__, exc))
-        return [], []
+        candidates = []
+    if round_no is not None:
+        path = (ctx.root / "state" / ctx.cfg.name /
+                ("round-%02d" % round_no) / "S1" /
+                "composite-chain-candidates.json")
+        try:
+            chain_candidates = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            chain_candidates = []
+        seen = {str(c.get("candidate_id")) for c in candidates
+                if c.get("candidate_id")}
+        for candidate in (chain_candidates if isinstance(chain_candidates, list)
+                          else []):
+            cid = str(candidate.get("candidate_id", ""))
+            if cid and cid not in seen:
+                candidates.append(candidate)
+                seen.add(cid)
     ids = [str(c.get("candidate_id")) for c in candidates if c.get("candidate_id")]
     return candidates, ids
 
@@ -592,6 +612,9 @@ def propose_candidates(ctx: AutoCtx, round_no: int,
         '类型混淆/DoS 类候选可为 []), '
         'authz_cases(可选数组；每项仅含 case_id、principal、role、tenant_id、object_id、object_tenant_id、'
         'expected_http_codes、expected_object_mutated、expected_authz；禁止放 token/cookie/password), '
+        'sequence(可选数组，仅填有界步骤标识如 ["seed","mutate","probe"]), '
+        'concurrency(可选 1..64 的整数；并发声明不等于已证明并发效果), '
+        'availability_probe(可选布尔；只有真实观测 SERVICE_UNAVAILABLE 时才支持 A:H), '
         'chain_components(可选数组；例如 ["request-body", "parser", "authorization", "file-write"]), '
         'novelty_keywords(数组,上游检索关键词), cvss_vector(可选)。\n'
         "只输出 JSON：{\"candidates\":[...]}"
@@ -627,6 +650,9 @@ def propose_candidates(ctx: AutoCtx, round_no: int,
         c.setdefault("jvm", {})
         c.setdefault("target_classes", [])
         c.setdefault("novelty_keywords", [])
+        c.setdefault("sequence", [])
+        c.setdefault("concurrency", 1)
+        c.setdefault("availability_probe", False)
         c["authz_cases"] = normalize_authz_cases(c.get("authz_cases"))
     # Rank the proposal by evidence instead of trusting its order: the model's
     # listing order is not a priority, and trimming to the budget should drop
@@ -701,12 +727,19 @@ def generate_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
         "EFFECT_KIND=<真实副作用类型：command-executed/process-started/command-marker/file-marker>\n"
         "EFFECT=<只有实际调用副作用后才输出的具体证据；Canary.mark 或对象实例化不得填写>\n"
         "CANARY=<仅内存 canary/能力链验证时填写，不能与 RCE 确认等同>\n"
+        "STEP=<已完成的声明步骤标识；按 sequence 顺序逐步输出>\n"
+        "STEP_EVIDENCE=<该步骤的实际证据摘要，不要输出 token/cookie/password>\n"
+        "STATE=<已观察到的本地状态检查点>\n"
         "PARSED=...\n"
         "禁止真实外联网络（只能尝试 127.0.0.1）。只输出 Java 源码，无 Markdown 围栏。"
         "输出不超过 200 行，只允许 ASCII 字符（禁止全角中文标点），禁止解释性文本。"
         "若候选是 DoS/资源耗尽类（OOM/栈溢出/CPU），矩阵会自动用小堆（-Xmx256m），"
         "请在 PoC 中捕获 Throwable 并输出 ERROR=<异常类名>: <消息首行> 行，"
         "例如 ERROR=OutOfMemoryError: Java heap space 或 ERROR=StackOverflowError。"
+        "若候选声明 sequence/concurrency，请读取 VULNGATE_SEQUENCE、"
+        "VULNGATE_CONCURRENCY、VULNGATE_AVAILABILITY_PROBE；只有真实执行的步骤"
+        "才输出 STEP/STEP_EVIDENCE/STATE，只有实际 worker 饱和与服务不可用才输出"
+        "CONCURRENCY/ SERVICE_UNAVAILABLE。"
         % (cand["candidate_id"], cand.get("surface"), cand.get("entry"),
            cand.get("logic"), pre, versions, ctx.cfg.api_hint or "见入口清单",
            src_block or "（无源码片段）", class_name, ctx.cfg.name,
@@ -743,6 +776,7 @@ def repair_poc(ctx: AutoCtx, cand: Dict[str, Any], src_text: str, compile_error:
         "（如 javax.json / org.json），必须改用目标库 %s 的公共 API；"
         "入口参考：%s。\n"
         "请只输出修正后的完整 Java 文件（类名 %s），保持机器可读输出行约定，"
+        "如候选声明了 sequence/concurrency，保留逐步 STEP/STEP_EVIDENCE/STATE 观测，"
         "只使用公共 API 与 JDK 类，确保可编译。输出不超过 200 行，"
         "只允许 ASCII 字符（禁止全角中文标点），无 Markdown 围栏。"
         % (cand["candidate_id"], compile_error[-3000:],
@@ -809,8 +843,13 @@ def generate_shell_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
         "  EFFECT=<真实副作用证据；响应状态码或猜测不能代替副作用>\n"
         "  OBJECT_MUTATED=<true|false；仅在本地 fixture/响应可验证对象确实改变时输出>\n"
         "  AUTHZ_RESULT=<allow|deny；根据真实服务端授权结果输出>\n"
+        "  STEP=<已完成的声明步骤标识>\n  STEP_EVIDENCE=<该步骤的实际证据摘要>\n"
+        "  STATE=<已观察到的本地状态检查点>\n"
         "  GATE_BLOCKED=<未触发的原因>\n  ERROR=<异常>\n"
         "- 权限矩阵上下文由 VULNGATE_AUTHZ_* 环境变量提供；不要在脚本中写入或输出 token/cookie/password；\n"
+        "- 有状态/竞态候选可读取 VULNGATE_SEQUENCE、VULNGATE_CONCURRENCY、"
+        "VULNGATE_AVAILABILITY_PROBE；只有真实执行的步骤才输出 STEP/STEP_EVIDENCE/STATE，"
+        "不能把声明值直接当作观测值；\n"
         "- 只允许访问 VULNGATE_TARGET_URL 指向的主机（回环 127.0.0.1）；禁止外联；\n"
         "- 禁止解释性输出，只输出脚本本身。"
         % (cand["candidate_id"], cand.get("surface"), cand.get("entry"),
@@ -830,7 +869,7 @@ def repair_shell_poc(ctx: AutoCtx, cand: Dict[str, Any], script_text: str,
         "攻击逻辑：%s\n"
         "请只输出修正后的完整 bash 脚本：base URL 从 VULNGATE_TARGET_URL 读取，"
         "按候选逻辑真实发送请求并检查响应，保持机器可读观测行 "
-        "（HTTP_CODE= / RESP_MATCH= / EVIDENCE= / OBJECT_MUTATED= / AUTHZ_RESULT= / GATE_BLOCKED= / ERROR=），"
+        "（HTTP_CODE= / RESP_MATCH= / EVIDENCE= / OBJECT_MUTATED= / AUTHZ_RESULT= / STEP= / STEP_EVIDENCE= / STATE= / GATE_BLOCKED= / ERROR=），"
         "权限上下文从 VULNGATE_AUTHZ_* 环境变量读取，禁止写入或输出 token/cookie/password；"
         "只允许访问 127.0.0.1/localhost，无解释性文本。"
         % (cand["candidate_id"], feedback[-3000:],
@@ -863,7 +902,10 @@ def _verify_web_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
     script_file = src_dir / script_name
     script_file.write_text(script_text, encoding="utf-8")
     authz_cases = normalize_authz_cases(cand.get("authz_cases")) or [{}]
-    cells = [MatrixCell(version=v, safe_mode=False, precondition="none", authz=case)
+    cells = [MatrixCell(version=v, safe_mode=False, precondition="none", authz=case,
+                        sequence=cand.get("sequence", []),
+                        concurrency=cand.get("concurrency", 1),
+                        availability_probe=cand.get("availability_probe", False))
              for v in sorted(urls) for case in authz_cases]
     spec = ShellPOCSpec(candidate_id=cid, script=script_name, cells=cells,
                         urls=urls, entry=cand.get("entry", ""),
@@ -938,6 +980,9 @@ def build_cells(ctx: AutoCtx, cand: Dict[str, Any]) -> List[MatrixCell]:
     required_runtime = str(cand.get("required_runtime", cand.get("requested_runtime", "")))
     java_bin = str(cand.get("java_bin", ""))
     java_home = str(cand.get("java_home", ""))
+    sequence = cand.get("sequence", [])
+    concurrency = cand.get("concurrency", 1)
+    availability_probe = cand.get("availability_probe", False)
     # DoS/resource-exhaustion candidates need a small heap or the OOM path
     # is never exercised under the matrix default JVM. If the LLM did not
     # declare Xmx, inject a 256m heap when the surface/logic hints at it.
@@ -955,6 +1000,8 @@ def build_cells(ctx: AutoCtx, cand: Dict[str, Any]) -> List[MatrixCell]:
                 for authz in authz_cases:
                     cells.append(MatrixCell(version=v, safe_mode=safe, features=features,
                                         precondition=pre, jvm=jvm, authz=authz,
+                                        sequence=sequence, concurrency=concurrency,
+                                        availability_probe=availability_probe,
                                         required_runtime=required_runtime,
                                         java_bin=java_bin, java_home=java_home))
     return cells
@@ -1108,7 +1155,10 @@ def _verify_fuzz_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
     jvm = fz.get("jvm") or cand.get("jvm") or {}
     cells = [MatrixCell(
         version=v, safe_mode=s, features=[], precondition="none",
-        args=["--entry", fz["entry"], "--hex", fz["hex"]], jvm=jvm)
+        args=["--entry", fz["entry"], "--hex", fz["hex"]], jvm=jvm,
+        sequence=cand.get("sequence", []),
+        concurrency=cand.get("concurrency", 1),
+        availability_probe=cand.get("availability_probe", False))
         for v in versions for s in (True, False)]
     spec = POCSpec(
         candidate_id=cid, class_name=class_name, src="FuzzProbe.java",
@@ -1291,6 +1341,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
     target_rule_hits = collect_target_rule_hits(
         ctx.cfg.target_type, ctx.cfg.source_dirs, ctx.root)
     chain_hints = composite_chain_hints(ctx._source_sink_graph)
+    chain_candidates = composite_chain_candidates(chain_hints)
     ctx.write_artifact(round_no, "S1", "security-fix-history.json", patch_history)
     ctx.write_artifact(round_no, "S1", "patch-variants.json", [
         {k: fix[k] for k in ("short_commit", "commit", "parent", "subject",
@@ -1303,6 +1354,8 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         "target_type": ctx.cfg.target_type, "hits": target_rule_hits,
     })
     ctx.write_artifact(round_no, "S1", "composite-chain-hints.json", chain_hints)
+    ctx.write_artifact(round_no, "S1", "composite-chain-candidates.json",
+                       chain_candidates)
 
     # ---- S2: candidates (resumable) -----------------------------------
     s2 = store.load_stage("S2")
@@ -1332,7 +1385,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         # with a citable file:line and a named missing control should win over
         # one that has neither.  The scheduler re-ranks everything after this,
         # so position is only a tiebreaker.
-        derived, derived_ids = static_candidates(ctx)
+        derived, derived_ids = static_candidates(ctx, round_no)
         if derived_ids:
             print("[round-%02d] S2: +%d index-derived candidates (spec §11/§12)"
                   % (round_no, len(derived_ids)))
@@ -1637,6 +1690,17 @@ def _evidence_lines(row: Dict[str, Any]) -> List[str]:
         lines.append("%s SafeMode=%s %s -> AVAILABILITY_PROOF=concurrency:%s service_unavailable:%s" % (
             a.get("version"), a.get("safe"), a.get("precondition"),
             a.get("concurrency"), a.get("service_unavailable")))
+    for x in s.get("experiment_evidence", [])[:4]:
+        lines.append("%s SafeMode=%s %s -> EXPERIMENT sequence=%s sequence_status=%s "
+                     "declared_concurrency=%s probe=%s STEP=%s STATE=%s STEP_EVIDENCE=%s" % (
+                         x.get("version"), x.get("safe"), x.get("precondition"),
+                         ",".join(str(step) for step in x.get("declared_sequence", [])) or "-",
+                         x.get("sequence_status", "unknown"),
+                         x.get("declared_concurrency", 1),
+                         x.get("declared_availability_probe", False),
+                         "|".join(str(step) for step in x.get("step_trace", [])[:8]) or "-",
+                         "|".join(str(state) for state in x.get("state_trace", [])[:8]) or "-",
+                         "|".join(str(ev) for ev in x.get("step_evidence", [])[:4]) or "-"))
     for a in s.get("authz_results", [])[:8]:
         az = a.get("authz", {})
         lines.append("%s SafeMode=%s %s -> AUTHZ_CASE=%s principal=%s role=%s tenant=%s object=%s assertion=%s boundary_violation=%s" % (

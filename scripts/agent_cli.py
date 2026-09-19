@@ -137,6 +137,10 @@ def _matrix_cell(c: Dict[str, Any]) -> MatrixCell:
         jvm=dict(c.get("jvm", {})),
         timeout=c.get("timeout"),
         authz=dict(c.get("authz", {})),
+        sequence=list(c.get("sequence", [])) if isinstance(c.get("sequence", []), list)
+        else c.get("sequence", []),
+        concurrency=c.get("concurrency", 1),
+        availability_probe=c.get("availability_probe", False),
         required_runtime=str(c.get("required_runtime", c.get("requested_runtime", ""))),
         java_bin=str(c.get("java_bin", "")),
         java_home=str(c.get("java_home", "")),
