@@ -8,9 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- Port the capability layer from `xingchen20lj/vulngate-workbuddy` at
-  `00e92aec9b9b0df35846ba86d86a582dd3511b45` (WorkBuddy 1.2.0), retaining the
-  Codex plugin identity, manifest, installer and host execution contract.
+- Expanded the deterministic audit layer while preserving the Codex plugin
+  identity, manifest, installer and host execution contract.
 - Full source inventory and ledger-derived audit coverage; heuristic symbol,
   call and flow indices; per-path security-control gaps and sibling differentials.
 - Coverage-aware candidate scoring, category quotas and deferred candidates;
@@ -25,7 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - S3-S8 now consume S2's scheduled selection on both fresh and resumed rounds,
   including an empty selection, rather than the unscheduled configuration pool.
 - Native launchers resolve their own Codex plugin and selected Python interpreter;
-  no WorkBuddy runtime or arbitrary installed-cache lookup is required.
+  no external agent runtime or arbitrary installed-cache lookup is required.
 - ASAR parsing reads the actual Chromium Pickle string length, including padding,
   rejects truncated data and prevents extraction through escaping paths/symlinks.
   Unsupported unpacked/link entries remain explicitly counted as skipped.
@@ -35,7 +34,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Correct host instructions for `source-map`, `matrix` and `novelty`, with explicit
   coverage bootstrap and refresh steps for Codex's host-native mode.
 
-See [migration notes](docs/WORKBUDDY-MIGRATION.md) for scope and validation.
+See [feature evolution notes](docs/EVOLUTION.md) for the capability map and validation.
 
 ## [1.0.1] - 2026-09-03
 

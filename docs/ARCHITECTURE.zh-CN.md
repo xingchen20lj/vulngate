@@ -1,6 +1,6 @@
 # 架构说明
 
-> Codex 1.1.0 新增：覆盖率、调用图、控制缺口、同族差分、候选调度与 macOS 适配。见 [迁移与命令说明](WORKBUDDY-MIGRATION.md)。审计产物使用独立 `--workspace`。
+> Codex 1.1.0 新增：覆盖率、调用图、控制缺口、同族差分、候选调度与 macOS 适配。见 [功能演进与命令说明](EVOLUTION.md)。审计产物使用独立 `--workspace`。
 
 **语言：** [English](ARCHITECTURE.md) | 简体中文
 

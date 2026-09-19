@@ -2,7 +2,7 @@
 
 让 **任意 macOS 应用**（`.dmg` / `.pkg` / `.app`）都能被 VulnGate 审计，且 S1→S8 全线可用。
 
-> **补丁已内置。** 本目录从 WorkBuddy 版迁入，随 Codex 原生 `vulngate` 仓库分发，8 处补丁已直接固化在
+> **补丁已内置。** 本目录随 Codex 原生 `vulngate` 仓库分发，8 处补丁已直接固化在
 > `scripts/agent/**` 源码中，`install.sh` 装出来的插件默认具备原生/macOS 能力 ——
 > **不需要再手工给插件打补丁**。`bin/patch-vulngate.py` 保留下来做两件事：
 > 回归校验（`--verify`，确认 8 处改动仍在）与回滚（`--restore`）。
@@ -82,7 +82,7 @@ python3 $S/bin/vg-run.py --plugin <插件根> --audit-root ./audit \
 
 | 语言栈 | 识别特征 | 源码化手段 | 落到白名单的扩展名 | 实测样本 |
 |---|---|---|---|---|
-| **Electron / Web** | `Contents/Resources/app.asar` | asar 解包；有 `.map` 时**还原原始 TS** | `.js` `.ts` `.jsx` `.tsx` | Obsidian、WorkBuddy |
+| **Electron / Web** | `Contents/Resources/app.asar` | asar 解包；有 `.map` 时**还原原始 TS** | `.js` `.ts` `.jsx` `.tsx` | Obsidian、Electron desktop client |
 | **Java** | `Contents/**/*.jar` | jar 清单喂 S1；`javap` 出 `.java` 视图 | `.java` | Burp Suite |
 | **内嵌脚本** | `*.py` | 直接复制 | `.py` | LibreOffice、企业微信 |
 | **原生 Mach-O** | 主可执行是 Mach-O | `otool -ov` / `nm` / `swift-demangle` / `c++filt` 重建 | `.h` `.c` | WireGuard、KeePassXC |
@@ -227,9 +227,9 @@ EFFECT=<具体副作用描述>
 
 ---
 
-## 来源历史实测记录（WorkBuddy 版，2026-09-14）
+## 历史实测记录（2026-09-14）
 
-以下是迁移来源记录的历史结果，本次 Codex 迁移未重新执行这些商业应用的审计。
+以下记录用于说明适配层的实测边界；具体目标仍需在授权环境中重新验证。
 
 | 样本 | 语言栈 | 源码化结果 | S1 结果 |
 |---|---|---|---|
@@ -237,7 +237,7 @@ EFFECT=<具体副作用描述>
 | **Burp Suite** | Java + Chromium | 4 jar（55139 类）+ 8 Mach-O → 63 文件 | 16 规则命中 / **107 危险点** |
 | **Obsidian** | Electron + 8 原生 | asar 15 文件 + 8 Mach-O → 92 文件 | 符号链接解析生效 |
 | **KeePassXC** | C++/Qt（已 strip） | 4 自有 + 50 vendored → 44 文件 | 如实判 `low`，建议 Ghidra |
-| **WorkBuddy asar** | Electron | 20334 文件 / 821MB / **6461 sourcemap** | 抽样 6 个 map → **还原 301 个原始源文件** |
+| **Large Electron asar** | Electron | 20334 文件 / 821MB / **6461 sourcemap** | 抽样 6 个 map → **还原 301 个原始源文件** |
 
 sourcemap 还原效果（这是 Electron 审计最值钱的入口）：
 

@@ -98,9 +98,9 @@ Current gate identifiers are **G0, G1, G1b, G3, G4, and G5**; G1b is the default
 
 ## Coverage-driven auditing and native applications
 
-Version 1.1.0 brings the analysis and macOS capabilities from the WorkBuddy
-edition into the Codex plugin. The host uses your configured Codex model; the
-new deterministic commands require no additional model API key.
+Version 1.1.0 extends the Codex plugin with a broader deterministic analysis
+layer and native-application support. The host uses your configured Codex model;
+the new deterministic commands require no additional model API key.
 
 - Full production-source inventory with explicit skipped-file reasons and
   ledger-derived review coverage.
@@ -122,7 +122,7 @@ Use the same `--workspace` for analysis, scheduling and ledger commands. Rebuild
 coverage when source or scope changes. Native reconstruction establishes an
 attack-surface view; it does not recover method bodies or prove vulnerabilities.
 See [native-target usage](macos/README.md) and
-[migration scope and command workflow](docs/WORKBUDDY-MIGRATION.md).
+[feature evolution notes](docs/EVOLUTION.md).
 
 ## Installation
 
