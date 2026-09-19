@@ -177,13 +177,12 @@ Sensitive vulnerability material, credentials, private vendor coordination, and 
 This file is an engineering provenance record. It does not prove absence of accidental similarity, establish patent rights, or replace a formal source-code/license audit. Its purpose is to make VulnGate's actual development path transparent and reviewable.
 
 
-## 2026-09-16 — WorkBuddy capability backport to Codex
+## 2026-09-16 — Coverage and native-target expansion
 
-The Codex 1.1.0 working tree incorporates the analysis layer, macOS toolkit,
-CLI additions and regressions from the same maintainer's
-[`vulngate-workbuddy`](https://github.com/xingchen20lj/vulngate-workbuddy), commit
-`00e92aec9b9b0df35846ba86d86a582dd3511b45` (WorkBuddy 1.2.0). This is an explicit
-capability backport, not a replacement of the Codex distribution. Both projects
-retain their MIT license and existing attribution. The source comparison,
-Codex-specific adjustments and verification boundaries are documented in
-[WORKBUDDY-MIGRATION.md](docs/WORKBUDDY-MIGRATION.md).
+VulnGate 1.1.0 expanded the deterministic analysis layer with full source
+inventory, coverage accounting, heuristic call and flow indices, control-gap
+analysis, sibling differentials and evidence-aware candidate scheduling. The
+same release added native application reconstruction for macOS bundles,
+Electron archives and embedded JVM targets. These capabilities were developed
+as part of the project's continuing audit-engine work and are covered by the
+regression suite and offline fixtures described in [feature evolution notes](docs/EVOLUTION.md).

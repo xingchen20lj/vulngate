@@ -1,6 +1,6 @@
 # Quickstart
 
-> Codex 1.1.0 adds coverage, call graphs, control gaps, sibling differentials, candidate scheduling and macOS support. See [migration and commands](WORKBUDDY-MIGRATION.md). Use an independent `--workspace` for audit artifacts.
+> Codex 1.1.0 adds coverage, call graphs, control gaps, sibling differentials, candidate scheduling and macOS support. See [feature evolution and commands](EVOLUTION.md). Use an independent `--workspace` for audit artifacts.
 
 **Language:** English | [简体中文](QUICKSTART.zh-CN.md)
 

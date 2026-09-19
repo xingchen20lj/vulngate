@@ -98,7 +98,7 @@ Evidence Gates
 
 ## 覆盖率驱动审计与原生应用
 
-1.1.0 将 WorkBuddy 版的分析层和 macOS 能力迁入 Codex 原生插件。
+1.1.0 为 Codex 原生插件扩展了更完整的确定性分析层和原生应用支持。
 宿主继续使用 Codex 当前模型，新增确定性命令无需额外模型 API Key。
 
 - 完整生产源码清单，显式记录跳过原因，从审计账本推导覆盖状态。
@@ -118,7 +118,7 @@ bash macos/run-audit.sh /Applications/Target.app /path/to/native-audit
 分析、调度和账本命令使用同一个 `--workspace`。源码或范围变化后重新构建覆盖索引。
 原生重建只建立攻击面视图，不能恢复方法体或直接证明漏洞。
 详见 [原生目标使用说明](macos/README.md) 和
-[迁移范围与完整命令流程](docs/WORKBUDDY-MIGRATION.md)。
+[功能演进说明](docs/EVOLUTION.md)。
 
 ## 安装
 

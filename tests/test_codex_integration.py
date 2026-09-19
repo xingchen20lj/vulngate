@@ -1,4 +1,4 @@
-"""Codex packaging and host-driven migration acceptance tests (offline)."""
+"""Codex packaging and host-driven acceptance tests (offline)."""
 import contextlib
 import importlib.util
 import io
@@ -119,7 +119,7 @@ class CodexInstallerTests(unittest.TestCase):
                          'skills/vulngate-audit/SKILL.md'):
                 self.assertTrue((dest / name).is_file(), name)
             for name in ('state', 'ledger', 'reports', 'poc', '.env', '.gitignore', '.github',
-                         '.vulngate-macos-backup', '.codebuddy-plugin', '.workbuddy'):
+                         '.vulngate-macos-backup', '.foreign-plugin', '.foreign-agent-state'):
                 self.assertFalse((dest / name).exists(), name)
             result = subprocess.run([sys.executable, str(dest / 'scripts/agent_cli.py'),
                                      'coverage', '--help'], capture_output=True, text=True)
