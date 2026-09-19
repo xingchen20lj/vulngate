@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Zero-Day Agent plugin CLI — deterministic helpers for the host Codex agent.
+"""VulnGate plugin CLI — deterministic helpers for the host Codex agent.
 
 The host agent owns reasoning (S2/S3/S5 judgment). This CLI only executes
 deterministic work: source mapping, PoC matrix runs, novelty evaluation,
@@ -16,6 +16,9 @@ Usage:
   agent_cli.py cvss --vector <CVSS:3.1/...> [--tier <tier>] [--implicit-default-on]
   agent_cli.py ledger --workspace <dir> --target <name> --round <N> --entries <json>
   agent_cli.py deps --target <dir> [--out <report.md>] [--offline] [--cache <dir>]
+  agent_cli.py coverage <target> [--workspace <dir>] [--rebuild] [--show-uncovered]
+                           [--json] [--risk high|medium|low] [--category authz]
+                           [--module <prefix>] [--lang zh|en]
   agent_cli.py spawn-probe --workspace <dir> --target <name> --round <N>
                            --status ok|degraded [--reply <agent-reply>]
   agent_cli.py staging-exec --authorized-staging --host <ECS> --user <user> ...
@@ -512,6 +515,422 @@ def cmd_deps(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_coverage(args: argparse.Namespace) -> int:
+    """Security audit coverage report (spec §16).
+
+    Reads ``state/<target>/coverage/*``.  ``--rebuild`` (or a missing index)
+    re-runs the full source/entry/sink/control inventory first; review state is
+    then re-derived from the round ledgers, which are the durable record of what
+    was decided.  Nothing here consults an LLM (spec §21.1).
+    """
+    from agent.analysis import coverage as cov
+    from agent.analysis.inventory import (CoverageStore, build_inventory,
+                                          persist_inventory)
+
+    workspace = Path(args.workspace).resolve()
+    target = args.target
+    store = CoverageStore(workspace, target)
+    payload: Dict[str, Any] = {"target": target, "workspace": str(workspace)}
+
+    need_build = args.rebuild or any(
+        not store.path(name).exists()
+        for name in ("source-inventory", "symbol-index", "flow-index"))
+    if need_build:
+        root = Path(args.root).resolve() if args.root else (
+            workspace / "targets" / target)
+        if not root.exists():
+            _out({"error": "target source root not found",
+                  "root": str(root),
+                  "hint": "pass --root <src root> (with --rebuild) or run S1 first, "
+                          "which writes state/<target>/coverage/"})
+            return 2
+        source_dirs = list(args.source_dir or [])
+        result = build_inventory(root, source_dirs or None, target=target,
+                                 target_type=args.target_type)
+        persist_inventory(store, result, target_type=args.target_type)
+        payload["rebuilt"] = {"root": str(root), "source_dirs": source_dirs,
+                              "counts": result.counts()}
+
+    if not args.no_refresh:
+        payload["refresh"] = cov.refresh_candidate_coverage(store, workspace, target)
+
+    summary = store.read("coverage-summary") or {}
+    regions = _filter_regions(summary.get("uncovered_regions") or [], args)
+
+    if args.json:
+        out = dict(summary)
+        out.update(payload)
+        out["uncovered_regions"] = regions
+        _out(out)
+        return 0
+
+    print(cov.render_coverage_text(summary, args.lang, gap_limit=1))
+    callgraph_summary = store.read("call-graph-summary") or {}
+    flow_summary = store.read("flow-summary") or {}
+    if callgraph_summary or flow_summary:
+        print("\n%s" % ("跨过程分析" if args.lang == "zh" else "Cross-procedural analysis"))
+        print("─" * 46)
+        if callgraph_summary:
+            print("  symbols %s  edges %s  unresolved %s  ambiguous %s"
+                  % (callgraph_summary.get("nodes", 0),
+                     callgraph_summary.get("edges", 0),
+                     callgraph_summary.get("unresolved_calls", 0),
+                     callgraph_summary.get("ambiguous_names", 0)))
+        if flow_summary:
+            by_priority = flow_summary.get("flows_by_priority") or {}
+            print("  flows %s (high %s / medium %s / low %s)"
+                  % (flow_summary.get("flows", 0), by_priority.get("high", 0),
+                     by_priority.get("medium", 0), by_priority.get("low", 0)))
+            print("  sinks forward-seen %s  backward-seen %s  gaps %s"
+                  % (flow_summary.get("sinks_forward_seen", 0),
+                     flow_summary.get("sinks_backward_seen", 0),
+                     flow_summary.get("coverage_gaps") or {}))
+            if flow_summary.get("truncated"):
+                print("  !! flow index truncated: %s flows dropped (--max-flows)"
+                      % flow_summary.get("dropped_flows", 0))
+    if args.schedule:
+        from agent.analysis import scheduler as sched
+        plan_payload = sched.load_schedule(store)
+        print("\n%s" % ("候选调度（最近一轮）" if args.lang == "zh"
+                        else "Candidate schedule (latest round)"))
+        print("─" * 46)
+        if not plan_payload:
+            print("  （无：尚未运行 schedule / 尚未执行任何一轮）" if args.lang == "zh"
+                  else "  (none: `agent_cli schedule` has not been run)")
+        else:
+            for item in plan_payload.get("selected") or []:
+                print("  %-10s %-9s %6.2f %-7s %s" % (
+                    item.get("candidate_id"), item.get("category"),
+                    item.get("score", 0.0), item.get("band"),
+                    ",".join(item.get("code_locations") or []) or "-"))
+            quota = plan_payload.get("quota") or {}
+            print("  quota  filled %s" % (quota.get("filled") or {}))
+            moved = quota.get("relocated") or {}
+            if moved:
+                print("  quota  relocated %s" % moved)
+            deferred = plan_payload.get("deferred_ids") or []
+            print("  deferred %d" % len(deferred))
+            pinned = plan_payload.get("pinned") or []
+            if pinned:
+                print("  pinned   %s" % ", ".join(pinned))
+            residual = plan_payload.get("residual") or {}
+            if not residual.get("measured", True):
+                print("  residual not measured this round")
+            elif residual:
+                print("  high-risk uncovered %s  stop condition %s"
+                      % (residual.get("high_risk_uncovered"),
+                         "met" if residual.get("stop_condition_met") else "not met"))
+    if payload.get("rebuilt"):
+        counts = payload["rebuilt"]["counts"]
+        print("\n[index rebuilt from %s]" % payload["rebuilt"]["root"])
+        print("  excluded dirs: %d (%d files not descended into)"
+              % (counts.get("excluded_dirs", 0),
+                 counts.get("excluded_dir_file_count", 0)))
+    if args.show_uncovered:
+        print("\n%s（%d）" % ("未审计区域" if args.lang == "zh" else "Uncovered regions",
+                             len(regions)))
+        print("─" * 46)
+        if not regions:
+            print("  （无）" if args.lang == "zh" else "  (none)")
+        for region in regions[:args.limit]:
+            location = ("%s:%d" % (region.get("file"), region.get("line"))
+                        if region.get("file") else region.get("ref", ""))
+            print("  [%s] %-26s %s" % (str(region.get("risk", "")).upper()[:6],
+                                       region.get("kind", ""), location))
+            print("        %s" % region.get("reason", ""))
+        if len(regions) > args.limit:
+            print("  ... %d more (use --limit)" % (len(regions) - args.limit))
+    return 0
+
+
+def _load_candidate_pool(args: argparse.Namespace) -> "tuple[List[Dict[str, Any]], int, str]":
+    """Read the candidate pool for ``schedule`` from a file or a target config.
+
+    Accepts the three shapes the pipeline already emits -- a bare list, a
+    ``{"candidates": [...]}`` envelope, and an S2 ``candidate-matrix.json``
+    (a list of cells) -- so an operator can re-schedule a round from exactly the
+    artifacts it produced instead of re-typing the pool.
+    """
+    import json as _json
+
+    if args.candidates:
+        path = Path(args.candidates)
+        if not path.exists():
+            return [], 0, "candidate file not found: %s" % path
+        try:
+            data = _json.loads(path.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            return [], 0, "candidate file is not JSON: %s" % exc
+        if isinstance(data, dict):
+            data = data.get("candidates") or data.get("matrix") or []
+        if not isinstance(data, list):
+            return [], 0, "candidate file must hold a list or {\"candidates\": [...]}"
+        return [c for c in data if isinstance(c, dict)], 0, ""
+
+    if args.config:
+        from agent.orchestrator.config import TargetConfig
+        path = Path(args.config)
+        if not path.exists():
+            return [], 0, "config not found: %s" % path
+        cfg = TargetConfig.load(path)
+        return list(cfg.candidates), int(cfg.max_candidates or 0), ""
+
+    return [], 0, "no candidate pool: pass --candidates <file> or --config <file>"
+
+
+def cmd_schedule(args: argparse.Namespace) -> int:
+    """Coverage-aware candidate schedule (spec §13/§14/§15).
+
+    Scores a candidate pool against the persisted coverage index, applies the
+    category quota, writes ``state/<target>/coverage/schedule-*.json`` and
+    prints the plan.  ``--prompt`` additionally prints the structured block S2
+    feeds the model.  Deterministic and offline (spec §21.1).
+    """
+    from agent.analysis import scheduler as sched
+    from agent.analysis.inventory import CoverageStore
+
+    workspace = Path(args.workspace).resolve()
+    store = CoverageStore(workspace, args.target)
+    pool, config_slots, error = _load_candidate_pool(args)
+    if error:
+        _out({"error": error})
+        return 2
+    if not pool:
+        _out({"error": "candidate pool is empty", "target": args.target})
+        return 2
+    slots = args.slots or config_slots or sched.DEFAULT_SLOTS
+    if args.limit_pool:
+        pool = pool[:args.limit_pool]
+
+    selected, plan, note = sched.round_selection(
+        workspace, args.target, pool, slots, round_no=args.round,
+        refresh=not args.no_refresh)
+    if plan is None:
+        _out({"error": note, "target": args.target,
+              "hint": "run S1 or `agent_cli coverage --rebuild` first"})
+        return 2
+
+    if args.json:
+        payload = plan.as_dict()
+        payload["note"] = note
+        payload["pool_size"] = len(pool)
+        payload["scheduled_candidates"] = [
+            {k: c.get(k) for k in ("candidate_id", "surface", "entry",
+                                   "input_shape", "logic")} for c in selected]
+        _out(payload)
+        return 0
+
+    print(sched.render_schedule_text(plan, args.lang))
+    print("")
+    print(("候选池 %d → 本轮 %d（延后 %d）" if args.lang == "zh"
+           else "pool %d -> round %d (deferred %d)")
+          % (len(pool), len(selected), len(plan.deferred)))
+    if plan.pinned:
+        print(("钉住（运行时证据）：" if args.lang == "zh" else "pinned (runtime evidence): ")
+              + ", ".join(plan.pinned))
+    if note:
+        print(("!! %s" if args.lang == "zh" else "!! %s") % note)
+    if args.prompt:
+        context = sched.ScheduleContext.from_store(store)
+        print("")
+        print(sched.prompt_coverage_block(context, plan=plan))
+    return 0
+
+
+def _read_fix_history(path: Optional[str]) -> "tuple[List[Dict[str, Any]], str]":
+    """Patch history for the PR4 sibling diff: explicit file, else the newest S1 one.
+
+    Returns ``(history, note)``; an empty history is normal (no patch evidence),
+    and the note says which of the two ways produced it so an operator can tell
+    "no file" apart from "file has no records".
+    """
+    import json as _json
+
+    if path:
+        target = Path(path)
+        if not target.exists():
+            return [], "fix history not found: %s" % target
+        try:
+            data = _json.loads(target.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            return [], "fix history is not JSON: %s" % exc
+        if isinstance(data, dict):
+            data = data.get("fixes") or data.get("rows") or []
+        return [d for d in data if isinstance(d, dict)], ""
+    return [], ""
+
+
+def _newest_fix_history(workspace: Path, target: str) -> List[Dict[str, Any]]:
+    """Newest ``state/<target>/round-NN/S1/security-fix-history.json``, if any."""
+    import json as _json
+
+    base = Path(workspace) / "state" / target
+    if not base.exists():
+        return []
+    candidates = sorted(base.glob("round-*/S1/security-fix-history.json"))
+    for path in reversed(candidates):
+        try:
+            data = _json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, list):
+            return [d for d in data if isinstance(d, dict)]
+    return []
+
+
+def _ensure_coverage_analysis(args: argparse.Namespace,
+                              required: "tuple[str, ...]",
+                              with_fix_history: bool = False):
+    """Make sure the requested PR4 index exists, rebuilding the inventory if not.
+
+    Returns ``(workspace, store, rebuilt, history_note)``.  Raises nothing: the
+    caller reports an unbuildable target as a normal error result, the way
+    ``cmd_coverage`` does.
+    """
+    from agent.analysis.inventory import (CoverageStore, build_inventory,
+                                          persist_inventory)
+
+    workspace = Path(args.workspace).resolve()
+    store = CoverageStore(workspace, args.target)
+    missing = [name for name in required if not store.path(name).exists()]
+    if not (getattr(args, "rebuild", False) or missing):
+        return workspace, store, None, ""
+
+    root = Path(args.root).resolve() if getattr(args, "root", None) else (
+        workspace / "targets" / args.target)
+    if not root.exists():
+        raise FileNotFoundError(root)
+
+    fix_history: List[Dict[str, Any]] = []
+    note = ""
+    if with_fix_history:
+        fix_history, note = _read_fix_history(getattr(args, "fix_history", None))
+        if not fix_history and not note and not getattr(args, "fix_history", None):
+            fix_history = _newest_fix_history(workspace, args.target)
+            note = ("fix history: %d record(s) from the newest S1 artifact"
+                    % len(fix_history))
+    source_dirs = list(getattr(args, "source_dir", []) or [])
+    result = build_inventory(root, source_dirs or None, target=args.target,
+                             target_type=getattr(args, "target_type", None),
+                             fix_history=fix_history)
+    persist_inventory(store, result, target_type=getattr(args, "target_type", None))
+    rebuilt = {"root": str(root), "source_dirs": source_dirs,
+               "counts": result.counts(), "missing_indices": missing}
+    return workspace, store, rebuilt, note
+
+
+def cmd_controls(args: argparse.Namespace) -> int:
+    """Security control map (spec §11): Entry -> Sink path verdicts.
+
+    Prints how many paths are guarded, partially guarded or uncontrolled, which
+    control classes are missing, and the highest-signal unguarded paths.
+    ``--show-candidates`` also prints the deterministic candidates the map
+    generates (``possible-auth-bypass`` / ``possible-control-bypass``).  Nothing
+    here consults an LLM (spec §21.1).
+    """
+    from agent.analysis import controls as ctl
+
+    try:
+        workspace, store, rebuilt, _ = _ensure_coverage_analysis(
+            args, (ctl.CONTROL_MAP_INDEX,))
+    except FileNotFoundError as exc:
+        _out({"error": "target source root not found", "root": str(exc),
+              "hint": "pass --root <src root> (with --rebuild) or run S1 first"})
+        return 2
+
+    cmap = ctl.load_control_map(store)
+    candidates = ctl.control_candidates(cmap, limit_per_kind=args.limit_candidates)
+    payload: Dict[str, Any] = {
+        "target": args.target, "workspace": str(workspace),
+        "summary": cmap.summary(),
+        "candidates": candidates,
+    }
+    if rebuilt is not None:
+        payload["rebuilt"] = rebuilt
+    if args.json:
+        entries = cmap.entries
+        if args.limit:
+            entries = cmap.unguarded("authz")[:args.limit]
+        payload["entries"] = [e.as_dict() for e in entries]
+        _out(payload)
+        return 0
+
+    print(ctl.render_control_map_text(cmap, args.lang, limit=args.limit,
+                                      candidates=candidates
+                                      if args.show_candidates else None))
+    if rebuilt is not None:
+        print("\n[index rebuilt from %s]" % rebuilt["root"])
+    return 0
+
+
+def cmd_differential(args: argparse.Namespace) -> int:
+    """Sibling / differential analysis (spec §12): where siblings disagree.
+
+    Prints the sibling groups' basis, the control differentials found in them
+    and the candidates they generate.  Patch evidence from S1's
+    ``security-fix-history.json`` is folded in by default (spec §18 Phase 4
+    "patch sibling diff"); ``--fix-history`` overrides it.  Offline and
+    deterministic (spec §21.1).
+    """
+    from agent.analysis import differential as diff
+
+    try:
+        workspace, store, rebuilt, note = _ensure_coverage_analysis(
+            args, (diff.DIFFERENTIAL_INDEX,), with_fix_history=True)
+    except FileNotFoundError as exc:
+        _out({"error": "target source root not found", "root": str(exc),
+              "hint": "pass --root <src root> (with --rebuild) or run S1 first"})
+        return 2
+
+    index = diff.load_differential(store)
+    candidates = diff.differential_candidates(index.findings, limit=args.limit_candidates)
+    payload: Dict[str, Any] = {
+        "target": args.target, "workspace": str(workspace),
+        "summary": index.summary(),
+        "findings": [f.as_dict() for f in index.findings[:max(0, args.limit)]],
+        "candidates": candidates,
+    }
+    if note:
+        payload["fix_history_note"] = note
+    if rebuilt is not None:
+        payload["rebuilt"] = rebuilt
+    if args.json:
+        _out(payload)
+        return 0
+
+    print(diff.render_differential_text(index, args.lang, limit=args.limit,
+                                        candidates=candidates
+                                        if args.show_candidates else None))
+    if note:
+        print("\n[%s]" % note)
+    if rebuilt is not None:
+        print("[index rebuilt from %s]" % rebuilt["root"])
+    return 0
+
+
+def _filter_regions(regions: List[Dict[str, Any]],
+                    args: argparse.Namespace) -> List[Dict[str, Any]]:
+    """Apply ``--risk`` / ``--category`` / ``--module`` to the gap list."""
+    out = list(regions)
+    if args.risk:
+        out = [r for r in out if str(r.get("risk")) == args.risk]
+    if args.category:
+        needle = args.category.lower()
+
+        def matches(region: Dict[str, Any]) -> bool:
+            detail = region.get("detail") or {}
+            haystack = [str(region.get("kind", "")), str(region.get("reason", ""))]
+            haystack += [str(v) for v in detail.values()]
+            return any(needle in item.lower() for item in haystack)
+
+        out = [r for r in out if matches(r)]
+    if args.module:
+        prefix = args.module.strip("/")
+        out = [r for r in out if str(r.get("file", "")).startswith(prefix)
+               or ("/" + prefix) in str(r.get("file", ""))]
+    return out
+
+
 def cmd_spawn_probe(args: argparse.Namespace) -> int:
     """Record the S4 spawn preflight probe result (deterministic bookkeeping).
 
@@ -642,6 +1061,111 @@ def build_parser() -> argparse.ArgumentParser:
     dp.add_argument("--offline", action="store_true")
     dp.add_argument("--cache", default=None)
     dp.set_defaults(fn=cmd_deps)
+
+    cvr = sub.add_parser(
+        "coverage",
+        help="security audit coverage report: source/entry/sink/flow ratios + "
+             "uncovered high-risk regions",
+    )
+    cvr.add_argument("target", help="target name (state/<target>/coverage/)")
+    cvr.add_argument("--workspace", default=".", help="workspace root (default: cwd)")
+    cvr.add_argument("--root", default=None,
+                     help="target source root; needed when --rebuild has no index yet")
+    cvr.add_argument("--source-dir", action="append", default=[],
+                     help="restrict the scan to this source dir (repeatable)")
+    cvr.add_argument("--target-type", default=None,
+                     choices=["library", "web-app", "middleware", "logging",
+                              "expression", "message-rpc", "native-app"],
+                     help="adds target-type rule patterns to the entry index")
+    cvr.add_argument("--rebuild", action="store_true",
+                     help="re-run the full source/entry/sink/control inventory first")
+    cvr.add_argument("--no-refresh", action="store_true",
+                     help="skip re-deriving review state from the round ledgers")
+    cvr.add_argument("--json", action="store_true", help="machine-readable output")
+    cvr.add_argument("--show-uncovered", action="store_true",
+                     help="list uncovered regions (respects --risk/--category/--module)")
+    cvr.add_argument("--risk", default=None, choices=["high", "medium", "low"])
+    cvr.add_argument("--category", default=None,
+                     help="filter uncovered regions by sink/entry/control category")
+    cvr.add_argument("--module", default=None,
+                     help="filter uncovered regions by file path prefix")
+    cvr.add_argument("--limit", type=int, default=40)
+    cvr.add_argument("--lang", default="zh", choices=["zh", "en"])
+    cvr.add_argument("--schedule", action="store_true",
+                     help="also print the latest candidate schedule (spec §13)")
+    cvr.set_defaults(fn=cmd_coverage)
+
+    sch = sub.add_parser(
+        "schedule",
+        help="coverage-aware candidate schedule: weighted score + category quota "
+             "+ deferred carry-over (spec §13/§14/§15)",
+    )
+    sch.add_argument("target", help="target name (state/<target>/coverage/)")
+    sch.add_argument("--workspace", default=".", help="workspace root (default: cwd)")
+    sch.add_argument("--candidates", default=None,
+                     help="candidate pool JSON (bare list, {\"candidates\": [...]}, "
+                          "or an S2 candidate-matrix.json)")
+    sch.add_argument("--config", default=None,
+                     help="target config JSON; its candidates/max_candidates are used")
+    sch.add_argument("--slots", type=int, default=0,
+                     help="candidate budget for the round (default: config value "
+                          "or %d)" % 8)
+    sch.add_argument("--round", type=int, default=0,
+                     help="round number, recorded on the plan and in its filename")
+    sch.add_argument("--limit-pool", type=int, default=0,
+                     help="score only the first N pool entries (debug aid)")
+    sch.add_argument("--no-refresh", action="store_true",
+                     help="skip the residual sweep before scoring (spec §14)")
+    sch.add_argument("--prompt", action="store_true",
+                     help="also print the spec §15 structured prompt block")
+    sch.add_argument("--json", action="store_true", help="machine-readable output")
+    sch.add_argument("--lang", default="zh", choices=["zh", "en"])
+    sch.set_defaults(fn=cmd_schedule)
+
+    def _add_analysis_args(parser: argparse.ArgumentParser) -> None:
+        """Options shared by the two PR4 index reports."""
+        parser.add_argument("target", help="target name (state/<target>/coverage/)")
+        parser.add_argument("--workspace", default=".",
+                            help="workspace root (default: cwd)")
+        parser.add_argument("--root", default=None,
+                            help="target source root; needed when --rebuild has no index yet")
+        parser.add_argument("--source-dir", action="append", default=[],
+                            help="restrict the scan to this source dir (repeatable)")
+        parser.add_argument("--target-type", default=None,
+                            choices=["library", "web-app", "middleware", "logging",
+                                     "expression", "message-rpc", "native-app"],
+                            help="adds target-type rule patterns to the entry index")
+        parser.add_argument("--rebuild", action="store_true",
+                            help="re-run the full inventory (and this analysis) first")
+        parser.add_argument("--json", action="store_true",
+                            help="machine-readable output")
+        parser.add_argument("--show-candidates", action="store_true",
+                            help="also print the generated candidates")
+        parser.add_argument("--limit", type=int, default=20,
+                            help="max items to list (default: 20)")
+        parser.add_argument("--limit-candidates", type=int, default=0,
+                            help="cap generated candidates per kind (0 = unlimited)")
+        parser.add_argument("--lang", default="zh", choices=["zh", "en"])
+
+    ctlm = sub.add_parser(
+        "controls",
+        help="security control map (spec §11): Entry -> Sink path verdicts + "
+             "possible-auth-bypass / possible-control-bypass candidates",
+    )
+    _add_analysis_args(ctlm)
+    ctlm.set_defaults(fn=cmd_controls)
+
+    dfs = sub.add_parser(
+        "differential",
+        help="sibling / differential analysis (spec §12): where sibling handlers "
+             "disagree about a security control",
+    )
+    _add_analysis_args(dfs)
+    dfs.add_argument("--fix-history", default=None,
+                     help="patch-history JSON for the patch sibling diff; "
+                          "default: newest state/<target>/round-*/S1/"
+                          "security-fix-history.json")
+    dfs.set_defaults(fn=cmd_differential)
 
     sp = sub.add_parser(
         "spawn-probe",

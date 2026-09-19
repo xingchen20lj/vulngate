@@ -1,7 +1,7 @@
 {
   "name": "vulngate",
-  "version": "1.0.1",
-  "description": "VulnGate — a Codex-native source-audit pipeline for ANY codebase: libraries (parsing/serialization), web frameworks (Spring/Struts), middleware/servers (Tomcat/Jetty), logging libraries (Log4j/Logback), expression engines, message/RPC stacks, and applications. Runs the S1→S8 audit loop (attack-surface map → candidates → source audit → PoC matrix → novelty gate → CVSS → disclosure-ready report) with hard evidence gates (G0–G5) driven by the host agent.\n\nAliases: @vulngate, @vg, 漏洞审计, 源码审计, 审计管线, vuln audit.",
+  "version": "1.1.0",
+  "description": "VulnGate — a Codex-native source-audit pipeline for ANY codebase: libraries (parsing/serialization), web frameworks (Spring/Struts), middleware/servers (Tomcat/Jetty), logging libraries (Log4j/Logback), expression engines, message/RPC stacks, and applications. Runs the S1→S8 audit loop (attack-surface map → candidates → source audit → PoC matrix → novelty gate → CVSS → disclosure-ready report) with hard evidence gates (G0–G5) driven by the host agent.\n\nAliases: @vulngate, @vg, 漏洞审计, 源码审计, 审计管线, vuln audit.\n\nCoverage-driven auditing: full source inventory, heuristic call graphs and flows, security control gaps, sibling differentials, candidate scheduling, and macOS/Electron/native application reconstruction.",
   "author": {
     "name": "xingchen20lj",
     "email": "71823107+xingchen20lj@users.noreply.github.com",
@@ -17,13 +17,17 @@
     "llm-agent",
     "poc",
     "novelty",
-    "0day"
+    "0day",
+    "coverage",
+    "callgraph",
+    "macos",
+    "electron"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "VulnGate",
-    "shortDescription": "S1→S8 通用源码审计管线（宿主驱动 + 硬闸门）",
-    "longDescription": "VulnGate 以原生插件形式把 S1→S8 源码审计流程嵌入 Codex，适用于任意代码库：解析/序列化库、Web 框架（Spring/Struts）、中间件（Tomcat/Jetty）、日志库（Log4j/Logback）、表达式引擎、消息/RPC 栈与应用。宿主 Agent 负责候选生成、静态审计与结论判定，捆绑 CLI 负责矩阵跑测、Novelty 检索、CVSS 校验与账本落盘。每条“确认”结论都必须有运行时 PoC 证据；上游公开披露命中即降级，严禁声称 0day。\n\nEnglish: VulnGate embeds the S1→S8 source-audit pipeline natively in Codex for ANY codebase — libraries, web frameworks (Spring/Struts), middleware (Tomcat/Jetty), logging (Log4j/Logback), expression engines, message/RPC stacks, and applications. The host agent owns reasoning; the bundled CLI owns deterministic work (PoC matrix, novelty scan, CVSS consistency, ledger). Every \"confirmed\" finding requires runtime PoC evidence; upstream public disclosure degrades novelty; never claim 0day without it.",
+    "shortDescription": "覆盖率驱动的 Codex 源码审计，支持 macOS / Electron",
+    "longDescription": "VulnGate 以原生插件形式把 S1→S8 源码审计流程嵌入 Codex，适用于任意代码库：解析/序列化库、Web 框架（Spring/Struts）、中间件（Tomcat/Jetty）、日志库（Log4j/Logback）、表达式引擎、消息/RPC 栈与应用。宿主 Agent 负责候选生成、静态审计与结论判定，捆绑 CLI 负责矩阵跑测、Novelty 检索、CVSS 校验与账本落盘。每条“确认”结论都必须有运行时 PoC 证据；上游公开披露命中即降级，严禁声称 0day。\n\nEnglish: VulnGate embeds the S1→S8 source-audit pipeline natively in Codex for ANY codebase — libraries, web frameworks (Spring/Struts), middleware (Tomcat/Jetty), logging (Log4j/Logback), expression engines, message/RPC stacks, and applications. The host agent owns reasoning; the bundled CLI owns deterministic work (PoC matrix, novelty scan, CVSS consistency, ledger). Every \"confirmed\" finding requires runtime PoC evidence; upstream public disclosure degrades novelty; never claim 0day without it.\n\n新增完整源码覆盖率、启发式调用图、安全控制缺口与同族差分、候选调度，以及 macOS .app/.dmg/.pkg、Mach-O、Electron ASAR 和 source map 适配。静态线索不替代运行时证据。",
     "developerName": "xingchen20lj",
     "category": "Engineering",
     "capabilities": [
@@ -33,9 +37,9 @@
     ],
     "websiteURL": "https://github.com/xingchen20lj/vulngate",
     "defaultPrompt": [
-      "审计这个解析库，跑 S1→S8 全流程",
-      "验证这份 PoC，跑 版本×开关×前置 矩阵",
-      "核验这个候选是否已有公开披露"
+      "审计这个代码库，按覆盖率驱动 S1→S8 全流程",
+      "审计这个 macOS 应用，重建攻击面并验证候选",
+      "查看高风险未审区域，安排下一轮审计候选"
     ],
     "brandColor": "#0EA5E9",
     "composerIcon": "./assets/composer-icon.png",

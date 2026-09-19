@@ -175,3 +175,15 @@ Sensitive vulnerability material, credentials, private vendor coordination, and 
 ## Scope of this document
 
 This file is an engineering provenance record. It does not prove absence of accidental similarity, establish patent rights, or replace a formal source-code/license audit. Its purpose is to make VulnGate's actual development path transparent and reviewable.
+
+
+## 2026-09-16 — WorkBuddy capability backport to Codex
+
+The Codex 1.1.0 working tree incorporates the analysis layer, macOS toolkit,
+CLI additions and regressions from the same maintainer's
+[`vulngate-workbuddy`](https://github.com/xingchen20lj/vulngate-workbuddy), commit
+`00e92aec9b9b0df35846ba86d86a582dd3511b45` (WorkBuddy 1.2.0). This is an explicit
+capability backport, not a replacement of the Codex distribution. Both projects
+retain their MIT license and existing attribution. The source comparison,
+Codex-specific adjustments and verification boundaries are documented in
+[WORKBUDDY-MIGRATION.md](docs/WORKBUDDY-MIGRATION.md).

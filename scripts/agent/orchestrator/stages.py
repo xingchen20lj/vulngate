@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from ..memory.ledger import render_finding_md, write_round_artifacts
 from ..memory.state import CheckpointStore
+from ..analysis.languages import ALL_SUFFIXES
 from ..sandbox.approval import ApprovalGate
 from ..sandbox.runner import CommandRunner
 from ..tools import search as srch
@@ -70,10 +71,106 @@ def _gate_scan(ctx: StageContext) -> List[Dict[str, Any]]:
         if not d.exists():
             continue
         for kw in keywords:
-            lines = srch.rg(kw, d, globs=["*.java"], max_count=6)
+            # [vulngate-macos-universal] 去掉 *.java 硬编码：
+            # globs=None 时 srch.rg 扫全部文件，
+            # 让 source-evidence 的白名单成为唯一口径。
+            lines = srch.rg(kw, d, max_count=6)
             if lines:
                 hits.append({"keyword": kw, "source": src, "lines": lines})
     return hits
+
+
+def _fix_history(ctx: StageContext) -> List[Dict[str, Any]]:
+    """The S1 patch-history artifact, or ``[]`` when S1 did not produce one.
+
+    Optional input to the PR4 sibling diff (spec §18 Phase 4 "patch sibling
+    diff"): with no history the differential simply has no patch-evidence
+    findings.  Read defensively because this runs at the end of S1, where a
+    patch-analysis failure must not take the coverage index down with it.
+    """
+    try:
+        return list(ctx.store.read_artifact("S1", "security-fix-history.json") or [])
+    except Exception:  # pragma: no cover - artifact store is best-effort here
+        return []
+
+
+def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
+    """S1 -> Inventory / Coverage Index (spec §21.3).
+
+    The inventory is built once and then *refreshed*: rebuilding the whole
+    source universe on every round would be wasted work, while re-deriving the
+    review state from the round ledgers is cheap and is what actually changes
+    between rounds.  The index is target-scoped (``state/<target>/coverage/``),
+    not round-scoped, because coverage accumulates.
+
+    A store built by an earlier phase is rebuilt rather than trusted: the PR2
+    indices (symbol index, call graph, flow index) are a strict superset of the
+    PR1 indices, and ``source-inventory.json`` existing is not evidence that
+    they do.  Without this check an upgraded checkout silently keeps scoring
+    flows it never computed.
+
+    PR4's control map and differential index join that required set for the same
+    reason: a store built by PR3 has flows but no control verdicts, and a
+    scheduler that silently scored without them would look identical to one that
+    had them.
+    """
+    from ..analysis import controls as ctl
+    from ..analysis import coverage as cov
+    from ..analysis import differential as diff
+    from ..analysis.inventory import CoverageStore, build_inventory, persist_inventory
+
+    store = CoverageStore(ctx.workspace, ctx.target)
+    required = ("source-inventory", "flow-index", "symbol-index",
+                ctl.CONTROL_MAP_INDEX, diff.DIFFERENTIAL_INDEX)
+    missing = [name for name in required if not store.path(name).exists()]
+    built = False
+    if missing:
+        result = build_inventory(ctx.workspace, ctx.config.source_dirs,
+                                 target=ctx.target,
+                                 target_type=ctx.config.target_type,
+                                 fix_history=_fix_history(ctx))
+        persist_inventory(store, result, target_type=ctx.config.target_type)
+        built = True
+    info = cov.refresh_candidate_coverage(store, ctx.workspace, ctx.target)
+    info["rebuilt"] = built
+    info["missing_indices"] = missing
+    summary = store.read("call-graph-summary") or {}
+    flow_summary = store.read("flow-summary") or {}
+    control_summary = (store.read(ctl.CONTROL_MAP_INDEX) or {}).get("summary") or {}
+    differential_summary = (store.read(diff.DIFFERENTIAL_INDEX) or {}).get("summary") or {}
+    if control_summary:
+        info["control_map"] = {
+            "flows": control_summary.get("flows"),
+            "verdicts": control_summary.get("verdicts"),
+            "missing_controls": control_summary.get("missing_controls"),
+            "auth_bypass_paths": control_summary.get("auth_bypass_paths"),
+            "validation_gap_paths": control_summary.get("validation_gap_paths"),
+        }
+    if differential_summary:
+        info["differential"] = {
+            "members": differential_summary.get("members"),
+            "groups": differential_summary.get("groups"),
+            "findings": differential_summary.get("findings"),
+            "findings_by_kind": differential_summary.get("findings_by_kind"),
+            "findings_by_risk": differential_summary.get("findings_by_risk"),
+        }
+    if summary:
+        info["call_graph"] = {
+            "nodes": summary.get("nodes"), "edges": summary.get("edges"),
+            "propagation": summary.get("propagation"),
+            "unresolved_calls": summary.get("unresolved_calls"),
+            "ambiguous_names": summary.get("ambiguous_names"),
+        }
+    if flow_summary:
+        info["flows"] = {
+            "total": flow_summary.get("flows"),
+            "by_priority": flow_summary.get("flows_by_priority"),
+            "sinks_forward_seen": flow_summary.get("sinks_forward_seen"),
+            "sinks_backward_seen": flow_summary.get("sinks_backward_seen"),
+            "coverage_gaps": flow_summary.get("coverage_gaps"),
+            "truncated": flow_summary.get("truncated"),
+        }
+    return info
 
 
 def run_s1(ctx: StageContext) -> Dict[str, Any]:
@@ -92,7 +189,12 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
             c for c in classes if c.endswith(".class") and "module-info" not in c)
         jars_info.append({
             "version": j["version"],
-            "path": str(p.relative_to(ctx.workspace)),
+            # [vulngate-macos-universal] TargetConfig.resolve_jars 允许
+            # jar 位于 workspace 之外（绝对路径），但这一行假设了
+            # 包含关系，relative_to 会抛 ValueError 让 S1 整体崩。
+            # macOS 应用的 jar 天然在 /Applications 下，故需容忍。
+            "path": (str(p.relative_to(ctx.workspace))
+                     if ctx.workspace.resolve() in p.resolve().parents else str(p)),
             "sha256": srch.sha256(p),
             "size_bytes": p.stat().st_size,
             "class_count": len([c for c in classes if c.endswith(".class")]),
@@ -122,13 +224,30 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
                 "file": fl, "line": h["line"], "text": h["text"],
             })
     entries = []
+    # ``count_references`` shells out to ripgrep per entry.  With the entry
+    # inventory no longer capped (spec §6.1) that would be one rg per entry;
+    # entries share a small set of API names, so memoizing by name collapses it
+    # to a handful of scans without changing the result.
+    refs_cache: Dict[str, int] = {}
+    targets_dir = ctx.workspace / "targets"
     for ep in ctx.config.entry_points:
-        refs = srch.count_references(ctx.workspace / "targets", ep.get("api", "")) if (ctx.workspace / "targets").exists() else 0
+        api = str(ep.get("api", ""))
+        if targets_dir.exists():
+            if api not in refs_cache:
+                refs_cache[api] = srch.count_references(targets_dir, api)
+            refs = refs_cache[api]
+        else:
+            refs = 0
         entry = dict(ep)
         entry["g0"] = g0_dead_code(ep, refs).__dict__
         entry["g1"] = g1_reachable(ep).__dict__
         fl = ep.get("file_line") or ep.get("file") or ""
-        fname_tokens = [t for t in re.split(r"[^\w./]+", str(fl)) if t.endswith(".java")]
+        # [vulngate-macos-universal] 原为 t.endswith(".java")，导致 .h/.swift/
+        # .py/.ts 入口的 danger_hits 恒为 0。后缀集现在来自
+        # agent.analysis.languages（spec §6.3），不再各处硬编码。
+        _src_exts = tuple(ALL_SUFFIXES)
+        fname_tokens = [t for t in re.split(r"[^\w./]+", str(fl))
+                        if t.endswith(_src_exts)]
 
         def _match(d: Dict[str, object]) -> bool:
             dfile = str(d["file"])
@@ -168,17 +287,39 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
         "hits": target_rule_hits,
     })
     ctx.store.write_artifact("S1", "composite-chain-hints.json", chain_hints)
+    # S1 -> Inventory / Coverage Index (spec §21.3).  Best-effort: a coverage
+    # failure must not abort an audit round, but the reason is recorded so the
+    # gap is visible rather than silent.
+    try:
+        coverage_index = _build_coverage_index(ctx)
+    except Exception as exc:  # pragma: no cover - defensive
+        coverage_index = {"error": "%s: %s" % (type(exc).__name__, exc)}
+    ctx.store.write_artifact("S1", "coverage-summary.json", coverage_index)
     return {"jars": jars_info, "entries": entries, "gate_scan_count": len(gate_scan),
             "version_diff": version_diff, "danger_site_count": len(danger_sites),
             "security_fix_count": len(patch_history),
             "source_sink_path_count": len(source_sink_graph),
             "target_rule_hit_count": len(target_rule_hits),
             "composite_chain_hint_count": len(chain_hints),
+            "coverage": coverage_index,
             "project_profile": project_profile}
 
 
 def run_s2(ctx: StageContext) -> Dict[str, Any]:
-    """Attack-surface matrix: entry x input shape x logic -> candidate cells."""
+    """Attack-surface matrix: entry x input shape x logic -> candidate cells.
+
+    The candidate pool is *scheduled* rather than taken wholesale (spec §13):
+    S1 has just refreshed coverage, so the scheduler ranks the pool against it
+    and returns the round's `max_candidates` slots, quota-stratified.  The full
+    pool is left on ``ctx.config.candidates`` -- truncating it would delete the
+    fix-completeness candidates this stage just generated, and the next round
+    re-schedules the same pool against coverage that has since moved.
+
+    PR4 adds the index-derived candidates (spec §11/§12) to that same pool: an
+    unguarded path and a sibling control differential are deterministic
+    artifacts with a citable ``file:line``, and the spec asks for them to be
+    promoted automatically rather than left in a JSON file nobody reads.
+    """
     patch_history = ctx.store.read_artifact("S1", "security-fix-history.json") or []
     existing_ids = {str(c.get("candidate_id")) for c in ctx.config.candidates}
     generated = []
@@ -188,8 +329,10 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
             ctx.config.candidates.append(candidate)
             existing_ids.add(candidate["candidate_id"])
             generated.append(candidate)
+    pool, static_added = _merge_static_candidates(ctx, list(ctx.config.candidates))
+    selected, plan, schedule_note = _schedule_round(ctx, pool)
     matrix = []
-    for cand in ctx.config.candidates:
+    for cand in selected:
         matrix.append({
             "candidate_id": cand["candidate_id"],
             "surface": cand["surface"],
@@ -204,9 +347,76 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
             "chain_components": cand.get("chain_components", []),
         })
     ctx.store.write_artifact("S2", "candidate-matrix.json", matrix)
-    return {"candidate_count": len(matrix), "matrix": matrix,
-            "generated_fix_candidates": [c["candidate_id"] for c in generated],
-            "candidates": ctx.config.candidates}
+    if plan is not None:
+        ctx.store.write_artifact("S2", "candidate-schedule.json", plan.as_dict())
+    result = {"candidate_count": len(matrix), "matrix": matrix,
+              "generated_fix_candidates": [c["candidate_id"] for c in generated],
+              "static_candidates": static_added,
+              "candidates": selected,
+              "pool_size": len(pool),
+              "schedule_note": schedule_note}
+    if plan is not None:
+        result["schedule"] = {
+            "round": plan.round_no,
+            "deferred": [s.candidate_id for s in plan.deferred],
+            "quota": plan.filled_quota,
+            "relocated": {k: v for k, v in plan.relocated_quota.items() if v},
+            "high_risk_uncovered": plan.residual.get("high_risk_uncovered"),
+        }
+    return result
+
+
+def _merge_static_candidates(ctx: StageContext, pool: List[Dict[str, Any]]
+                             ) -> "tuple[List[Dict[str, Any]], List[str]]":
+    """Add the PR4 index-derived candidates to a round's pool, never raising.
+
+    Returns ``(pool, added_ids)``.  A missing or unreadable coverage store means
+    "no static candidates this round" and the reason is returned as an empty
+    list rather than an exception: losing an ordering aid must not cost the
+    round its audit (same contract as :func:`_schedule_round`).  ``added_ids`` is
+    surfaced into the S2 result so a pool that grew says so.
+    """
+    from ..analysis import controls as ctl
+    from ..analysis.inventory import CoverageStore
+
+    if not bool(getattr(ctx.config, "static_candidates", True)):
+        return pool, []
+    try:
+        store = CoverageStore(ctx.workspace, ctx.target)
+        merged, added = ctl.merge_static_candidates(store, pool)
+    except Exception:  # pragma: no cover - defensive, mirrors _schedule_round
+        return pool, []
+    if added:
+        print("[S2] +%d index-derived candidates (%s)"
+              % (len(added), ", ".join(added[:6]) + ("..." if len(added) > 6 else "")))
+    return merged, added
+
+
+def _schedule_round(ctx: StageContext,
+                    pool: List[Dict[str, Any]]
+                    ) -> "tuple[List[Dict[str, Any]], Any, str]":
+    """Run the coverage-aware scheduler for one round, never raising.
+
+    S1 already refreshed the coverage index, so the sweep is not repeated here
+    (``refresh=False``) -- re-running it before this round's ledger exists would
+    double the work and change nothing.  A scheduler failure degrades to the
+    pre-PR3 behaviour and returns the reason, because losing the ordering must
+    not cost the round its audit.
+
+    The slot count is ``config.max_candidates``, or the whole pool when unset:
+    this stage's budget has always been "however many candidates the operator
+    configured", and inventing a cap here would silently drop configured work.
+    """
+    from ..analysis import scheduler as sched
+    slots = int(getattr(ctx.config, "max_candidates", 0) or 0) or len(pool)
+    try:
+        return sched.round_selection(
+            ctx.workspace, ctx.target, pool, slots,
+            round_no=ctx.round_no, refresh=False)
+    except Exception as exc:  # pragma: no cover - defensive by design
+        return pool[:slots], None, (
+            "scheduler unavailable (%s: %s); fell back to proposal order"
+            % (type(exc).__name__, exc))
 
 
 def run_s3(ctx: StageContext) -> Dict[str, Any]:

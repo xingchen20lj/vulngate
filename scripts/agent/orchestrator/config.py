@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 class TargetConfig:
     name: str
     discovery_date: str
-    target_type: str = "library"  # library | web-app | middleware | logging | expression | message-rpc
+    target_type: str = "library"  # library | web-app | middleware | logging | expression | message-rpc | native-app
     target_urls: Dict[str, str] = field(default_factory=dict)  # version -> base URL (web-app S4)
     scope_constraints: str = ""  # project SECURITY.md scope rules, injected into S2/S3 prompts
     upstream_repo: Optional[str] = None
@@ -31,6 +31,17 @@ class TargetConfig:
     poc_src_dir: Optional[str] = None
     entry_points: List[Dict[str, Any]] = field(default_factory=list)
     candidates: List[Dict[str, Any]] = field(default_factory=list)
+    # Per-round candidate budget (spec §13).  0 keeps the pre-PR3 behaviour of
+    # auditing every configured candidate; a positive value caps the round and
+    # lets the scheduler choose which ones, deferring the rest with a reason.
+    max_candidates: int = 0
+    # Index-derived candidates (spec §11/§12) enter the round's pool
+    # automatically: an unguarded path and a sibling control differential are
+    # exactly the "high value candidates" the spec says to promote, and they are
+    # derived from persisted indices, not from the model.  Set false to run the
+    # pre-PR4 proposal path unchanged -- e.g. to compare a round with and
+    # without them.
+    static_candidates: bool = True
     exclusions: List[Dict[str, Any]] = field(default_factory=list)
     baselines: List[Dict[str, Any]] = field(default_factory=list)
     notes: str = ""

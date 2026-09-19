@@ -34,7 +34,7 @@ import subprocess
 import sys
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..llm.adapter import BudgetExceeded, LLMClient
 from ..memory.ledger import render_finding_md, write_round_artifacts
@@ -57,9 +57,11 @@ from ..tools.project_profile import build_project_profile
 from ..tools.target_rules import collect_target_rule_hits, composite_chain_hints
 from ..tools.public_scan import scan_all
 from ..tools.seeds import load_seeds, seed_reference_block
+from ..tools import source_evidence as se
 from ..tools.source_evidence import (DANGER_PATTERNS, SOURCE_MAP_PRESETS,
                                      build_source_sink_graph, candidate_block,
-                                     grep_hits, match_source_sink_paths, surface_block)
+                                     grep_hits, match_source_sink_paths,
+                                     summarize_hits, surface_block)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -122,15 +124,20 @@ def _is_web_target(target_dir: Path) -> bool:
         return False
 
 
-def scan_http_entries(source_dirs: List[Path]) -> List[Dict[str, Any]]:
-    """Web-app entry inventory: grep route/controller declarations."""
+def scan_all_http_entries(source_dirs: List[Path]) -> List[Dict[str, Any]]:
+    """Web-app entry inventory: **every** route/controller declaration found.
+
+    Split from :func:`scan_http_entries` per spec §6.1 -- this half is uncapped
+    and is what the coverage index is built from; the other half exists only to
+    keep a prompt/report bounded.
+    """
     pat = SOURCE_MAP_PRESETS.get("http", r"defendpoint|defroutes|doGet|doPost")
     entries: List[Dict[str, Any]] = []
     seen = set()
     for sd in source_dirs:
         if not sd.exists():
             continue
-        for hit in grep_hits(pat, [sd.as_posix()], sd.parent, max_lines=120):
+        for hit in se.scan_all_hits(pat, [sd.as_posix()], sd.parent):
             key = (hit["file"], hit["line"])
             if key in seen:
                 continue
@@ -141,8 +148,17 @@ def scan_http_entries(source_dirs: List[Path]) -> List[Dict[str, Any]]:
                 "file_line": "%s:%d" % (hit["file"], hit["line"]),
                 "untrusted": True,
                 "text": hit["text"],
+                "entry_kind": "http",
+                "module": str(hit["file"]).split("/")[0],
             })
-    return entries[:200]
+    entries.sort(key=lambda e: str(e["file_line"]))
+    return entries
+
+
+def scan_http_entries(source_dirs: List[Path],
+                      max_items: int = 200) -> List[Dict[str, Any]]:
+    """Bounded web entry digest for configs/prompts.  **Not** an index."""
+    return summarize_hits(scan_all_http_entries(source_dirs), max_items)
 
 
 def _sec_prompt(ctx: "AutoCtx") -> str:
@@ -165,55 +181,67 @@ ENTRY_API_PATTERNS = [
     (r"\bparse\s*\(", "text/json parse (generic)"),
 ]
 
+#: Combined danger-pattern regex, used to score an entry file's danger density.
+#: Counting from the file text once (rather than one ``rg -c`` per file) keeps
+#: the now-uncapped entry scan affordable.
+_DANGER_COMBINED = re.compile("|".join("(?:%s)" % p for p, _ in DANGER_PATTERNS))
 
-def scan_entries(source_dirs: List[Path]) -> List[Dict[str, Any]]:
-    """Deterministic entry inventory: grep source for common parse entry APIs."""
+
+def _danger_hit_count(path: Path, cache: Dict[str, int]) -> int:
+    key = path.as_posix()
+    if key in cache:
+        return cache[key]
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        count = len(_DANGER_COMBINED.findall(text))
+    except OSError:
+        count = 0
+    cache[key] = count
+    return count
+
+
+def scan_all_entries(source_dirs: List[Path]) -> List[Dict[str, Any]]:
+    """**Full** entry inventory: every hit of every entry-API pattern.
+
+    The previous implementation stopped at ``per_pattern=5`` and
+    ``len(entries) >= 20``, so a target with 400 parse call sites reported 20
+    entries and the remaining 380 never entered any audit state (spec §6.1).
+    The caps now live only in :func:`scan_entries`.
+    """
     entries: List[Dict[str, Any]] = []
     seen = set()
-    per_pattern = 5
+    danger_cache: Dict[str, int] = {}
     for src in source_dirs:
         if not src.exists():
             continue
         for pattern, shape in ENTRY_API_PATTERNS:
-            count = 0
-            try:
-                out = subprocess.run(
-                    ["rg", "-l", "--glob", "*.java", pattern, str(src)],
-                    capture_output=True, text=True, timeout=60).stdout
-            except (OSError, subprocess.TimeoutExpired):
-                continue
-            for line in out.splitlines():
-                rel = Path(line).relative_to(src.parent).as_posix()
-                key = (pattern, rel)
+            api = pattern.strip("\\b().*")
+            for hit in se.scan_all_hits(pattern, [src.as_posix()], src.parent):
+                key = (api, hit["file"], hit["line"])
                 if key in seen:
                     continue
-                if count >= per_pattern:
-                    continue
                 seen.add(key)
-                count += 1
-                danger_hits = 0
+                rel = str(hit["file"])
                 abs_file = src.parent / rel
-                pat_alt = "|".join(p for p, _ in DANGER_PATTERNS)
-                try:
-                    cnt = subprocess.run(
-                        ["rg", "-c", "--glob", "*.java", pat_alt, str(abs_file)],
-                        capture_output=True, text=True, timeout=30).stdout.strip()
-                    if cnt and cnt.isdigit():
-                        danger_hits = int(cnt)
-                except (OSError, subprocess.TimeoutExpired):
-                    pass
                 entries.append({
-                    "api": pattern.strip("\\b().*"),
+                    "api": api,
                     "input_shape": shape,
-                    "file_line": rel,
+                    "file_line": "%s:%d" % (rel, hit["line"]),
                     "default_features": "[]",
                     "untrusted": True,
-                    "danger_hits": danger_hits,
+                    "danger_hits": _danger_hit_count(abs_file, danger_cache),
                     "module": rel.split("/")[0],
+                    "entry_kind": "library-api",
+                    "text": hit["text"],
                 })
-                if len(entries) >= 20:
-                    return entries
+    entries.sort(key=lambda e: (str(e.get("file_line")), str(e.get("api"))))
     return entries
+
+
+def scan_entries(source_dirs: List[Path],
+                 max_items: int = 20) -> List[Dict[str, Any]]:
+    """Bounded entry digest for configs/prompts.  **Not** an index."""
+    return summarize_hits(scan_all_entries(source_dirs), max_items)
 
 
 def prepare_target(root: Path, name: str, target_dir: Path) -> TargetConfig:
@@ -244,12 +272,12 @@ def prepare_target(root: Path, name: str, target_dir: Path) -> TargetConfig:
         # prefer a top-level src/ dir, else the copy root.
         web_dirs = [d for d in dest.iterdir() if d.is_dir() and d.name == "src"]
         source_dirs = [d.relative_to(dest).as_posix() for d in web_dirs] or ["."]
-        entries = scan_http_entries([dest / d for d in source_dirs])
+        entries = scan_all_http_entries([dest / d for d in source_dirs])
     else:
         source_dirs = sorted(
             d.relative_to(dest).as_posix()
             for d in dest.iterdir() if (d / "src" / "main" / "java").exists())
-        entries = scan_entries([dest / d for d in source_dirs])
+        entries = scan_all_entries([dest / d for d in source_dirs])
     jars = sorted(
         p.as_posix() for p in dest.rglob("*.jar")
         if "sources" not in p.name and "javadoc" not in p.name)
@@ -292,7 +320,37 @@ def prepare_target(root: Path, name: str, target_dir: Path) -> TargetConfig:
     cfg_path = root / "agent" / "regression" / "configs" / (name + "-auto.json")
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    _persist_coverage_inventory(root, name, dest, source_dirs,
+                                "web-app" if is_web else "library")
     return TargetConfig.load(cfg_path)
+
+
+def _persist_coverage_inventory(root: Path, name: str, dest: Path,
+                                source_dirs: List[str], target_type: str) -> Dict[str, Any]:
+    """Persist the full coverage inventory for a freshly prepared target.
+
+    Gives the autonomous driver the same coverage ledger the config-driven
+    pipeline gets from S1: source universe + entries + sinks + security controls,
+    with an explicit state for every file (spec §18 Phase 1 / §21.3).
+    """
+    from ..analysis import coverage as cov
+    from ..analysis.inventory import (CoverageStore, build_inventory,
+                                      load_inventory, persist_inventory)
+    try:
+        result = build_inventory(dest, source_dirs, target=name, target_type=target_type)
+        store = CoverageStore(root, name)
+        written = persist_inventory(store, result, target_type=target_type)
+        # Summarize from the *persisted* indices rather than the in-memory
+        # records: the earlier version passed ``flow-index: []`` and so reported
+        # flow_coverage over an empty set, disagreeing with the state S2's
+        # scheduler reads back from disk.
+        summary = cov.compute_coverage(load_inventory(store))
+        store.write("coverage-summary", summary)
+        return {"written": written, "counts": result.counts()}
+    except Exception as exc:  # pragma: no cover - inventory is best-effort here
+        # Never block target preparation on the coverage layer; the gap is
+        # recorded rather than silently swallowed.
+        return {"error": "%s: %s" % (type(exc).__name__, exc)}
 
 
 class AutoCtx:
@@ -397,6 +455,74 @@ def learn_api_hint(ctx: AutoCtx) -> str:
     return hint
 
 
+def _coverage_prompt_block(ctx: AutoCtx, round_no: int) -> str:
+    """The spec §15 structured coverage block, or ``""`` when unavailable.
+
+    S2's prompt previously carried only the danger-pattern snippets, which is
+    the "few most dangerous snippets and let the model improvise" input the
+    spec replaces.  A missing coverage index degrades to no block rather than
+    aborting the round; the caller records why.
+    """
+    try:
+        from ..analysis import scheduler as sched
+        from ..analysis.inventory import CoverageStore
+        store = CoverageStore(ctx.root, ctx.cfg.name)
+        sctx = sched.ScheduleContext.from_store(store)
+        if not sctx.entries and not sctx.sinks:
+            return ""
+        plan = sched.load_schedule(store, round_no)
+        return sched.prompt_coverage_block(sctx, plan=plan) if plan else \
+            sched.prompt_coverage_block(sctx)
+    except Exception:  # pragma: no cover - coverage is best-effort here
+        return ""
+
+
+def schedule_candidates(ctx: AutoCtx, round_no: int,
+                        candidates: List[Dict[str, Any]],
+                        pinned: Optional[List[str]] = None
+                        ) -> Tuple[List[Dict[str, Any]], str]:
+    """Replace "first N as proposed" with this round's coverage-aware schedule.
+
+    Returns ``(selected, note)``.  ``note`` is empty on success and explains the
+    fallback otherwise, so a round that ran unscheduled says so in its own log
+    instead of looking scheduled.
+    """
+    from ..analysis import scheduler as sched
+    selected, plan, note = sched.round_selection(
+        ctx.root, ctx.cfg.name, candidates, ctx.max_candidates,
+        round_no=round_no, pinned=pinned or ())
+    if plan is not None:
+        print("[round-%02d] schedule: %d/%d selected, %s"
+              % (round_no, len(selected), len(candidates),
+                 ", ".join("%s=%d" % (k, v)
+                           for k, v in plan.category_counts.items()) or "no category"))
+    if note:
+        print("[round-%02d] schedule note: %s" % (round_no, note))
+    return selected, note
+
+
+def static_candidates(ctx: AutoCtx) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Index-derived candidates from the persisted coverage store (spec §11/§12).
+
+    Returns ``(candidates, added_ids)``.  Best-effort by contract: a missing or
+    partial coverage store means "none this round", never a failed round --
+    these are leads the static layer already produced, not a precondition for
+    the LLM proposal.
+    """
+    if not bool(getattr(ctx.cfg, "static_candidates", True)):
+        return [], []
+    try:
+        from ..analysis import controls as ctl
+        from ..analysis.inventory import CoverageStore
+        store = CoverageStore(ctx.root, ctx.cfg.name)
+        candidates = ctl.static_candidates(store)
+    except Exception as exc:  # pragma: no cover - defensive
+        print("[S2] static candidates unavailable: %s: %s" % (type(exc).__name__, exc))
+        return [], []
+    ids = [str(c.get("candidate_id")) for c in candidates if c.get("candidate_id")]
+    return candidates, ids
+
+
 def propose_candidates(ctx: AutoCtx, round_no: int,
                        carryover: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     """S2: LLM proposes attack candidates from the entry inventory.
@@ -405,12 +531,19 @@ def propose_candidates(ctx: AutoCtx, round_no: int,
     runtime observations). They are injected as context and de-duplicated, so
     a resumed round continues the investigation instead of restarting from
     zero (baseline #9).
+
+    The operator-supplied pool is *scheduled* rather than truncated: spec §13
+    replaces "top-K by declaration order" with the coverage-aware ranking, so
+    the same pool rotates across rounds as coverage moves instead of the same
+    first N candidates being re-audited every round.
     """
     if ctx.cfg.candidates:
-        return list(ctx.cfg.candidates)[: ctx.max_candidates]
+        selected, _ = schedule_candidates(ctx, round_no, list(ctx.cfg.candidates))
+        return selected
     versions = ", ".join(sorted({j.get("version") for j in ctx.cfg.jars}))
     src_block = surface_block(ctx.cfg.entry_points, ctx.cfg.source_dirs,
                               ctx.root, max_chars=8000)
+    coverage_block = _coverage_prompt_block(ctx, round_no)
     carry_text = ""
     if carryover:
         carry_text = "\n".join(
@@ -442,6 +575,7 @@ def propose_candidates(ctx: AutoCtx, round_no: int,
         "入口清单：\n%s\n\n"
         "真实源码证据（危险模式命中 + 入口类片段，供提出候选时引用文件/行号）：\n%s\n\n"
         "%s"
+        "%s"
         "上一轮已提出/验证的候选（新候选必须与它们不同——不同攻击面、不同触发点、"
         "不同输入形态；严禁重复）：\n%s\n\n"
         "请提出最多 %d 个最值得验证的攻击候选（%s）。\n"
@@ -463,7 +597,9 @@ def propose_candidates(ctx: AutoCtx, round_no: int,
         "只输出 JSON：{\"candidates\":[...]}"
         % (ctx.cfg.name, versions, ctx.cfg.api_hint or "（无）",
            _fmt_entries(ctx.cfg.entry_points), src_block or "（无源码片段）",
-           _scope_block(ctx), carry_text or "（无，首轮）",
+           _scope_block(ctx),
+           coverage_block + "\n\n" if coverage_block else "",
+           carry_text or "（无，首轮）",
            ctx.max_candidates, guidance, input_shape_hint)
     )
     try:
@@ -492,9 +628,13 @@ def propose_candidates(ctx: AutoCtx, round_no: int,
         c.setdefault("target_classes", [])
         c.setdefault("novelty_keywords", [])
         c["authz_cases"] = normalize_authz_cases(c.get("authz_cases"))
+    # Rank the proposal by evidence instead of trusting its order: the model's
+    # listing order is not a priority, and trimming to the budget should drop
+    # the least-evidenced candidate, not the last one written.
+    selected, _ = schedule_candidates(ctx, round_no, cands)
     ctx.write_artifact(round_no, "S2", "candidate-matrix.json",
-                       {"candidate_count": len(cands), "matrix": cands})
-    return cands[: ctx.max_candidates]
+                       {"candidate_count": len(selected), "matrix": selected})
+    return selected
 
 
 def audit_candidate(ctx: AutoCtx, cand: Dict[str, Any]) -> Dict[str, Any]:
@@ -615,7 +755,7 @@ def repair_poc(ctx: AutoCtx, cand: Dict[str, Any], src_text: str, compile_error:
 
 
 def extract_java_code(text: str) -> str:
-    """Extract Java source from an LLM reply the way Codex lands code files:
+    """Extract Java source from an LLM reply the way the host lands code files:
     1) prefer a ```java / ``` fenced block anywhere in the reply;
     2) otherwise take the segment starting at the first import / class line.
     Reasoning models (effort=high) often prepend a task restatement before the
@@ -1188,18 +1328,37 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             llm_cands = []
         seen_ids = set()
         merged = []
-        for c in fuzz_cands + llm_cands:
+        # Index-derived candidates first: on an exact score tie the candidate
+        # with a citable file:line and a named missing control should win over
+        # one that has neither.  The scheduler re-ranks everything after this,
+        # so position is only a tiebreaker.
+        derived, derived_ids = static_candidates(ctx)
+        if derived_ids:
+            print("[round-%02d] S2: +%d index-derived candidates (spec §11/§12)"
+                  % (round_no, len(derived_ids)))
+        for c in derived + fuzz_cands + llm_cands:
             cid = c.get("candidate_id")
             if cid in seen_ids:
                 continue
             seen_ids.add(cid)
             merged.append(c)
-        candidates = merged[: ctx.max_candidates]
+        # Spec §13: the scheduler decides *which* N, not the merge order.  Fuzz
+        # candidates are pinned: they carry runtime evidence (a reproducer and
+        # its observations) that no static factor can see, so a static ranking
+        # must never be able to displace one in favour of a nicer-looking
+        # candidate that has not been executed.
+        pinned = [str(c.get("candidate_id")) for c in fuzz_cands
+                  if c.get("candidate_id")]
+        candidates, schedule_note = schedule_candidates(ctx, round_no, merged,
+                                                        pinned=pinned)
         if not candidates:
             print("[round-%02d] no candidates; stopping" % round_no)
             return {"next_candidates": []}
         ctx.write_artifact(round_no, "S2", "candidate-matrix.json",
                            {"candidate_count": len(candidates),
+                            "schedule_note": schedule_note,
+                            "pool_size": len(merged),
+                            "pinned": pinned,
                             "matrix": [{k: c.get(k) for k in
                                         ("candidate_id", "surface", "entry",
                                          "input_shape", "logic", "authz_cases")} for c in candidates]})

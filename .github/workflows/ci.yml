@@ -1,0 +1,46 @@
+name: Codex plugin CI
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install ripgrep
+        shell: bash
+        run: |
+          if ! command -v rg >/dev/null; then
+            if [ "$RUNNER_OS" = "macOS" ]; then
+              brew install ripgrep
+            else
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq ripgrep
+            fi
+          fi
+      - name: Regression tests and isolated Codex installer
+        run: PYTHONPATH=scripts python3 -m unittest discover -s tests -t tests -v
+      - name: Verify native adaptation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 macos/bin/patch-vulngate.py --plugin . --verify
+      - name: Shell syntax
+        shell: bash
+        run: |
+          bash -n install.sh scripts/run_pipeline.sh scripts/smoke_test.sh
+          bash -n macos/run-audit.sh macos/macos-app-recon.sh macos/bin/app2source.sh

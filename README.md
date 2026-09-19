@@ -96,13 +96,41 @@ Current gate identifiers are **G0, G1, G1b, G3, G4, and G5**; G1b is the default
 - **Checkpointed evidence ledger** — research state and evidence are persisted so the final report is traceable to artifacts.
 - **Safety-first execution** — loopback-first PoC behavior, explicit approval logging, and allowlisted staging support.
 
+## Coverage-driven auditing and native applications
+
+Version 1.1.0 brings the analysis and macOS capabilities from the WorkBuddy
+edition into the Codex plugin. The host uses your configured Codex model; the
+new deterministic commands require no additional model API key.
+
+- Full production-source inventory with explicit skipped-file reasons and
+  ledger-derived review coverage.
+- Heuristic symbols, call graphs and forward/backward entry-to-sink paths.
+- Per-path control gaps and sibling-handler differentials, with candidates
+  retained as leads until verified.
+- Candidate scoring and category quotas that preserve deferred work across rounds.
+- macOS `.app`/`.dmg`/`.pkg`, Mach-O metadata, Electron ASAR/source maps and JAR views.
+
+```bash
+python3 scripts/agent_cli.py coverage demo --root /path/to/source \
+  --workspace /path/to/audit --rebuild --show-uncovered
+python3 scripts/agent_cli.py controls demo --workspace /path/to/audit --show-candidates
+python3 scripts/agent_cli.py differential demo --workspace /path/to/audit --show-candidates
+bash macos/run-audit.sh /Applications/Target.app /path/to/native-audit
+```
+
+Use the same `--workspace` for analysis, scheduling and ledger commands. Rebuild
+coverage when source or scope changes. Native reconstruction establishes an
+attack-surface view; it does not recover method bodies or prove vulnerabilities.
+See [native-target usage](macos/README.md) and
+[migration scope and command workflow](docs/WORKBUDDY-MIGRATION.md).
+
 ## Installation
 
 ### Prerequisites
 
 - Codex (CLI or desktop app), version with plugin support
 - Python 3.8+
-- JDK 8+ (17/21 recommended for general use; individual PoC cells may require a specific runtime)
+- JDK 8+ for JVM targets (17/21 recommended); native targets require macOS Command Line Tools
 - `rg` (ripgrep) for source mapping
 
 ### Install from this repository
