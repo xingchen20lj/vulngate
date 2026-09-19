@@ -16,9 +16,11 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 DEST="${PLUGIN_HOME:-$HOME/plugins}/vulngate"
 MARKETPLACE="${VULNGATE_MARKETPLACE:-$HOME/.agents/plugins/marketplace.json}"
 ENABLE=1
-if [ "${1:-}" = "--no-enable" ]; then
-  ENABLE=0
-fi
+case "${1:-}" in
+  --no-enable) ENABLE=0 ;;
+  "") ;;
+  *) echo "usage: $0 [--no-enable]" >&2; exit 2 ;;
+esac
 
 if [ ! -f "$ROOT/.codex-plugin/plugin.json" ]; then
   echo "error: plugin manifest not found at $ROOT/.codex-plugin/plugin.json" >&2
@@ -28,10 +30,15 @@ fi
 echo "[1/4] Copying plugin -> $DEST"
 mkdir -p "$DEST"
 tar -C "$ROOT" -cf - \
-  --exclude '.git' \
   --exclude '__pycache__' \
   --exclude '*.pyc' \
-  . | tar -C "$DEST" -xf -
+  --exclude '.DS_Store' \
+  .codex-plugin skills scripts macos assets docs \
+  README.md README.zh-CN.md LICENSE CHANGELOG.md PROVENANCE.md RELATED_WORK.md \
+  SECURITY.md SECURITY.zh-CN.md CONTRIBUTING.md CONTRIBUTING.zh-CN.md \
+  | tar -C "$DEST" -xf -
+# Publish only runtime files and documentation. In particular, never copy
+# state/, ledger/, reports/, poc/, credentials or .vulngate-macos-backup/.
 
 echo "[2/4] Updating local cachebuster (iteration-aware reinstall)"
 CACHEBUSTER="$(date -u +%Y%m%d-%H%M%S)"
@@ -99,12 +106,7 @@ PYEOF
 echo "[4/4] Validating"
 VALIDATOR="$HOME/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py"
 if [ -f "$VALIDATOR" ] && python3 -c 'import yaml' >/dev/null 2>&1; then
-  if python3 "$VALIDATOR" "$DEST"; then
-    :
-  else
-    echo "    full validator unavailable; falling back to inline check"
-    validate_inline
-  fi
+  python3 "$VALIDATOR" "$DEST"
 else
   validate_inline
 fi
@@ -121,13 +123,17 @@ find_codex() {
     return 0
   fi
   # macOS: CLI bundled inside the Codex desktop app
+  if [ -x "/Applications/Codex.app/Contents/Resources/codex" ]; then
+    echo "/Applications/Codex.app/Contents/Resources/codex"
+    return 0
+  fi
   if [ -x "/Applications/ChatGPT.app/Contents/Resources/codex" ]; then
     echo "/Applications/ChatGPT.app/Contents/Resources/codex"
     return 0
   fi
   # Windows (Git Bash / WSL) common locations
   for p in \
-    "$LOCALAPPDATA/Programs/ChatGPT/Resources/codex" \
+    "${LOCALAPPDATA:-}/Programs/ChatGPT/Resources/codex" \
     "/c/Program Files/ChatGPT/Resources/codex"; do
     if [ -x "$p" ]; then
       echo "$p"

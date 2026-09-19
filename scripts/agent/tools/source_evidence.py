@@ -11,6 +11,24 @@ Two entry points:
 
 The same DANGER_PATTERNS list is reused by S1 for the attack-surface scan, so
 the LLM prompt evidence and the deterministic scan stay in sync.
+
+Scanning vs. presentation (spec §2.1 / §6.1)
+--------------------------------------------
+Every scan helper here is split in two:
+
+``scan_all_hits()`` / ``scan_all_source_sink_paths()``
+    Full, uncapped.  These are the entry points for anything that builds an
+    index or a coverage number.
+``summarize_hits()`` / ``build_source_sink_graph()``
+    Bounded.  These exist only for prompt digests and report excerpts.
+
+``grep_hits()`` remains as a *display* helper (bounded) and is now implemented
+as ``summarize_hits(scan_all_hits(...))`` so there is exactly one scan
+implementation.  It does not cap what ripgrep reads -- it caps the returned
+list -- so callers that need the full picture must call ``scan_all_hits``.
+
+Language coverage derives from :mod:`agent.analysis.languages`, so the suffix
+set here can no longer drift from the inventory's.
 """
 
 from __future__ import annotations
@@ -18,6 +36,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+from ..analysis.languages import (DEFAULT_EXCLUDE_DIRS, LANGUAGE_SUFFIXES,
+                                  SourceFilter, source_globs,
+                                  suffix_owner_language)
 
 # (regex, label) pairs. Used both for the S1 danger-call-site scan and for
 # locating candidate-relevant snippets. Keep patterns rg/Rust-regex safe.
@@ -33,6 +55,28 @@ DANGER_PATTERNS: List[Tuple[str, str]] = [
     (r"Runtime\.getRuntime|ProcessBuilder|\bexec\s*\(", "command-exec"),
     (r"getDeclaredMethod|getDeclaredField|setAccessible|\.invoke\s*\(", "reflection"),
     (r"getResourceAsStream|getResource\s*\(", "resource-load"),
+    # --- [vulngate-macos-universal] macOS / native sinks ---
+    (r"posix_spawn|posix_spawnp|execve|execv\(|execl\(|system\s*\(|popen\s*\("
+     r"|NSTask|NSAppleScript|Process\(", "native-command-exec"),
+    (r"SecItemCopyMatching|SecItemAdd|SecItemDelete|SecKeychain|SecKeyRawSign"
+     r"|SecKeyDecrypt|SecKeyCreateDecryptedData", "native-credential"),
+    (r"NSKeyedUnarchiver|unarchive[A-Za-z]*|CFPropertyListCreate|"
+     r"propertyListWithData|sqlite3_open|sqlite3_exec", "native-deserialization"),
+    (r"dlopen|dlsym|NSAddImage|NSCreateObjectFileImageFromFile", "native-dynamic-load"),
+    (r"WKWebView|evaluateJavaScript|JSContext|addScriptMessageHandler"
+     r"|userContentController", "native-webview-bridge"),
+    (r"NSXPCConnection|xpc_connection_create|mach_msg|bootstrap_look_up"
+     r"|CFMessagePort", "native-ipc"),
+    (r"AESend|OSAScript|executeAppleEvent|AEDesc|NSAppleEventDescriptor",
+     "native-applescript"),
+    (r"strcpy\s*\(|strcat\s*\(|sprintf\s*\(|gets\s*\(|alloca\s*\(",
+     "native-unsafe-c"),
+    (r"application:openURL|handleGetURLEvent|openURL|handleOpenURL"
+     r"|CFBundleURLSchemes", "native-url-scheme-entry"),
+    (r"AuthorizationExecuteWithPrivileges|AuthorizationCreate|SMJobBless"
+     r"|\bsetuid\s*\(|\bsetgid\s*\(", "native-privilege"),
+    (r"get-task-allow|disable-library-validation|com.apple.security"
+     r"|allow-dyld-environment-variables", "native-entitlement"),
 ]
 
 SOURCE_MAP_PRESETS: Dict[str, str] = {
@@ -49,6 +93,14 @@ SOURCE_MAP_PRESETS: Dict[str, str] = {
     "exec": r"(Runtime|ProcessBuilder|exec\w*|CommandLine|startProcess)\s*\(",
     "config": r"(load\w*|parse\w*|readConfig|getProperty|Properties|Yaml|Xml)\s*\(",
     "all": r"(parse\w*|read\w*|deserialize\w*|decode\w*|load\w*|convert\w*|doGet|doPost|service|evaluate|eval|invoke|lookup|format|exec\w*|openConnection|getInputStream)\s*\(",
+    # [vulngate-macos-universal] macOS 原生入口/危险调用候选面
+    "native": (r"(?:application:openURL|handleGetURLEvent|openURL|NSApplicationMain"
+               r"|NSXPCConnection|xpc_connection_create|shouldAcceptNewConnection"
+               r"|WKWebView|evaluateJavaScript|addScriptMessageHandler"
+               r"|NSKeyedUnarchiver|unarchive[A-Za-z]*|propertyListWithData"
+               r"|posix_spawn|NSTask|execve|popen|SecItem[A-Za-z]*"
+               r"|AuthorizationExecuteWithPrivileges|SMJobBless"
+               r"|applicationDidFinishLaunching)"),
 }
 
 MAX_FILE_BYTES = 1024 * 1024
@@ -56,13 +108,17 @@ MAX_FILE_BYTES = 1024 * 1024
 # Language-agnostic source scan. Java-only globs made S1 miss Clojure/Go/Python
 # route declarations (Metabase lesson, 2026-08-10): the host fell back to manual
 # rg sweeps because source-map returned nothing for .clj targets.
-DEFAULT_SOURCE_GLOBS: List[str] = [
-    "*.java", "*.kt", "*.scala",
-    "*.clj", "*.cljc", "*.cljs",
-    "*.py", "*.go", "*.rb",
-    "*.js", "*.jsx", "*.ts", "*.tsx",
-    "*.php", "*.rs", "*.cs", "*.c", "*.cpp", "*.h",
-]
+#
+# The suffix set is now owned by agent.analysis.languages (spec §6.3) so the
+# prompt digest, the S1 scan and the coverage inventory enumerate the same
+# universe.  Kept as a module-level name because existing callers pass it as
+# ``globs=``.
+DEFAULT_SOURCE_GLOBS: List[str] = source_globs()
+
+#: Suffixes scanned by the source-evidence scan (derived, do not hardcode).
+DEFAULT_SOURCE_SUFFIXES: Tuple[str, ...] = tuple(
+    sorted({s for suffixes in LANGUAGE_SUFFIXES.values() for s in suffixes},
+           key=lambda s: (len(s), s)))
 
 _FLOW_PATTERNS = {
     "source": re.compile(
@@ -104,27 +160,57 @@ def _read_lines(path: Path) -> Optional[List[str]]:
         return None
 
 
-def grep_hits(pattern: str, source_dirs: List[str], root: Path,
-              max_lines: int = 12,
-              globs: Optional[List[str]] = None) -> List[Dict[str, object]]:
-    """rg a regex across source dirs; return [{file, line, text}] (relative)."""
+def scan_all_hits(pattern: str, source_dirs: List[str], root: Path,
+                  globs: Optional[List[str]] = None,
+                  timeout: int = 600) -> List[Dict[str, object]]:
+    """**Full** ripgrep scan; every hit in every source dir, no cap.
+
+    This is the index-building entry point (spec §6.1).  ``grep_hits`` is now a
+    bounded wrapper over it, so there is exactly one scan implementation.
+
+    Raises :class:`agent.tools.search.ToolUnavailable` when ripgrep is missing
+    rather than returning ``[]``: an empty result must mean "scanned, nothing
+    found", never "could not scan" (spec §19.7).
+    """
     from . import search as srch
-    globs = globs or DEFAULT_SOURCE_GLOBS
+    globs = globs if globs is not None else DEFAULT_SOURCE_GLOBS
     hits: List[Dict[str, object]] = []
+    root_resolved = root.resolve()
     for sd in source_dirs:
         d = _safe_resolve(root, sd)
         if not d or not d.exists():
             continue
-        for line in srch.rg(pattern, d, globs=globs, max_count=max_lines):
-            parts = line.split(":", 2)
-            if len(parts) < 3:
-                continue
+        for match in srch.rg_matches(pattern, d, globs=globs, timeout=timeout):
             try:
-                rel = str(Path(parts[0]).resolve().relative_to(root.resolve()))
-            except ValueError:
+                rel = str(Path(match["file"]).resolve().relative_to(root_resolved))
+            except (ValueError, OSError):
                 continue
-            hits.append({"file": rel, "line": int(parts[1]), "text": parts[2][:160]})
-    return hits[:max_lines]
+            hits.append({"file": rel, "line": int(match["line"]),
+                         "text": str(match["text"])[:160]})
+    hits.sort(key=lambda h: (str(h["file"]), int(h["line"])))
+    return hits
+
+
+def summarize_hits(hits: List[Dict[str, object]],
+                   max_items: int = 20) -> List[Dict[str, object]]:
+    """Presentation-level truncation.  Must never feed an index (spec §2.1)."""
+    if max_items is None or max_items < 0:
+        return list(hits)
+    return list(hits[:max_items])
+
+
+def grep_hits(pattern: str, source_dirs: List[str], root: Path,
+              max_lines: int = 12,
+              globs: Optional[List[str]] = None) -> List[Dict[str, object]]:
+    """Bounded digest for **prompt/report display only**.
+
+    Retained for the existing call sites (S1 danger digest, surface_block,
+    candidate_block, target rules).  If you are building an index or a coverage
+    number, call :func:`scan_all_hits` instead -- a capped list here reads as
+    "only N of these exist", which is precisely the truncation the coverage
+    layer must not inherit.
+    """
+    return summarize_hits(scan_all_hits(pattern, source_dirs, root, globs), max_lines)
 
 
 def _method_start(lines: List[str], anchor_idx: int, max_back: int = 14) -> int:
@@ -177,9 +263,22 @@ def extract_class_header(path: Path, max_chars: int = 1200) -> Optional[str]:
     return s
 
 
-def build_source_sink_graph(source_dirs: List[str], root: Path,
-                            max_paths: int = 160) -> List[Dict[str, object]]:
-    """Build bounded heuristic paths; every edge remains manual-review only."""
+def scan_all_source_sink_paths(source_dirs: List[str], root: Path,
+                               source_filter: Optional[SourceFilter] = None,
+                               timeout: int = 600) -> List[Dict[str, object]]:
+    """**Full** same-file source->sink heuristic paths; no cap (spec §6.1).
+
+    Every edge stays ``heuristic-nearby`` and ``requires_manual_dataflow`` -- this
+    is a *lead* generator, not a dataflow proof.  Cross-procedural flow analysis
+    is :mod:`agent.analysis.dataflow`.
+
+    Note this is still same-file / line-distance based, which is exactly the
+    limitation spec §8 says the call graph must remove.  It is kept because it is
+    cheap and its leads are still valid; the flow index adds cross-function
+    coverage on top.
+    """
+    flt = source_filter or SourceFilter()
+    known = flt.known_suffixes()
     paths: List[Dict[str, object]] = []
     root = root.resolve()
     for source_dir in source_dirs:
@@ -187,7 +286,7 @@ def build_source_sink_graph(source_dirs: List[str], root: Path,
         if not directory or not directory.exists():
             continue
         for path in sorted(p for p in directory.rglob("*")
-                           if p.is_file() and p.suffix in {".java", ".kt", ".scala", ".clj", ".py", ".go", ".js", ".ts", ".rb", ".php", ".rs", ".c", ".cpp"}):
+                           if p.is_file() and p.suffix.lower() in known):
             lines = _read_lines(path)
             if not lines:
                 continue
@@ -197,29 +296,34 @@ def build_source_sink_graph(source_dirs: List[str], root: Path,
                     if pattern.search(text):
                         hits[kind].append((number, text.strip()[:200]))
             for source in hits["source"]:
-                sink = next((item for item in hits["sink"]
-                             if item[0] >= source[0] and item[0] - source[0] <= 160), None)
-                if not sink:
-                    continue
-                transforms = [item for item in hits["transform"]
-                              if source[0] <= item[0] <= sink[0]][:4]
-                validations = [item for item in hits["validation"]
-                               if source[0] <= item[0] <= sink[0]][:3]
-                authorizations = [item for item in hits["authorization"]
-                                  if source[0] <= item[0] <= sink[0]][:3]
-                rel = str(path.relative_to(root))
-                paths.append({
-                    "source": "%s:%d %s" % (rel, source[0], source[1]),
-                    "transform": ["%s:%d %s" % (rel, n, text) for n, text in transforms],
-                    "validation": ["%s:%d %s" % (rel, n, text) for n, text in validations],
-                    "authorization": ["%s:%d %s" % (rel, n, text) for n, text in authorizations],
-                    "sink": "%s:%d %s" % (rel, sink[0], sink[1]),
-                    "confidence": "heuristic-nearby",
-                    "requires_manual_dataflow": True,
-                })
-                if len(paths) >= max_paths:
-                    return paths
+                for sink in [item for item in hits["sink"]
+                             if item[0] >= source[0] and item[0] - source[0] <= 160]:
+                    transforms = [item for item in hits["transform"]
+                                  if source[0] <= item[0] <= sink[0]][:4]
+                    validations = [item for item in hits["validation"]
+                                   if source[0] <= item[0] <= sink[0]][:3]
+                    authorizations = [item for item in hits["authorization"]
+                                      if source[0] <= item[0] <= sink[0]][:3]
+                    rel = str(path.relative_to(root))
+                    paths.append({
+                        "source": "%s:%d %s" % (rel, source[0], source[1]),
+                        "transform": ["%s:%d %s" % (rel, n, text) for n, text in transforms],
+                        "validation": ["%s:%d %s" % (rel, n, text) for n, text in validations],
+                        "authorization": ["%s:%d %s" % (rel, n, text) for n, text in authorizations],
+                        "sink": "%s:%d %s" % (rel, sink[0], sink[1]),
+                        "confidence": "heuristic-nearby",
+                        "requires_manual_dataflow": True,
+                    })
     return paths
+
+
+def build_source_sink_graph(source_dirs: List[str], root: Path,
+                            max_paths: int = 160,
+                            source_filter: Optional[SourceFilter] = None
+                            ) -> List[Dict[str, object]]:
+    """Bounded view over :func:`scan_all_source_sink_paths` for prompt budgets."""
+    return summarize_hits(scan_all_source_sink_paths(source_dirs, root, source_filter),
+                          max_paths)
 
 
 def match_source_sink_paths(graph: List[Dict[str, object]], candidate: Dict[str, object],
@@ -253,7 +357,12 @@ def _budget_trim(parts: List[str], budget: int) -> List[str]:
 
 def surface_block(entries: List[Dict[str, object]], source_dirs: List[str],
                   root: Path, max_chars: int = 6000) -> str:
-    """S1.5/S2: danger call-site digest + headers of hot entry classes."""
+    """S1.5/S2: danger call-site digest + headers of hot entry classes.
+
+    Bounded by design: this is a *prompt* budget, not an index (spec §2.1).  The
+    ``[:6]`` / ``max_lines=4`` numbers below may be tuned freely without any
+    effect on coverage.
+    """
     parts: List[str] = []
     digs = []
     for pat, label in DANGER_PATTERNS:

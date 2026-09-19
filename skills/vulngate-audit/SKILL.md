@@ -1,6 +1,6 @@
 ---
 name: vulngate-audit
-description: "Drive the VulnGate S1→S8 source-audit pipeline natively in Codex. Use when the user asks to audit any kind of source code — libraries (parsing/serialization/JSON/XML/YAML), web frameworks (Spring/Struts), middleware/servers (Tomcat/Jetty), logging libraries (Log4j/Logback), expression engines, message/RPC stacks (Dubbo/Netty/Hessian), or applications — for RCE/DoS/info-disclosure/logic flaws; verify a PoC across a version×feature×precondition matrix; run the novelty gate against upstream issues/PRs and public disclosures; compute CVSS with precondition consistency; or produce a disclosure-ready finding report. Aliases: 漏洞审计, 源码审计, 0day 挖掘, PoC 验证, Novelty 核验."
+description: "Drive the VulnGate S1→S8 source-audit pipeline natively in Codex. Use when the user asks to audit any kind of source code — libraries (parsing/serialization/JSON/XML/YAML), web frameworks (Spring/Struts), middleware/servers (Tomcat/Jetty), logging libraries (Log4j/Logback), expression engines, message/RPC stacks (Dubbo/Netty/Hessian), or applications — for RCE/DoS/info-disclosure/logic flaws; verify a PoC across a version×feature×precondition matrix; run the novelty gate against upstream issues/PRs and public disclosures; compute CVSS with precondition consistency; or produce a disclosure-ready finding report; or audit a macOS desktop client (.app/.dmg/.pkg — Swift, Objective-C, C/C++, Electron or bundled Java) through the adapter bundled in macos/. Aliases: 漏洞审计, 源码审计, 0day 挖掘, PoC 验证, Novelty 核验, macOS 审计, 桌面客户端审计, 审 dmg/app/pkg."
 ---
 
 # VulnGate — S1→S8 Vulnerability Research Pipeline (Host-Driven)
@@ -123,6 +123,17 @@ If no absolute loaded path is exposed, locate the matching installed skill repor
 
 Missing tools are a precondition gap, not evidence for or against a vulnerability. Never fabricate results.
 
+### Non-JVM targets — macOS / native applications
+
+The deterministic scanner is source-based, so a compiled `.app` bundle returns zero hits and S3 cannot produce `file:line` evidence. This plugin ships an adapter for that case; prefer it over improvising a one-off pipeline:
+
+- **Adapter root:** `<plugin-root>/macos/`. Full rationale, measured results and known limits: `<plugin-root>/macos/README.md`.
+- **One-shot entry point:** `bash <plugin-root>/macos/run-audit.sh "<target.app|.dmg|.pkg>" <audit-dir> [--run]`. It performs recon → source reconstruction → TargetConfig → PoC scaffold, and stops before running unless `--run` is given.
+- **Source reconstruction** rebuilds Mach-O metadata into a `.h`/`.c` declaration tree, unpacks Electron `app.asar` (restoring the original TypeScript when source maps are present), and emits jar views for bundled JVMs.
+- **Built-in native support** (Codex v1.1.0): native file globs, 11 groups of macOS danger sinks, a `native` source-map preset, a `native-app` target rule set, and the removal of three `.java`-only hard codes in the stage runner. Confirm they are all present with `python3 <plugin-root>/macos/bin/patch-vulngate.py --plugin <plugin-root> --verify`.
+- **Evidence discipline for native targets.** The reconstructed tree is metadata-level — symbols, Objective-C runtime structure, selectors, strings, entitlements — and contains **no method bodies**. Use it to establish the S1/S2 attack surface, and require Ghidra or `ipsw class-dump` output before claiming any method-level S3 finding. Never assert "line N contains logic X" from the reconstructed tree alone.
+- **S4 for native targets** runs shell-form PoCs (`matrix --lang shell`). `matrix --lang` supports `java` and `shell` only; that is by design, not a gap.
+
 ## 6. Workflow S1→S8
 
 Persist artifacts under:
@@ -142,13 +153,41 @@ Run stages in order unless a hard gate or explicit scope rule ends a candidate.
 - Ask the deterministic helper for source evidence when useful:
 
   ```bash
-  python3 scripts/agent_cli.py source-map --target-dir <path> --preset <parsers|http|expression|io|exec|config|all>
+  python3 scripts/agent_cli.py source-map --root <path> --preset <parsers|http|expression|io|exec|config|native|all>
   ```
 
 - **Advisory/fix-diff reverse analysis:** when a recent advisory exists, obtain the affected/patched range and inspect the fix diff. Treat the old path as a high-priority candidate, but do not treat the existence of a patch as runtime proof.
 - **Security-fix history:** even without an advisory, inspect recent security-oriented commits. Persist `S1/security-fix-history.json` and `S1/patch-variants.json`; generate `surface=fix-completeness` candidates for credible fixes and sibling paths.
 - **Source→Sink evidence graph:** `S1/source-sink-graph.json` is a heuristic locator using `Source→Transform→Validation→Authorization→Sink`. Paths such as `heuristic-nearby` must carry `requires_manual_dataflow=true`. They are not semantic/interprocedural proof.
 - Generate `project-profile.json`, `target-rules.json`, and `composite-chain-hints.json` when applicable. These prioritize research and improve candidate coverage; they are not conclusions.
+- **Host-native coverage bootstrap:** `source-map` is a bounded digest, not the coverage index. In Mode A, explicitly build the full index once in S1 (and rebuild after changing source or scope):
+
+  ```bash
+  python3 "$PLUGIN_ROOT/scripts/agent_cli.py" coverage <target> --workspace <audit-dir> --root <source-root> --rebuild --json
+  ```
+
+  Keep `<audit-dir>` outside the plugin cache. In S2, merge all candidates from `control-candidates.json` and `differential-candidates.json` into the host's candidate pool before calling `schedule`; use `selected_ids` for this round and preserve the full pool for later rounds. After writing the S8 ledger, run `coverage` again with the same workspace to refresh review status. The config-driven pipeline performs S1 indexing and S2 merging automatically.
+- **Coverage ledger:** S1 also builds the target-scoped `state/<target>/coverage/` index (source universe, entries, sinks, security controls) and writes the coverage summary. Every production source file is either `indexed` or carries an explicit `skip_reason`; excluded directories are recorded with a file count instead of being dropped silently. Query it at any time:
+
+  ```bash
+  python3 scripts/agent_cli.py coverage <target> --workspace <path> --show-uncovered --risk <high|medium|low>
+  ```
+
+  The audit's stop condition is `HIGH-risk uncovered == 0`, not "no new candidates". A zero denominator renders `n/a`, never `100%`.
+- **Cross-procedural layer:** the same index also carries `symbol-index.json`, `call-graph.json`, `flow-index.json`, `sink-reachability.json`, `control-map.json`, `sibling-groups.json` and `differential-index.json`. Sinks are analysed in both directions — forward from every external entry, and backward from every sink — so a path only the sink scan can see is either a confirmed flow or a recorded `coverage_gap`. Flow paths are `heuristic-callgraph`: they are leads, never proofs, and nothing in this layer may set `runtime-verified`. `FlowRecord.direction` states the path *shape*:
+  - `cross-procedural` — at least one call edge (the useful case);
+  - `intra-symbol` — entry and sink in the same method; this is the archetypal "handler does the dangerous thing" finding and keeps full priority;
+  - `module-scope` — entry and sink both at module level in one file. Reported, but ranked below real call chains, because a file is not a handler.
+
+  Module-level code is attributed to a synthetic per-file symbol so that no entry or sink is ever unbound; that symbol is never a call-graph resolution target.
+- **Security control map (spec §11):** the same index judges every `Entry → … → Sink` flow against the control its sink category requires and records the verdict per path (`guarded` / `partial` / `uncontrolled` / `not-applicable`). A path with no authentication on any hop is `possible-auth-bypass`; a missing validation-class control is `possible-control-bypass`. Requirements are **any-of groups** — `command-exec` is satisfied by validation *or* sanitization *or* an allowlist — so a handler that authorizes through `hasPermission` is not reported as missing authorization. A sink category the matrix does not cover falls back to the fail-safe default and is listed in `unclassified_sink_categories`; it never becomes `not-applicable` by default. Absence is a lead, not a finding: an upstream filter, gateway or deployment policy outside the scanned scope can be the real guard, which is why these candidates are named `possible-*` and carry a precondition.
+- **Sibling differential (spec §12, §19.5):** handlers expected to enforce the same controls are grouped (same class, plus a shared name token or a shared sink signature) and the family is diffed. A control most members carry and one does not is a `possible-auth-bypass` / `validation-differential`; a family that uniformly lacks it is *absence*, which belongs to the control map — reporting it in both would double every unauthenticated endpoint. Membership is read off the handler's **call closure**, so a check performed by a callee counts. `--fix-history` adds the spec §18 Phase 4 question: did the patch that fixed one member cover its siblings?
+
+  ```bash
+  python3 scripts/agent_cli.py controls <target> --show-candidates
+  python3 scripts/agent_cli.py differential <target> --show-candidates \
+    --fix-history state/<target>/round-01/S1/security-fix-history.json
+  ```
 - Gate **G0**: reject dead/unsupported code paths.
 - Gate **G1**: require reachability from untrusted input. If unreachable, retain source evidence for the exclusion.
 
@@ -180,6 +219,67 @@ Precondition tiers:
 - `extra-primitive` — an additional gadget/class/primitive is required.
 
 Do not write final conclusions in S2.
+
+#### S2 candidate scheduling (coverage-driven, spec §13/§14/§15)
+
+S2 no longer hands the model "the few most dangerous snippets" and takes
+whatever comes back in proposal order. The candidate pool is **scheduled**
+against the persisted coverage index, deterministically and without an LLM:
+
+```bash
+# inspect the schedule for a round (deterministic, offline)
+python3 scripts/agent_cli.py schedule <target> \
+  --candidates state/<target>/round-01/S2/candidate-matrix.json \
+  --slots 8 --round 1
+
+# include the structured prompt block S2 feeds the model
+python3 scripts/agent_cli.py schedule <target> --config targets/<t>.json --prompt
+
+# the same schedule, summarised next to the coverage report
+python3 scripts/agent_cli.py coverage <target> --schedule
+```
+
+Scoring is a weighted sum over seven evidence-derived factors (weights sum to
+100, so a score reads as a percentage): `reachability` 20,
+`attacker_control` 15, `security_boundary` 15, `sink_impact` 15,
+`control_gap` 15, `evidence_quality` 10, `coverage_novelty` 10. Every factor is
+reported with a reason and its evidence, and a factor that cannot be evaluated
+scores **low**, never high. A trust boundary is judged **per path**: one guarded
+path never masks an unguarded one into the same sink, and the score scales with
+the fraction of unguarded paths rather than saturating on the first one.
+
+Selection is quota-stratified (`authz` 2, `parser`/`file`/`ssrf`/`exec`/`dos` 1
+each, `residual` 1). A category with no candidate **relocates** its slot and the
+relocation is reported — the round stays `slots` wide. Candidates carrying
+runtime evidence (a fuzz reproducer) are **pinned**: they are selected outside
+the quota, because no static factor can see that evidence.
+
+What this buys across rounds:
+
+- reviewed regions lower `coverage_novelty` and mark the candidate
+  `duplicate_of` the record that covered it, both of which damp its score;
+- the deferred candidates keep their score and reason and are re-scheduled next
+  round against coverage that has since moved;
+- the residual sweep (spec §14) recomputes the gaps, so each round's input is
+  the *new* gap list rather than the same top-N.
+
+Two index-derived candidate families are **prepended** to the pool before
+scoring: the control map's `ctl-*` candidates (spec §11) and the differential's
+`dif-*` candidates (spec §12), both already persisted by S1. They are
+deliberately **not capped** — their ids are regenerated identically every round,
+so a truncated prefix would starve every later finding forever; oversize pools
+are absorbed by the quota. Ties go to the candidate with a citable `file:line`
+and a named missing control. Set `static_candidates: false` in the target config
+to schedule only the candidates the model proposes.
+
+The plan is written to `state/<target>/coverage/schedule-round-NN.json`
+(`schedule-latest.json` mirrors the newest) with `producer` / `confidence` /
+`evidence_type`, and is readable from `S2/candidate-schedule.json`.
+
+`max_candidates` in the target config caps the round (0 = audit the whole
+configured pool, the pre-PR3 behaviour). If the coverage index is unavailable
+the scheduler degrades to proposal order **and says so** in `schedule_note` —
+an unscheduled round never reads as a scheduled one.
 
 ### S3 — Source audit
 
@@ -318,7 +418,7 @@ If a sub-agent writes outside that scope, discard the overreach and redo that wo
 #### Deterministic runner
 
 ```bash
-python3 scripts/agent_cli.py matrix --workspace <path> --target <name> --round <N> --candidate <id>
+python3 scripts/agent_cli.py matrix --workspace <path> --target <name> --round <N> --manifest <json>
 ```
 
 Java and Shell/HTTP cells share the persisted matrix schema.
@@ -336,7 +436,8 @@ For every candidate that has sufficient technical evidence:
 - Use the bundled checker where appropriate:
 
   ```bash
-  python3 scripts/agent_cli.py novelty --target <name> --round <N> --candidate <id>
+  python3 scripts/agent_cli.py novelty --query <json>
+  python3 scripts/agent_cli.py novelty --evidence <json>
   ```
 
 - Persist query coverage and failures in `S5/novelty-coverage.json`. Network errors, rate limits, offline mode, or empty fallback fixtures are not evidence that no public record exists.
@@ -585,6 +686,17 @@ export PYTHONPATH="$PLUGIN_ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}"
 
 工具缺失是前置条件问题，不是漏洞存在/不存在的证据，禁止伪造结果。
 
+### 非 JVM 目标 —— macOS / 原生应用
+
+确定性扫描建立在源码之上，因此编译好的 `.app` 默认零命中，S3 也拿不到 `file:line` 证据。本插件自带这一路的适配层，请优先使用，不要临时自己拼一套：
+
+- **适配层位置：** `<插件根>/macos/`。完整理由、实测结果与已知限制见 `<插件根>/macos/README.md`。
+- **一键入口：** `bash <插件根>/macos/run-audit.sh "<目标.app|.dmg|.pkg>" <审计目录> [--run]`。流程为 侦察 → 源码化 → 生成 TargetConfig → 落 PoC 骨架；不加 `--run` 则在执行管线前停下。
+- **源码化**把 Mach-O 元数据重建为 `.h`/`.c` 声明树，解包 Electron `app.asar`（有 source map 时还原原始 TypeScript），并为内嵌 JVM 生成 jar 视图。
+- **内置原生支持**（v1.1.0）：原生文件扩展名白名单、11 组 macOS 危险 sink、`native` source-map 预设、`native-app` 目标规则集，以及 stage runner 中 3 处只认 `.java` 硬编码的移除。用 `python3 <插件根>/macos/bin/patch-vulngate.py --plugin <插件根> --verify` 确认它们全部在位。
+- **原生目标的证据纪律。** 重建树是**元数据级**——符号、Objective-C 运行时结构、Selector、字符串、entitlements——**不含方法体**。它只用于建立 S1/S2 的攻击面；任何方法级 S3 结论都必须先拿到 Ghidra 或 `ipsw class-dump` 的产物，禁止仅凭重建树断言「第 N 行存在某逻辑」。
+- **原生目标的 S4** 走 shell 形式 PoC（`matrix --lang shell`）。`matrix --lang` 仅支持 `java` 与 `shell`，这是设计如此，不是缺陷。
+
 ## 6. S1→S8 工作流
 
 所有产物写入：
@@ -604,13 +716,41 @@ reports/<target>/round-NN/...
 - 可调用：
 
   ```bash
-  python3 scripts/agent_cli.py source-map --target-dir <path> --preset <parsers|http|expression|io|exec|config|all>
+  python3 scripts/agent_cli.py source-map --root <path> --preset <parsers|http|expression|io|exec|config|native|all>
   ```
 
 - 有近期通告时先做 advisory/fix-diff 反查；旧路径成为高优先候选，但“有补丁”不是运行时证据。
 - 无通告也检查近期安全修复 commit，落盘 `S1/security-fix-history.json`、`S1/patch-variants.json`，对可信修复与兄弟路径生成 `surface=fix-completeness` 候选。
 - `S1/source-sink-graph.json` 只是一张 `Source→Transform→Validation→Authorization→Sink` 启发式定位图；`heuristic-nearby` 必须带 `requires_manual_dataflow=true`，不能冒充语义/跨过程数据流证明。
 - 按需生成 `project-profile.json`、`target-rules.json`、`composite-chain-hints.json`；这些只用于优先级与覆盖率，不是漏洞结论。
+- **宿主原生模式的覆盖索引初始化：** `source-map` 只是有上限的摘要，不会构建覆盖索引。Mode A 在 S1 显式执行一次完整索引；源码或范围变更后重新构建：
+
+  ```bash
+  python3 "$PLUGIN_ROOT/scripts/agent_cli.py" coverage <target> --workspace <audit-dir> --root <source-root> --rebuild --json
+  ```
+
+  `<audit-dir>` 必须在插件缓存之外。S2 先把 `control-candidates.json`、`differential-candidates.json` 的完整候选与宿主候选合并，再调用 `schedule`；本轮按 `selected_ids` 执行，完整池保留到后续轮次。S8 账本落盘后使用同一 workspace 再运行 `coverage` 刷新审计状态。配置驱动的管线会自动完成 S1 索引和 S2 合并。
+- **覆盖率账本：** S1 同时构建目标级 `state/<target>/coverage/` 索引（源码全集、入口、sink、安全控制），并写出覆盖率摘要。每个生产源码文件要么 `indexed`，要么带明确 `skip_reason`；被排除的目录会记录文件数，而不是被静默丢弃。随时可查：
+
+  ```bash
+  python3 scripts/agent_cli.py coverage <target> --workspace <path> --show-uncovered --risk <high|medium|low>
+  ```
+
+  审计的停止条件是 `高风险未审计 == 0`，不是“没有新候选”。分母为 0 时渲染 `n/a`，绝不显示 `100%`。
+- **跨过程层：** 同一份索引还包含 `symbol-index.json`、`call-graph.json`、`flow-index.json`、`sink-reachability.json`、`control-map.json`、`sibling-groups.json`、`differential-index.json`。sink 做双向分析——从每个外部入口正向、从每个 sink 反向——只有 sink 扫描能看见的路径会成为有效 flow 或记录在案的 `coverage_gap`。flow 路径置信度是 `heuristic-callgraph`：它是线索，不是证明，本层任何结论都不得置为 `runtime-verified`。`FlowRecord.direction` 表示路径**形态**：
+  - `cross-procedural`：至少含一条调用边（有价值的一类）；
+  - `intra-symbol`：入口与 sink 在同一个方法内——这正是「handler 直接做危险操作」的典型 finding，保留完整优先级；
+  - `module-scope`：入口与 sink 都在同一文件的模块作用域。仍会记录，但排在真实调用链之后，因为文件不是 handler。
+
+  模块级代码归属到每文件合成的符号，因此任何入口/sink 都不会出现「无归属」；该符号永不作为调用图的解析目标。
+- **安全控制图（spec §11）：** 同一份索引对每条 `Entry → … → Sink` 路径按 sink 类别应有的控制逐条判定，并记录路径级 verdict（`guarded` / `partial` / `uncontrolled` / `not-applicable`）。全程无鉴权的路径记为 `possible-auth-bypass`；缺校验类控制的记为 `possible-control-bypass`。需求是**任一满足即可的组**——`command-exec` 由 validation *或* sanitization *或* allowlist 任一满足——因此用 `hasPermission` 做鉴权的 handler 不会被误判为缺授权。矩阵未覆盖的 sink 类别回退到 fail-safe 默认要求并列入 `unclassified_sink_categories`，绝不会默认变成 `not-applicable`。**缺失只是线索不是结论**：扫描范围之外的上游过滤器/网关/部署策略可能是真正的守卫，所以这些候选一律命名为 `possible-*` 并带前置条件。
+- **同族差分（spec §12、§19.5）：** 把预期执行同一组控制的 handler 分组（同类 + 共享 name token 或共享 sink 签名）再对族内做差分。多数成员具备、个别成员不具备的某个控制 → `possible-auth-bypass` / `validation-differential`；整族都不具备则是*缺失*，属于控制图的发现——两边都报会让每个未鉴权端点被重复计一次。成员资格按 handler 的**调用闭包**判定，因此由被调函数执行的控制也算数。`--fix-history` 追加 spec §18 Phase 4 的问题：修好其中一个成员的补丁，是否覆盖了它的同族兄弟？
+
+  ```bash
+  python3 scripts/agent_cli.py controls <target> --show-candidates
+  python3 scripts/agent_cli.py differential <target> --show-candidates \
+    --fix-history state/<target>/round-01/S1/security-fix-history.json
+  ```
 - **G0：** 排除死代码/无支撑路径。
 - **G1：** 必须存在不可信输入可达性；不可达时保留源码证据用于排除。
 
@@ -636,6 +776,55 @@ S1 产生的每个 fix-completeness 候选必须进入 `S2/candidate-matrix.json
 - `extra-primitive`：需要额外 Gadget/Class/Primitive。
 
 S2 不写最终结论。
+
+#### S2 候选调度（覆盖驱动，spec §13/§14/§15）
+
+S2 不再把「项目里几个最危险的 snippets」丢给模型、再按提案顺序照单全收。
+候选池现在经过**调度**，完全由持久化的覆盖索引决定，无 LLM 参与：
+
+```bash
+# 查看某一轮的调度（确定性、离线）
+python3 scripts/agent_cli.py schedule <target> \
+  --candidates state/<target>/round-01/S2/candidate-matrix.json \
+  --slots 8 --round 1
+
+# 连 spec §15 的结构化 prompt 块一起打印
+python3 scripts/agent_cli.py schedule <target> --config targets/<t>.json --prompt
+
+# 在覆盖报告旁边带上最近一轮的调度摘要
+python3 scripts/agent_cli.py coverage <target> --schedule
+```
+
+打分是七个由证据推导的因子的加权和（权重合计 100，故分数可直接读作百分比）：
+`reachability` 20、`attacker_control` 15、`security_boundary` 15、
+`sink_impact` 15、`control_gap` 15、`evidence_quality` 10、
+`coverage_novelty` 10。每个因子都附带理由与证据；**无法评估的因子计低分，绝不计高分**。
+信任边界按**路径**判定：一条带授权控制的路径不得掩盖同一 sink 上另一条无授权的路径；
+分数随「无授权路径占比」连续变化，而不是在出现第一条时直接饱和。
+
+选择按类别配额分层（`authz` 2，`parser`/`file`/`ssrf`/`exec`/`dos` 各 1，
+`residual` 1）。某类别无候选时配额**转移**并如实上报，轮次宽度不缩水。
+携带运行时证据的候选（fuzz 复现器）会被**钉住**：不参与配额竞争直接入选，
+因为静态因子看不见那份证据。
+
+跨轮收益：
+
+- 已审区域会拉低 `coverage_novelty`，并把候选标记为 `duplicate_of` 覆盖它的记录，两者共同衰减其分数；
+- 延后的候选保留分数与理由，下一轮针对已变化的覆盖重新调度；
+- 残留扫描（spec §14）重算缺口，因此每轮的输入是**新的**缺口列表，而不是固定的 top-N。
+
+两类索引派生的候选会在打分前被**前置**进候选池：控制图的 `ctl-*`（spec §11）
+与差分的 `dif-*`（spec §12），两者都已由 S1 持久化。它们刻意**不设上限**——
+其 id 每轮确定性重建，截断前缀会让后面所有发现永远饿死；超大池由配额机制吸收。
+平分时优先取带有可引用 `file:line` 与具名缺失控制的候选。
+在目标配置里设 `static_candidates: false` 可只调度模型自己提出的候选。
+
+计划写入 `state/<target>/coverage/schedule-round-NN.json`（`schedule-latest.json` 为最新镜像），
+带 `producer` / `confidence` / `evidence_type`，同时可在 `S2/candidate-schedule.json` 读到。
+
+目标配置里的 `max_candidates` 限定每轮预算（0 = 审完全部已配置候选，即 PR3 之前的行为）。
+若覆盖索引不可用，调度会退化为提案顺序，**并如实写入 `schedule_note`** ——
+没被调度的轮次不会看起来像被调度过。
 
 ### S3 — 源码审计
 
@@ -772,7 +961,7 @@ PoC 使用最小显式环境。Agent 模型/API URL、代理、凭据不能泄�
 #### 确定性运行器
 
 ```bash
-python3 scripts/agent_cli.py matrix --workspace <path> --target <name> --round <N> --candidate <id>
+python3 scripts/agent_cli.py matrix --workspace <path> --target <name> --round <N> --manifest <json>
 ```
 
 Java 与 Shell/HTTP 使用统一落盘 Schema。
@@ -790,7 +979,8 @@ Java 与 Shell/HTTP 使用统一落盘 Schema。
 - 可调用：
 
   ```bash
-  python3 scripts/agent_cli.py novelty --target <name> --round <N> --candidate <id>
+  python3 scripts/agent_cli.py novelty --query <json>
+  python3 scripts/agent_cli.py novelty --evidence <json>
   ```
 
 - `S5/novelty-coverage.json` 必须记录查询覆盖与失败；网络错误、限流、离线、空 fixture 都不是“没有公开记录”的证据。

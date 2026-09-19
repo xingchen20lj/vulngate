@@ -96,13 +96,37 @@ Evidence Gates
 - **Checkpoint + Evidence Ledger** —— 研究状态、证据与最终结论之间保持可追溯关系。
 - **安全优先执行边界** —— 回环优先、审批留痕，并支持显式授权且白名单化的 staging。
 
+## 覆盖率驱动审计与原生应用
+
+1.1.0 将 WorkBuddy 版的分析层和 macOS 能力迁入 Codex 原生插件。
+宿主继续使用 Codex 当前模型，新增确定性命令无需额外模型 API Key。
+
+- 完整生产源码清单，显式记录跳过原因，从审计账本推导覆盖状态。
+- 启发式符号、调用图，以及入口到 sink 的正向/反向路径。
+- 逐路径安全控制缺口和同族 handler 差分；产出候选线索，等待验证。
+- 按证据评分、类别配额调度候选，延期工作保留到后续轮次。
+- macOS `.app`/`.dmg`/`.pkg`、Mach-O 元数据、Electron ASAR/source map 与 JAR 视图。
+
+```bash
+python3 scripts/agent_cli.py coverage demo --root /path/to/source \
+  --workspace /path/to/audit --rebuild --show-uncovered
+python3 scripts/agent_cli.py controls demo --workspace /path/to/audit --show-candidates
+python3 scripts/agent_cli.py differential demo --workspace /path/to/audit --show-candidates
+bash macos/run-audit.sh /Applications/Target.app /path/to/native-audit
+```
+
+分析、调度和账本命令使用同一个 `--workspace`。源码或范围变化后重新构建覆盖索引。
+原生重建只建立攻击面视图，不能恢复方法体或直接证明漏洞。
+详见 [原生目标使用说明](macos/README.md) 和
+[迁移范围与完整命令流程](docs/WORKBUDDY-MIGRATION.md)。
+
 ## 安装
 
 ### 前置要求
 
 - Codex（CLI 或桌面客户端），支持插件的版本
 - Python 3.8+
-- JDK 8+（一般使用推荐 17/21；个别 PoC cell 可声明特定运行时）
+- JVM 目标需要 JDK 8+（推荐 17/21）；原生 macOS 目标需要 Command Line Tools
 - `rg`（ripgrep），用于源码测绘
 
 ### 从本仓库安装

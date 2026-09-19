@@ -5,10 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 
+from ..analysis.languages import ALL_SUFFIXES
+
 
 def _source_file_count(root: Path, source_dirs: List[str]) -> int:
-    suffixes = {".java", ".kt", ".scala", ".go", ".py", ".js", ".ts", ".clj",
-                ".c", ".cpp", ".rs", ".rb", ".php", ".cs"}
+    # [vulngate-macos-universal] 补齐 .h/.swift/.m/.mm 等。
+    # Suffix set is owned by agent.analysis.languages (spec §6.3) so this count
+    # and the coverage inventory's denominator can never disagree.
+    suffixes = set(ALL_SUFFIXES)
     count = 0
     for source_dir in source_dirs:
         path = (root / source_dir).resolve()
@@ -16,7 +20,7 @@ def _source_file_count(root: Path, source_dirs: List[str]) -> int:
             continue
         if path.exists():
             count += sum(1 for item in path.rglob("*")
-                         if item.is_file() and item.suffix in suffixes)
+                         if item.is_file() and item.suffix.lower() in suffixes)
     return count
 
 

@@ -23,3 +23,6 @@ approval-log.jsonl
 
 # Cached public-disclosure API responses
 agent/regression/cache/api/
+
+# Local originals created by the native adapter patch utility
+.vulngate-macos-backup/

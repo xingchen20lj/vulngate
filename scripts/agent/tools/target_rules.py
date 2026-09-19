@@ -1,10 +1,15 @@
-"""Target-type-specific S1 patterns and conservative chain hints."""
+"""Target-type-specific S1 patterns and conservative chain hints.
+
+Scan/present split (spec §6.1): ``scan_all_target_rule_hits`` is uncapped and is
+what an index builder must call; ``collect_target_rule_hits`` is the bounded
+prompt digest retained for the existing S1 call site.
+"""
 
 from __future__ import annotations
 
 from typing import Dict, List, Tuple
 
-from .source_evidence import grep_hits
+from .source_evidence import scan_all_hits, summarize_hits
 
 
 TARGET_RULES: Dict[str, List[Tuple[str, str]]] = {
@@ -24,6 +29,22 @@ TARGET_RULES: Dict[str, List[Tuple[str, str]]] = {
                 (r"Jndi|JNDI|lookup|interpolat|template", "lookup-boundary")],
     "expression": [(r"evaluate|parseExpression|eval|template|render", "expression-entry"),
                    (r"ClassLoader|Runtime|ProcessBuilder|MethodHandle", "execution-sink")],
+    # [vulngate-macos-universal] macOS 原生应用（.app / Mach-O / Swift / ObjC）
+    "native-app": [
+        (r"application:openURL|applicationDidFinishLaunching|handleGetURLEvent"
+         r"|openURL|handleOpenURL|NSApplicationMain", "ui-entry"),
+        (r"NSXPCConnection|xpc_connection_create|mach_msg|bootstrap_look_up"
+         r"|shouldAcceptNewConnection|CFMessagePort", "ipc-entry"),
+        (r"WKWebView|evaluateJavaScript|addScriptMessageHandler"
+         r"|userContentController|JSContext", "webview-boundary"),
+        (r"NSKeyedUnarchiver|unarchive[A-Za-z]*|propertyListWithData"
+         r"|CFPropertyListCreate|initWithCoder", "deserialization"),
+        (r"posix_spawn|NSTask|execve|system\s*\(|popen\s*\(|NSAppleScript", "command-exec"),
+        (r"SecItem[A-Za-z]*|SecKeychain|keychain|credential", "credential-boundary"),
+        (r"AuthorizationExecuteWithPrivileges|SMJobBless|setuid|setgid"
+         r"|get-task-allow|disable-library-validation", "privilege-boundary"),
+        (r"fopen|NSFileManager|open\s*\(|unlink|remove|chmod", "dangerous-sink"),
+    ],
 }
 
 
@@ -31,17 +52,32 @@ def patterns_for(target_type: str) -> List[Tuple[str, str]]:
     return TARGET_RULES.get(str(target_type), TARGET_RULES["library"])
 
 
-def collect_target_rule_hits(target_type: str, source_dirs: List[str], root,
-                             max_lines: int = 8) -> List[Dict]:
+def scan_all_target_rule_hits(target_type: str, source_dirs: List[str], root) -> List[Dict]:
+    """**Full** scan of the target-type rule set.  No cap (spec §6.1)."""
     hits = []
     for pattern, label in patterns_for(target_type):
-        for item in grep_hits(pattern, source_dirs, root, max_lines=max_lines):
+        for item in scan_all_hits(pattern, source_dirs, root):
+            hits.append({"label": label, "pattern": pattern, **item})
+    hits.sort(key=lambda h: (str(h["file"]), int(h["line"]), h["label"]))
+    return hits
+
+
+def collect_target_rule_hits(target_type: str, source_dirs: List[str], root,
+                             max_lines: int = 8) -> List[Dict]:
+    """Bounded digest for **prompt/report display only** (spec §2.1)."""
+    hits = []
+    for pattern, label in patterns_for(target_type):
+        for item in summarize_hits(scan_all_hits(pattern, source_dirs, root), max_lines):
             hits.append({"label": label, "pattern": pattern, **item})
     return hits
 
 
 def composite_chain_hints(graph: List[Dict], max_items: int = 80) -> List[Dict]:
-    """Select paths containing both an authorization boundary and a sink."""
+    """Select paths containing both an authorization boundary and a sink.
+
+    Bounded by design -- a prompt digest.  The uncapped path set is
+    ``source_evidence.scan_all_source_sink_paths`` / the PR2 flow index.
+    """
     out = []
     for path in graph:
         if not path.get("authorization") or not path.get("sink"):

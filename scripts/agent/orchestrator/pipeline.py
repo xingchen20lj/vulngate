@@ -64,7 +64,7 @@ def run_round(ctx: StageContext, force: bool = False, only: Optional[str] = None
     for stage in stages:
         if not force and ctx.store.load_stage(stage) and stage != only:
             cached = ctx.store.load_stage(stage)
-            if stage == "S2" and cached and cached.get("candidates"):
+            if stage == "S2" and cached and "candidates" in cached:
                 # S2 may have materialized fix-completeness candidates from
                 # S1 git history; restore them before S3-S8 resume.
                 ctx.config.candidates = cached["candidates"]
@@ -75,6 +75,10 @@ def run_round(ctx: StageContext, force: bool = False, only: Optional[str] = None
             data = run_s1(ctx)
         elif stage == "S2":
             data = run_s2(ctx)
+            # S3-S8 consume the scheduled selection, including generated
+            # control/differential candidates; deferred candidates stay in
+            # the config on disk for a later round.
+            ctx.config.candidates = data["candidates"]
         elif stage == "S3":
             data = run_s3(ctx)
         elif stage == "S4":
@@ -182,6 +186,10 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--force", action="store_true", help="re-run stages even if checkpoint exists")
     ap.add_argument("--llm-audit", action="store_true",
                     help="enable S5b mechanism audit (LLM; requires DEEPSEEK_API_KEY)")
+    ap.add_argument("--workspace", default=None,
+                    help="override the workspace root (default: <repo>/scripts). "
+                         "Use a separate audit directory to isolate checkpoints "
+                         "and keep evidence outside the installed plugin cache.")
     args = ap.parse_args(argv)
 
     config = TargetConfig.load(Path(args.config))
@@ -190,7 +198,8 @@ def main(argv: Optional[list] = None) -> int:
         from ..llm.adapter import LLMClient
         llm = LLMClient(max_calls=8, max_tokens_total=20_000, reasoning_effort="low")
         config.llm_audit = True
-    ctx = StageContext(WORKSPACE, args.target, args.round, config,
+    workspace = Path(args.workspace).expanduser().resolve() if args.workspace else WORKSPACE
+    ctx = StageContext(workspace, args.target, args.round, config,
                        offline=args.offline, llm=llm)
     run_round(ctx, force=args.force, only=args.stage)
     return 0
