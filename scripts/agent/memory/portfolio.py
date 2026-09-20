@@ -29,6 +29,7 @@ from .research import (
     STATE_ENVIRONMENT_GAP,
     STATE_INCONCLUSIVE,
     STATE_PENDING_RESIDUAL,
+    STATE_RESIDUAL_FALSIFIED,
     STATE_REVIEW_ACCEPTED,
     STATE_REVIEW_NEEDS_EVIDENCE,
     STATE_REVIEW_REJECTED,
@@ -214,6 +215,7 @@ def _empty_portfolio() -> Dict[str, Any]:
             "actionable_differences": 0,
             "reviewed_mechanisms": 0,
             "pending_residuals": 0,
+            "resolved_residuals": 0,
             "states": {},
             "review_statuses": {},
         },
@@ -302,6 +304,7 @@ def build_research_portfolio(
     unresolved_count = 0
     difference_count = 0
     pending_residual_count = 0
+    resolved_residual_count = 0
 
     for entry in entries:
         key = _text(entry.get("research_key"), MAX_KEY)
@@ -327,8 +330,11 @@ def build_research_portfolio(
             difference_count += 1
         residuals = [item for item in entry.get("residuals") or []
                      if isinstance(item, dict) and item.get("residual_id")]
-        pending_residual_count += len(residuals)
-        if residuals and state not in UNRESOLVED_STATES:
+        pending_residuals = [item for item in residuals
+                             if item.get("state") != STATE_RESIDUAL_FALSIFIED]
+        pending_residual_count += len(pending_residuals)
+        resolved_residual_count += len(residuals) - len(pending_residuals)
+        if pending_residuals and state not in UNRESOLVED_STATES:
             # A stable primary replay does not close an S3 residual variant.
             unresolved_count += 1
 
@@ -341,7 +347,7 @@ def build_research_portfolio(
                     event_state = _known_state(event.get("state"))
                     if event_state:
                         bucket["state_counts"][event_state] += 1
-                if state in UNRESOLVED_STATES or residuals:
+                if state in UNRESOLVED_STATES or pending_residuals:
                     bucket["unresolved_keys"].add(key)
                 if state in STABLE_STATES:
                     bucket["stable_keys"].add(key)
@@ -387,7 +393,7 @@ def build_research_portfolio(
         # S3 residuals are owed research even when the latest runtime replay
         # was stable.  Keep one bounded probe per residual so a later round
         # cannot mistake "the primary case replayed" for "all variants closed".
-        for residual in residuals:
+        for residual in pending_residuals:
             residual_id = _text(residual.get("residual_id"), 80)
             residual_kind = _text(residual.get("kind"), 48).lower()
             has_plan = bool(residual.get("has_probe_plan"))
@@ -471,6 +477,7 @@ def build_research_portfolio(
             "reviewed_mechanisms": sum(1 for key in reviews if any(
                 _text(entry.get("research_key"), MAX_KEY) == key for entry in entries)),
             "pending_residuals": pending_residual_count,
+            "resolved_residuals": resolved_residual_count,
             "states": dict(sorted(states.items())),
             "latest_states": dict(sorted(latest_states.items())),
             "review_statuses": dict(sorted(review_statuses.items())),
@@ -495,7 +502,7 @@ def normalize_research_portfolio(raw: Any) -> Dict[str, Any]:
     for key in (
         "mechanism_count", "event_count", "unresolved_mechanisms",
         "stable_mechanisms", "actionable_differences", "reviewed_mechanisms",
-        "pending_residuals",
+        "pending_residuals", "resolved_residuals",
     ):
         result["summary"][key] = _safe_int(summary.get(key), 0, 0, 1000000)
     for key in ("states", "latest_states", "review_statuses"):

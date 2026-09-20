@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..memory.ledger import render_finding_md, write_round_artifacts
-from ..memory.research import (build_round_memory, load_research_memory,
+from ..memory.research import (build_residual_closure_report,
+                                build_round_memory, load_research_memory,
                                 load_review_feedback, merge_research_memory,
                                 write_research_memory)
 from ..memory.portfolio import (build_research_portfolio,
@@ -631,6 +632,10 @@ def _poc_specs(ctx: StageContext) -> List[POCSpec]:
                                            (candidate_cases[0] if len(candidate_cases) == 1 else {})),
                 capability_contract=capability_contract_from_candidate(
                     {**cand, **poc, **c}),
+                residual_contracts=(c.get("residual_contracts")
+                                    or poc.get("residual_contracts")
+                                    or (cand.get("experiment_plan") or {}).get(
+                                        "residual_contracts", [])),
             ) for c in poc.get("cells", [])]
             specs.append(POCSpec(
                 candidate_id=cand["candidate_id"],
@@ -672,6 +677,10 @@ def _shell_poc_specs(ctx: StageContext) -> List[ShellPOCSpec]:
                                            (candidate_cases[0] if len(candidate_cases) == 1 else {})),
                 capability_contract=capability_contract_from_candidate(
                     {**cand, **poc, **c}),
+                residual_contracts=(c.get("residual_contracts")
+                                    or poc.get("residual_contracts")
+                                    or (cand.get("experiment_plan") or {}).get(
+                                        "residual_contracts", [])),
             ) for c in poc.get("cells", [])]
             specs.append(ShellPOCSpec(
                 candidate_id=cand["candidate_id"],
@@ -820,6 +829,10 @@ def run_s4(ctx: StageContext) -> Dict[str, Any]:
                     "assertion": assertion,
                 })
     ctx.store.write_artifact("S4", "verification-matrix.json", summaries)
+    ctx.store.write_artifact(
+        "S4", "residual-closure.json",
+        build_residual_closure_report(ctx.config.candidates, summaries,
+                                      ctx.round_no))
     ctx.store.write_artifact("S4", "execution-status.json", {
         cid: {
             key: value for key, value in summary.items()

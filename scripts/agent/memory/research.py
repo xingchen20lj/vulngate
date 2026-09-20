@@ -63,6 +63,7 @@ STATE_REVIEW_REJECTED = "review-rejected"
 STATE_REVIEW_NEEDS_EVIDENCE = "review-needs-evidence"
 STATE_REVIEW_SCOPE_CORRECTED = "review-scope-corrected"
 STATE_PENDING_RESIDUAL = "pending-residual"
+STATE_RESIDUAL_FALSIFIED = "residual-falsified"
 
 REVIEW_STATUS_ACCEPTED = "accepted"
 REVIEW_STATUS_REJECTED = "rejected"
@@ -106,6 +107,39 @@ _RESIDUAL_REASONS = frozenset({
     "control-gap", "environment-gap", "inconclusive", "requires-runtime",
     "needs-source-review", "pending", "unclassified",
 })
+
+# A residual is closed only by an explicit, bounded falsifier emitted by an
+# executed S4 cell.  These are research-state labels, not vulnerability
+# verdicts.  In particular, an environment gap has no falsifier here: it must
+# remain pending until the environment is repaired and the probe is rerun.
+_RESIDUAL_FALSIFIERS_BY_KIND = {
+    "fix-completeness": ("variant-rejected", "no-new-effect", "source-disproved",
+                         "safe-equivalent"),
+    "variant": ("variant-rejected", "no-new-effect", "source-disproved",
+                 "safe-equivalent"),
+    "control-gap": ("control-binds", "authz-denied", "no-new-effect",
+                     "source-disproved"),
+    "authz": ("authz-denied", "ownership-bound"),
+    "validation": ("validation-enforced", "no-new-effect", "safe-equivalent"),
+    "typed-effect": ("typed-effect-absent", "no-new-effect", "safe-equivalent"),
+    "capability-chain": ("transition-blocked", "capability-missing",
+                         "typed-effect-absent", "safe-equivalent"),
+    "environment-gap": (),
+    "source-sink": ("path-unreachable", "control-binds", "source-disproved"),
+    "differential": ("no-difference", "safe-equivalent", "no-new-effect"),
+    "state": ("state-reset", "no-new-effect", "safe-equivalent"),
+    "race": ("no-race", "state-reset", "no-new-effect", "safe-equivalent"),
+    "availability": ("availability-preserved", "no-amplification",
+                      "no-new-effect", "safe-equivalent"),
+    "parser": ("default-blocked", "validation-enforced", "no-new-effect",
+                "safe-equivalent"),
+    "default": ("default-blocked", "validation-enforced", "no-new-effect",
+                 "safe-equivalent"),
+    "unclassified": ("no-new-effect", "source-disproved", "safe-equivalent"),
+}
+_RESIDUAL_FALSIFIERS = frozenset(
+    code for values in _RESIDUAL_FALSIFIERS_BY_KIND.values() for code in values)
+_RESIDUAL_STATES = frozenset({STATE_PENDING_RESIDUAL, STATE_RESIDUAL_FALSIFIED})
 
 
 def _text(value: Any, limit: int = MAX_TEXT) -> str:
@@ -281,6 +315,12 @@ def _safe_residual_code(value: Any, allowed: Iterable[str]) -> str:
     return text if text in allowed else "unclassified"
 
 
+def residual_falsifiers(kind: Any) -> List[str]:
+    """Return the bounded falsifier vocabulary for one residual kind."""
+    normalized = _safe_residual_code(kind, _RESIDUAL_KINDS)
+    return list(_RESIDUAL_FALSIFIERS_BY_KIND.get(normalized, ()))
+
+
 def _residual_locations(residual: Dict[str, Any],
                         candidate: Dict[str, Any]) -> List[str]:
     raw = (residual.get("code_location") or residual.get("code_locations")
@@ -336,6 +376,7 @@ def _residual_meta(candidate: Dict[str, Any], key: str) -> List[Dict[str, Any]]:
             "code_locations": locations,
             "has_probe_plan": bool(probe),
             "probe_digest": probe_digest,
+            "allowed_falsifiers": residual_falsifiers(kind),
             "state": STATE_PENDING_RESIDUAL,
             "claim_status": MEMORY_CLAIM_STATUS,
         })
@@ -361,6 +402,20 @@ def _normalize_residual(value: Any) -> Dict[str, Any]:
     probe_digest = _text(value.get("probe_digest"), 40).lower()
     if probe_digest and not re.fullmatch(r"[0-9a-f]{1,40}", probe_digest):
         probe_digest = ""
+    allowed_falsifiers = residual_falsifiers(kind)
+    state = _text(value.get("state"), 64)
+    if state not in _RESIDUAL_STATES:
+        state = STATE_PENDING_RESIDUAL
+    falsifier_code = _safe_residual_code(
+        value.get("falsifier_code") or value.get("outcome_code"),
+        _RESIDUAL_FALSIFIERS)
+    if falsifier_code not in allowed_falsifiers:
+        falsifier_code = ""
+        state = STATE_PENDING_RESIDUAL
+    evidence_cells = _bounded_strings(value.get("evidence_cells"), 8, 80)
+    if state == STATE_RESIDUAL_FALSIFIED and not evidence_cells:
+        state = STATE_PENDING_RESIDUAL
+    outcome_round = _safe_int(value.get("outcome_round"), 0, 0, 1000000)
     return {
         "residual_id": residual_id,
         "kind": kind,
@@ -368,9 +423,108 @@ def _normalize_residual(value: Any) -> Dict[str, Any]:
         "code_locations": locations,
         "has_probe_plan": bool(value.get("has_probe_plan")),
         "probe_digest": probe_digest,
-        "state": STATE_PENDING_RESIDUAL,
+        "allowed_falsifiers": allowed_falsifiers,
+        "state": state,
+        "falsifier_code": falsifier_code,
+        "evidence_cells": evidence_cells,
+        "outcome_round": outcome_round,
         "claim_status": MEMORY_CLAIM_STATUS,
     }
+
+
+def _residual_outcomes(summary: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Accept only normalized S4 residual-falsifier observations."""
+    if not isinstance(summary, dict):
+        return []
+    rows = []
+    for raw in summary.get("residual_falsifiers") or []:
+        if not isinstance(raw, dict):
+            continue
+        residual_id = _text(raw.get("residual_id"), 80)
+        code = _safe_residual_code(raw.get("falsifier_code"), _RESIDUAL_FALSIFIERS)
+        status = _text(raw.get("status"), 40).lower()
+        execution_state = _text(raw.get("execution_state"), 48).lower()
+        cell_ref = _text(raw.get("cell_ref"), 80)
+        if not re.fullmatch(r"rr-[0-9a-f]{20}", residual_id):
+            continue
+        if code == "unclassified" or status != "falsified":
+            continue
+        rows.append({
+            "residual_id": residual_id,
+            "falsifier_code": code,
+            "status": status,
+            "execution_state": execution_state,
+            "effect_observed": bool(raw.get("effect_observed")),
+            "contract_declared": bool(raw.get("contract_declared")),
+            "cell_ref": cell_ref,
+        })
+    return rows[:32]
+
+
+def _close_residuals(residuals: Sequence[Dict[str, Any]],
+                     summary: Dict[str, Any], round_no: int
+                     ) -> List[Dict[str, Any]]:
+    """Apply explicit S4 falsifiers without treating absence as evidence."""
+    outcomes = _residual_outcomes(summary)
+    closed: List[Dict[str, Any]] = []
+    for raw in residuals:
+        residual = _normalize_residual(raw)
+        if not residual:
+            continue
+        if residual.get("state") == STATE_RESIDUAL_FALSIFIED:
+            closed.append(residual)
+            continue
+        residual_id = residual.get("residual_id")
+        accepted = next((row for row in outcomes
+                         if row.get("residual_id") == residual_id
+                         and row.get("contract_declared")
+                         and row.get("execution_state") == "executed"
+                         and not row.get("effect_observed")
+                         and row.get("falsifier_code") in
+                         set(residual.get("allowed_falsifiers") or [])), None)
+        if accepted:
+            residual["state"] = STATE_RESIDUAL_FALSIFIED
+            residual["falsifier_code"] = accepted["falsifier_code"]
+            residual["evidence_cells"] = ([accepted.get("cell_ref")]
+                                            if accepted.get("cell_ref") else [])
+            residual["outcome_round"] = _safe_int(round_no, 0, 0, 1000000)
+        closed.append(residual)
+    return closed[:MAX_RESIDUALS_PER_ENTRY]
+
+
+def residual_meta(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Public, stable residual identities for planner/runner contracts."""
+    candidate = candidate if isinstance(candidate, dict) else {}
+    return _residual_meta(candidate, research_key(candidate))
+
+
+def build_residual_closure_report(candidates: Sequence[Dict[str, Any]],
+                                  summaries: Optional[Dict[str, Any]],
+                                  round_no: int) -> List[Dict[str, Any]]:
+    """Build a bounded S4 report of residual outcomes, never a finding list."""
+    summaries = summaries if isinstance(summaries, dict) else {}
+    rows: List[Dict[str, Any]] = []
+    for candidate in candidates or []:
+        if not isinstance(candidate, dict):
+            continue
+        cid = _text(candidate.get("candidate_id"), 120)
+        key = research_key(candidate)
+        residuals = _close_residuals(
+            _residual_meta(candidate, key), summaries.get(cid, {}), round_no)
+        for residual in residuals:
+            rows.append({
+                "candidate_id": cid,
+                "research_key": key,
+                "residual_id": residual.get("residual_id"),
+                "kind": residual.get("kind"),
+                "reason_code": residual.get("reason_code"),
+                "state": residual.get("state"),
+                "falsifier_code": residual.get("falsifier_code", ""),
+                "evidence_cells": list(residual.get("evidence_cells") or []),
+                "outcome_round": residual.get("outcome_round", 0),
+                "claim_status": MEMORY_CLAIM_STATUS,
+            })
+    return rows[:MAX_MEMORY_ENTRIES]
 
 
 def _runtime_state(replay: Dict[str, Any], differential: Dict[str, Any],
@@ -699,6 +853,14 @@ def build_round_memory(candidates: Sequence[Dict[str, Any]],
             }.get(entry.get("target_type", ""), "")
             if target_surface:
                 entry["research_surface"] = target_surface
+        entry["residuals"] = _close_residuals(
+            entry.get("residuals") or [], summary, round_no)
+        entry["pending_residual_count"] = sum(
+            1 for item in entry["residuals"]
+            if item.get("state") == STATE_PENDING_RESIDUAL)
+        entry["resolved_residual_count"] = sum(
+            1 for item in entry["residuals"]
+            if item.get("state") == STATE_RESIDUAL_FALSIFIED)
         entry.update({
             "round": int(round_no),
             "decision": _text(conclusions.get(cid, ""), 100),
@@ -719,6 +881,12 @@ def build_round_memory(candidates: Sequence[Dict[str, Any]],
             "event_count": sum(len(e.get("events", [])) for e in entries),
             "residual_count": sum(len(e.get("residuals") or [])
                                    for e in entries),
+            "pending_residual_count": sum(
+                int(e.get("pending_residual_count", 0) or 0)
+                for e in entries),
+            "resolved_residual_count": sum(
+                int(e.get("resolved_residual_count", 0) or 0)
+                for e in entries),
             "states": dict(sorted((str(k), int(v)) for k, v in states.items()
                                    if k)),
         },
@@ -732,7 +900,8 @@ def _empty_memory() -> Dict[str, Any]:
         "round": 0,
         "entries": [],
         "summary": {"candidate_count": 0, "event_count": 0,
-                    "residual_count": 0, "states": {}},
+                    "residual_count": 0, "pending_residual_count": 0,
+                    "resolved_residual_count": 0, "states": {}},
         "claim_status": MEMORY_CLAIM_STATUS,
     }
 
@@ -996,8 +1165,14 @@ def load_research_memory(workspace: Path, target: str) -> Dict[str, Any]:
     value["schema_version"] = MEMORY_SCHEMA_VERSION
     value["entries"] = entries[:MAX_MEMORY_ENTRIES]
     value["claim_status"] = MEMORY_CLAIM_STATUS
-    return _apply_review_feedback(
+    result = _apply_review_feedback(
         value, load_review_feedback(workspace, target).get("entries") or [])
+    try:
+        round_no = int(result.get("round", 0) or 0)
+    except (TypeError, ValueError):
+        round_no = 0
+    result["summary"] = _memory_summary(result.get("entries") or [], round_no)
+    return result
 
 
 def _event_sort_key(event: Dict[str, Any]) -> Tuple[int, str]:
@@ -1195,7 +1370,12 @@ def _normalize_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
         residuals.append(residual)
     residuals.sort(key=lambda item: str(item.get("residual_id", "")))
     normalized["residuals"] = residuals[-MAX_RESIDUALS_PER_ENTRY:]
-    normalized["pending_residual_count"] = len(normalized["residuals"])
+    normalized["pending_residual_count"] = sum(
+        1 for item in normalized["residuals"]
+        if item.get("state") == STATE_PENDING_RESIDUAL)
+    normalized["resolved_residual_count"] = sum(
+        1 for item in normalized["residuals"]
+        if item.get("state") == STATE_RESIDUAL_FALSIFIED)
     events = []
     seen = set()
     for event in entry.get("events") or []:
@@ -1232,9 +1412,53 @@ def _memory_summary(entries: Sequence[Dict[str, Any]], round_no: int) -> Dict[st
         "event_count": sum(len(entry.get("events", [])) for entry in entries),
         "residual_count": sum(len(entry.get("residuals") or [])
                                for entry in entries),
+        "pending_residual_count": sum(
+            int(entry.get("pending_residual_count", 0) or 0)
+            for entry in entries),
+        "resolved_residual_count": sum(
+            int(entry.get("resolved_residual_count", 0) or 0)
+            for entry in entries),
         "states": dict(sorted((str(k), int(v)) for k, v in states.items())),
         "last_round": int(round_no),
     }
+
+
+def _merge_residual(current: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge one residual monotonically; a falsified state never regresses."""
+    left = _normalize_residual(current)
+    right = _normalize_residual(incoming)
+    if not left:
+        return right
+    if not right:
+        return left
+    result = dict(left)
+    # Keep the newest bounded source metadata, but never erase a recorded
+    # falsifier with a later bookkeeping/pending copy.
+    for field in ("kind", "reason_code", "code_locations", "has_probe_plan",
+                  "probe_digest", "allowed_falsifiers"):
+        value = right.get(field)
+        if value not in (None, "", [], {}):
+            result[field] = value
+    if left.get("state") != STATE_RESIDUAL_FALSIFIED and \
+            right.get("state") == STATE_RESIDUAL_FALSIFIED:
+        result.update({
+            "state": STATE_RESIDUAL_FALSIFIED,
+            "falsifier_code": right.get("falsifier_code", ""),
+            "evidence_cells": list(right.get("evidence_cells") or []),
+            "outcome_round": _safe_int(right.get("outcome_round"), 0, 0, 1000000),
+        })
+    elif left.get("state") == STATE_RESIDUAL_FALSIFIED:
+        result["state"] = STATE_RESIDUAL_FALSIFIED
+        result["falsifier_code"] = left.get("falsifier_code", "")
+        result["evidence_cells"] = list(left.get("evidence_cells") or [])
+        result["outcome_round"] = _safe_int(left.get("outcome_round"), 0, 0, 1000000)
+    else:
+        result["state"] = STATE_PENDING_RESIDUAL
+        result["falsifier_code"] = ""
+        result["evidence_cells"] = []
+        result["outcome_round"] = 0
+    result["claim_status"] = MEMORY_CLAIM_STATUS
+    return _normalize_residual(result)
 
 
 def merge_research_memory(existing: Optional[Dict[str, Any]],
@@ -1287,20 +1511,30 @@ def merge_research_memory(existing: Optional[Dict[str, Any]],
             if source.get("patch_commit"):
                 target["patch_commit"] = _text(source.get("patch_commit"), 80)
             residuals = list(target.get("residuals") or [])
-            seen_residuals = {
-                str(item.get("residual_id")) for item in residuals
+            residual_index = {
+                str(item.get("residual_id")): index
+                for index, item in enumerate(residuals)
                 if isinstance(item, dict) and item.get("residual_id")
             }
             for raw_residual in source.get("residuals") or []:
                 residual = _normalize_residual(raw_residual)
                 residual_id = residual.get("residual_id")
-                if not residual_id or residual_id in seen_residuals:
+                if not residual_id:
                     continue
-                residuals.append(residual)
-                seen_residuals.add(residual_id)
+                if residual_id in residual_index:
+                    index = residual_index[residual_id]
+                    residuals[index] = _merge_residual(residuals[index], residual)
+                else:
+                    residual_index[residual_id] = len(residuals)
+                    residuals.append(residual)
             residuals.sort(key=lambda item: str(item.get("residual_id", "")))
             target["residuals"] = residuals[-MAX_RESIDUALS_PER_ENTRY:]
-            target["pending_residual_count"] = len(target["residuals"])
+            target["pending_residual_count"] = sum(
+                1 for item in target["residuals"]
+                if item.get("state") == STATE_PENDING_RESIDUAL)
+            target["resolved_residual_count"] = sum(
+                1 for item in target["residuals"]
+                if item.get("state") == STATE_RESIDUAL_FALSIFIED)
             target["decision"] = _text(source.get("decision", target.get("decision", "")), 100)
             events = target.setdefault("events", [])
             seen = {str(event.get("event_id")) for event in events}
@@ -1396,7 +1630,17 @@ def memory_prompt_rows(entries: Iterable[Dict[str, Any]],
                 "has_probe_plan": bool(item.get("has_probe_plan")),
                 "claim_status": MEMORY_CLAIM_STATUS,
             } for item in (entry.get("residuals") or [])
-                if isinstance(item, dict)][:4],
+                if isinstance(item, dict)
+                and item.get("state") == STATE_PENDING_RESIDUAL][:4],
+            "resolved_residuals": [{
+                "residual_id": _text(item.get("residual_id"), 80),
+                "kind": _text(item.get("kind"), MAX_RESIDUAL_KIND),
+                "falsifier_code": _text(item.get("falsifier_code"), 48),
+                "outcome_round": _safe_int(item.get("outcome_round"), 0),
+                "claim_status": MEMORY_CLAIM_STATUS,
+            } for item in (entry.get("residuals") or [])
+                if isinstance(item, dict)
+                and item.get("state") == STATE_RESIDUAL_FALSIFIED][:4],
             "claim_status": MEMORY_CLAIM_STATUS,
         })
     rows.sort(key=lambda row: (-int(row.get("round", 0) or 0),

@@ -19,6 +19,7 @@ from agent.memory.research import (  # noqa: E402
     STATE_ACTIONABLE_DIFFERENCE,
     STATE_ENVIRONMENT_GAP,
     STATE_PENDING_RESIDUAL,
+    STATE_RESIDUAL_FALSIFIED,
     STATE_REVIEW_NEEDS_EVIDENCE,
     STATE_REVIEW_REJECTED,
     STATE_STABLE_REPRODUCER,
@@ -29,6 +30,7 @@ from agent.memory.research import (  # noqa: E402
     merge_research_memory,
     record_review_feedback,
     research_key,
+    residual_meta,
     write_research_memory,
 )
 from agent.orchestrator.config import TargetConfig  # noqa: E402
@@ -138,6 +140,64 @@ class ResearchMemoryTests(unittest.TestCase):
         merged = merge_research_memory({}, delta)
         self.assertEqual(1, merged["summary"]["residual_count"])
         self.assertEqual(merged, merge_research_memory(merged, delta))
+
+    def test_residual_closes_only_with_declared_executed_falsifier(self):
+        c = candidate(residuals=[{
+            "kind": "variant", "reason_code": "unverified",
+            "probe_plan": "secret raw probe must not persist",
+        }])
+        residual = residual_meta(c)[0]
+        rid = residual["residual_id"]
+        code = residual["allowed_falsifiers"][0]
+        summary = {
+            "execution_state": "executed-no-effect",
+            "residual_falsifiers": [{
+                "residual_id": rid, "status": "falsified",
+                "falsifier_code": code, "execution_state": "executed",
+                "effect_observed": False, "contract_declared": True,
+                "cell_ref": "s4c-01234567890123456789",
+            }],
+        }
+        delta = build_round_memory([c], {"C1": summary}, {}, None, 5)
+        row = delta["entries"][0]["residuals"][0]
+        self.assertEqual(STATE_RESIDUAL_FALSIFIED, row["state"])
+        self.assertEqual(code, row["falsifier_code"])
+        self.assertEqual(0, delta["entries"][0]["pending_residual_count"])
+        self.assertEqual("not-a-finding", row["claim_status"])
+
+        blocked = dict(summary)
+        blocked["residual_falsifiers"] = [dict(summary["residual_falsifiers"][0],
+                                                execution_state="gate-blocked")]
+        still_pending = build_round_memory([c], {"C1": blocked}, {}, None, 6)
+        self.assertEqual(STATE_PENDING_RESIDUAL,
+                         still_pending["entries"][0]["residuals"][0]["state"])
+
+        effected = dict(summary)
+        effected["residual_falsifiers"] = [dict(summary["residual_falsifiers"][0],
+                                                effect_observed=True)]
+        still_pending = build_round_memory([c], {"C1": effected}, {}, None, 7)
+        self.assertEqual(STATE_PENDING_RESIDUAL,
+                         still_pending["entries"][0]["residuals"][0]["state"])
+
+    def test_residual_resolution_is_monotonic_across_merge(self):
+        c = candidate(residuals=[{
+            "kind": "variant", "reason_code": "unverified",
+            "probe_plan": "bounded probe",
+        }])
+        residual = residual_meta(c)[0]
+        summary = {"residual_falsifiers": [{
+            "residual_id": residual["residual_id"], "status": "falsified",
+            "falsifier_code": residual["allowed_falsifiers"][0],
+            "execution_state": "executed", "effect_observed": False,
+            "contract_declared": True, "cell_ref": "s4c-abc",
+        }]}
+        pending = build_round_memory([c], {"C1": {}}, {}, None, 1)
+        resolved = build_round_memory([c], {"C1": summary}, {}, None, 2)
+        merged = merge_research_memory(pending, resolved)
+        merged = merge_research_memory(merged, pending)
+        row = merged["entries"][0]["residuals"][0]
+        self.assertEqual(STATE_RESIDUAL_FALSIFIED, row["state"])
+        self.assertEqual(1, merged["summary"]["resolved_residual_count"])
 
     def test_runtime_states_keep_difference_and_environment_gap_distinct(self):
         c = candidate()

@@ -591,6 +591,9 @@ def build_research_strategy(
         for residual in entry.get("residuals") or []:
             if not isinstance(residual, Mapping):
                 continue
+            residual_state = _text(residual.get("state"), 64)
+            if residual_state and residual_state != "pending-residual":
+                continue
             residual_id = _text(residual.get("residual_id"), 80)
             if not residual_id or residual_id in known_residuals:
                 continue

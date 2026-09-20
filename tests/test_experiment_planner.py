@@ -138,6 +138,27 @@ class ExperimentPlannerTests(unittest.TestCase):
                       by_kind["fix-variant-comparison"]["required_observations"])
         self.assertIn("EFFECT_KIND", by_kind["typed-effect"]["required_observations"])
 
+    def test_residual_plan_emits_stable_falsifier_contract_without_raw_probe(self):
+        result = plan_candidate_experiments({
+            "candidate_id": "RES-PLAN",
+            "surface": "parser variant",
+            "entry": "readValue",
+            "logic": "variant path",
+            "code_location": ["src/Parser.java:42"],
+            "residuals": [{
+                "kind": "variant", "reason_code": "unverified",
+                "probe_plan": "secret payload and command must not persist",
+            }],
+        }, ["1.0"])
+        self.assertIn("residual-closure", result["strategy_tags"])
+        self.assertEqual(1, len(result["residual_contracts"]))
+        contract = result["residual_contracts"][0]
+        self.assertRegex(contract["residual_id"], r"^rr-[0-9a-f]{20}$")
+        self.assertIn("RESIDUAL_STATUS=falsified",
+                      contract["required_observations"])
+        self.assertNotIn("secret payload", json.dumps(result, ensure_ascii=False))
+        self.assertEqual("not-a-finding", contract["claim_status"])
+
     def test_capability_chain_plan_requires_each_primitive_transition_and_effect(self):
         candidate = {
             "candidate_id": "CAP1",

@@ -34,9 +34,11 @@ from agent.memory.portfolio import (  # noqa: E402
     write_research_portfolio,
 )
 from agent.memory.research import (  # noqa: E402
+    STATE_RESIDUAL_FALSIFIED,
     STATE_PENDING_RESIDUAL,
     build_round_memory,
     merge_research_memory,
+    residual_meta,
     research_key,
 )
 
@@ -229,6 +231,30 @@ class ResearchPortfolioTests(unittest.TestCase):
                                 if item.get("state") == STATE_PENDING_RESIDUAL)
         self.assertEqual(probe["residual_id"], normalized_probe["residual_id"])
         self.assertEqual("not-a-finding", normalized_probe["claim_status"])
+
+    def test_falsified_residual_leaves_no_duplicate_portfolio_probe(self):
+        residual_candidate = candidate(
+            "RES-CLOSED", research_surface="web", target_type="web-app",
+            residuals=[{
+                "kind": "variant", "reason_code": "unverified",
+                "probe_plan": "bounded residual probe",
+            }])
+        residual = residual_meta(residual_candidate)[0]
+        summary = {"residual_falsifiers": [{
+            "residual_id": residual["residual_id"], "status": "falsified",
+            "falsifier_code": residual["allowed_falsifiers"][0],
+            "execution_state": "executed", "effect_observed": False,
+            "contract_declared": True, "cell_ref": "s4c-closed",
+        }]}
+        memory = merge_research_memory(
+            {}, build_round_memory([residual_candidate], {"RES-CLOSED": summary},
+                                   {}, None, 5))
+        row = memory["entries"][0]["residuals"][0]
+        self.assertEqual(STATE_RESIDUAL_FALSIFIED, row["state"])
+        portfolio = build_research_portfolio(memory)
+        self.assertEqual(0, portfolio["summary"]["pending_residuals"])
+        self.assertFalse(any(item.get("residual_id") == residual["residual_id"]
+                             for item in portfolio["next_probes"]))
 
     def test_same_mechanism_keeps_multiple_variant_labels_after_merge(self):
         first = candidate(

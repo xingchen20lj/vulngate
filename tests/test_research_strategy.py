@@ -113,6 +113,24 @@ class ResearchStrategyTests(unittest.TestCase):
                          residuals[0]["residual_id"])
         self.assertNotIn("stable-reproducer", json.dumps(strategy))
 
+    def test_strategy_fallback_drops_closed_memory_residual(self):
+        strategy = build_research_strategy(
+            research_memory=[{
+                "research_key": "rk-closed", "candidate_id": "C-closed",
+                "research_surface": "web", "target_type": "web-app",
+                "residuals": [{
+                    "residual_id": "rr-abcdefabcdefabcdefab",
+                    "kind": "variant", "reason_code": "unverified",
+                    "state": "residual-falsified",
+                    "falsifier_code": "variant-rejected",
+                    "evidence_cells": ["s4c-1"],
+                }],
+            }],
+            target="demo", target_type="web-app")
+        self.assertFalse(any(item["kind"] == "residual-closure"
+                             for item in strategy["items"]))
+        self.assertEqual(0, strategy["summary"]["pending_residuals"])
+
     def test_strategy_round_trip_is_bounded_and_forces_research_status(self):
         strategy = build_research_strategy(
             self._threat_model(), target="demo", target_type="web-app", round_no=2)

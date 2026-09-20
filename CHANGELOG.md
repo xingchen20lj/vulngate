@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- S3 residuals now carry a bounded S2->S4 closure contract. The matrix parser
+  records only allowlisted `RESIDUAL_ID` / `RESIDUAL_STATUS` /
+  `RESIDUAL_FALSIFIER` observations; S8 advances a residual to
+  `residual-falsified` only after a declared contract matches an executed
+  no-effect cell. Gate failures, unavailable prerequisites and effect-bearing
+  cells remain pending, and `S4/residual-closure.json` plus all memory and
+  portfolio views remain `not-a-finding`.
+
 - Composite source-to-sink paths that include an authorization boundary are now
   promoted from S1 hints into deterministic `chain-*` S2 candidates. The
   candidates carry credential-free authorization cases, source locations and

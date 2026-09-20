@@ -30,6 +30,7 @@
 | 13 | 攻击路径威胁模型与信任边界 | 已实现（bounded attacker-path model） | `threat-model-v1`、`state/<target>/coverage/threat-model.json`、`S1/threat-model.json`、威胁模型 CLI/调度 prompt | 入口、边界、flow、sink、控制姿态、未解析区域和能力链保持可追溯；所有路径仍是 `not-a-finding` |
 | 14 | S3 residual 跨轮闭环 | 已实现（bounded residual continuity） | `research-memory-v1` residual metadata、`pending-residual` portfolio probes、调度 prompt | residual 不因主 replay 稳定而消失；只保留受控分类、位置、摘要哈希和计划存在性；不复制原始 probe，也不升级为漏洞结论 |
 | 15 | 跨产物证据驱动研究策略 | 已实现（bounded research strategy synthesis） | `research-strategy-v1`、`state/<target>/coverage/research-strategy.json`、`S2/research-strategy.json`、策略 CLI/调度证据 | 威胁路径、coverage gap、residual、跨轮状态和 benchmark 上下文汇聚为带 required observations/falsifiers 的有界议程；策略不能替代 G4/G5 |
+| 16 | Residual falsifier 闭合 | 已实现（contract-bound S4 closure） | `S2/experiment-plans.json` residual contracts、`S4/residual-closure.json`、`research-memory-v1` 的 `residual-falsified` | 只有声明过的 residual contract、匹配 ID、显式 allowlisted falsifier、成功执行且无副作用的 cell 才能闭合；环境失败、门控和实际 effect 保持 pending，且不改变 G4/G5 |
 
 ## 当前阶段：可证伪实验规划
 
@@ -294,9 +295,28 @@ S3 的 `residuals.json` 代表“尚未正式立项、但不能丢掉的研究�
 
 策略层只是研究计划，不是 source review、运行时观测、漏洞确认、CVSS 或 G4/G5 的替代品；所有记录继续强制 `claim_status=not-a-finding`。
 
+## 阶段 16 初步实现：Residual falsifier 闭合
+
+阶段 14/15 已经能把 residual 保留下来并列入研究议程，但如果没有明确的闭合协议，
+同一条残余会无限生成下一步探针。阶段 16 把“何时可以停止追踪这条研究怀疑”固化为
+S2→S4→S8 的单向契约：
+
+- S2 根据稳定的 residual identity 生成有界 `residual_contracts`，只暴露 residual ID、
+  类型和 allowlisted falsifier；PoC 通过 `VULNGATE_RESIDUAL_CONTRACT` 读取观察清单，
+  不能把计划本身当成观测；
+- S4 只解析 `RESIDUAL_ID`、`RESIDUAL_STATUS=falsified` 和
+  `RESIDUAL_FALSIFIER`，并记录 cell 是否真实执行、是否声明过 contract、是否出现
+  typed effect；`S4/residual-closure.json` 只包含这些有界元数据；
+- S8 只有在 ID/contract/falsifier 全部匹配、cell 成功执行且没有副作用时才把状态从
+  `pending-residual` 单向更新为 `residual-falsified`。缺少 marker、运行失败、前置条件
+  不可用、门控阻断或出现 effect 都不能闭合；已闭合状态也不会回退或再次生成 portfolio
+  probe；
+- 这只是研究记忆和调度状态，始终是 `claim_status=not-a-finding`，不代表漏洞被证伪，
+  也不改变 G4/G5、CVSS 或 finding ledger。
+
 ## 后续优先级
 
-1. 用真实 S4 观测回写策略项的闭合状态与信息增益，但只更新研究优先级，不把策略状态直接升级成结论。
+1. 用真实 S4 观测回写更细粒度的策略项闭合状态与信息增益，但只更新研究优先级，不把策略状态直接升级成结论。
 2. 将策略项与真实项目的多轮历史、人工复核和变体覆盖率做更细粒度关联，校准 guidance 阈值。
 3. 继续扩展协议状态机、云身份边界、移动端生命周期和 native 方法体验证的合成变体，并为每类维持正向、负向和环境缺口对照。
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from ..evaluation.benchmark import normalize_benchmark_feedback
+from ..memory.research import residual_meta
 from .authz import normalize_authz_case, normalize_authz_cases
 from .experiment import capability_contract_from_candidate
 from .redaction import redact_text
@@ -122,6 +123,36 @@ def _plan(candidate_id: str, kind: str, objective: str,
     }
     result.update(extra)
     return result
+
+
+def _residual_contracts(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Turn S3 residual metadata into an explicit S4 observation contract."""
+    contracts: List[Dict[str, Any]] = []
+    for residual in residual_meta(candidate)[:8]:
+        residual_id = str(residual.get("residual_id", ""))
+        allowed = [str(code) for code in
+                   residual.get("allowed_falsifiers") or []][:8]
+        if not residual_id:
+            continue
+        contracts.append({
+            "residual_id": residual_id,
+            "kind": str(residual.get("kind", "")),
+            "reason_code": str(residual.get("reason_code", "")),
+            "allowed_falsifiers": allowed,
+            "required_observations": [
+                "RESIDUAL_ID=%s" % residual_id,
+                "RESIDUAL_STATUS=falsified",
+                "RESIDUAL_FALSIFIER=<one-of:%s>" % (
+                    "|".join(allowed) or "none"),
+            ],
+            "falsifiers": [
+                "missing or mismatched residual identity leaves it pending",
+                "unexecuted, failed, blocked, or unavailable cells never close it",
+                "a cell with an actual typed effect never closes it",
+            ],
+            "claim_status": "not-a-finding",
+        })
+    return contracts
 
 
 def apply_benchmark_feedback(research_plan: Dict[str, Any],
@@ -237,6 +268,7 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
     capability_chain = bool(capability_contract.get("required_capabilities"))
 
     normalized_versions = _versions(versions)
+    residual_contracts = _residual_contracts(candidate)
     preconditions = [
         redact_text(item)
         for item in _list(
@@ -254,6 +286,8 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
                          ("capability-chain", capability_chain)):
         if enabled:
             tags.append(tag)
+    if residual_contracts:
+        tags.append("residual-closure")
 
     plans: List[Dict[str, Any]] = [
         _plan(
@@ -267,6 +301,12 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
                          "preconditions": preconditions},
         )
     ]
+    if residual_contracts:
+        baseline = plans[0]
+        baseline["required_observations"].append(
+            "RESIDUAL_ID/RESIDUAL_STATUS/RESIDUAL_FALSIFIER for each declared residual")
+        baseline["falsifiers"].append(
+            "an unexecuted or effect-producing residual cell remains pending")
 
     if capability_chain:
         capability_observations = [
@@ -374,6 +414,7 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
             "authz_cases": case_ids,
         },
         "capability_contract": capability_contract,
+        "residual_contracts": residual_contracts,
         "plans": plans,
         "provenance": {
             "producer": "experiment-planner",

@@ -19,6 +19,7 @@ from agent.tools.build import (  # noqa: E402
 from agent.tools.experiment import (  # noqa: E402
     normalize_capability_contract,
     normalize_experiment,
+    normalize_residual_contracts,
 )
 from agent.tools.cvss import check_impact_consistency  # noqa: E402
 
@@ -83,6 +84,59 @@ class ExperimentContractTests(unittest.TestCase):
             {"from": "read", "to": "exec", "declared": True},
         ])
         self.assertNotIn("touch", env["VULNGATE_CAPABILITY_CONTRACT"])
+
+    def test_residual_contract_is_bounded_exposed_and_parsed(self):
+        residual_id = "rr-01234567890123456789"
+        contract = normalize_residual_contracts([{
+            "residual_id": residual_id,
+            "kind": "variant",
+            "reason_code": "unverified",
+            "allowed_falsifiers": ["variant-rejected", "bad value"],
+            "secret": "must-not-cross",
+        }])
+        self.assertEqual(["variant-rejected"],
+                         contract[0]["allowed_falsifiers"])
+        cell = MatrixCell(version="local", safe_mode=False,
+                          residual_contracts=contract)
+        env = _cell_experiment_env(cell)
+        self.assertEqual([residual_id], json.loads(env["VULNGATE_RESIDUAL_IDS"]))
+        self.assertNotIn("must-not-cross", env["VULNGATE_RESIDUAL_CONTRACT"])
+        observations = parse_observations(
+            "RESIDUAL_ID=%s\nRESIDUAL_STATUS=falsified\n"
+            "RESIDUAL_FALSIFIER=variant-rejected\n" % residual_id)
+        self.assertEqual(residual_id, observations["RESIDUAL_ID"])
+        self.assertEqual("falsified", observations["RESIDUAL_STATUS"])
+        summary = summarize_candidate([{
+            "candidate_id": "C1", "version": "local", "safe_mode": False,
+            "precondition": "none", "returncode": 0, "timed_out": False,
+            "residual_contracts": contract, "observations": observations,
+        }])
+        row = summary["residual_falsifiers"][0]
+        self.assertTrue(row["contract_declared"])
+        self.assertFalse(row["effect_observed"])
+        self.assertEqual("executed", row["execution_state"])
+        self.assertEqual("not-a-finding", row["claim_status"])
+
+    def test_residual_error_does_not_count_as_executed_falsifier(self):
+        residual_id = "rr-01234567890123456789"
+        contract = normalize_residual_contracts([{
+            "residual_id": residual_id,
+            "kind": "variant",
+            "allowed_falsifiers": ["variant-rejected"],
+        }])
+        summary = summarize_candidate([{
+            "candidate_id": "C1", "version": "local", "safe_mode": False,
+            "precondition": "none", "returncode": 0, "timed_out": False,
+            "residual_contracts": contract,
+            "observations": {
+                "RESIDUAL_ID": residual_id,
+                "RESIDUAL_STATUS": "falsified",
+                "RESIDUAL_FALSIFIER": "variant-rejected",
+                "ERROR": "probe failed after marker",
+            },
+        }])
+        self.assertEqual("run-failed",
+                         summary["residual_falsifiers"][0]["execution_state"])
 
     def test_parser_keeps_capability_and_transition_traces(self):
         observations = parse_observations(

@@ -3,12 +3,13 @@
 Runs `{version} x {safe-mode on/off} x {precondition}` cells for a candidate,
 captures stdout/stderr per cell, and extracts machine-readable observations
 (GATE_BLOCKED / INSTANTIATED / ERROR / NETWORK / PARSED plus bounded
-STEP/STEP_EVIDENCE/STATE and capability/transition traces) that the G4
-runtime gate consumes.
+STEP/STEP_EVIDENCE/STATE, capability/transition, and residual-falsifier
+traces) that the G4 runtime gate consumes.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -23,7 +24,8 @@ from ..sandbox.runner import CommandRunner, RunResult, minimal_poc_env
 from .authz import (assert_authz_observations, authz_env, authz_fixture_id,
                     authz_jvm_props, normalize_authz_case)
 from .experiment import (experiment_metadata, normalize_capability_contract,
-                         normalize_experiment, sequence_trace_status)
+                         normalize_experiment, normalize_residual_contracts,
+                         sequence_trace_status)
 
 
 RUNNER_POLICY_VERSION = "loopback-only-v2"
@@ -98,6 +100,8 @@ class MatrixCell:
     # Bounded capability-chain contract.  This is an observation checklist,
     # never proof that a primitive or transition exists.
     capability_contract: Dict[str, Any] = field(default_factory=dict)
+    # S3 residual closure checklist; also never proof that a residual exists.
+    residual_contracts: List[Dict[str, Any]] = field(default_factory=list)
     experiment_warnings: List[str] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
@@ -106,6 +110,8 @@ class MatrixCell:
             self.sequence, self.concurrency, self.availability_probe)
         self.capability_contract = normalize_capability_contract(
             self.capability_contract)
+        self.residual_contracts = normalize_residual_contracts(
+            self.residual_contracts)
 
 
 def _cell_experiment_env(cell: MatrixCell) -> Dict[str, str]:
@@ -126,6 +132,13 @@ def _cell_experiment_env(cell: MatrixCell) -> Dict[str, str]:
             contract.get("missing_capabilities", []), ensure_ascii=False),
         "VULNGATE_TRANSITIONS": json.dumps(
             contract.get("transition_rules", []), ensure_ascii=False),
+        "VULNGATE_RESIDUAL_CONTRACT": json.dumps(
+            normalize_residual_contracts(cell.residual_contracts),
+            ensure_ascii=False, separators=(",", ":")),
+        "VULNGATE_RESIDUAL_IDS": json.dumps([
+            row["residual_id"] for row in
+            normalize_residual_contracts(cell.residual_contracts)
+        ], ensure_ascii=False),
     }
 
 
@@ -138,6 +151,7 @@ def _cell_metadata(cell: MatrixCell) -> Dict[str, Any]:
         "availability_probe": meta["availability_probe"],
         "authz_fixture_id": authz_fixture_id(cell.authz),
         "capability_contract": meta["capability_contract"],
+        "residual_contracts": meta["residual_contracts"],
         "experiment": meta,
     }
 
@@ -321,7 +335,8 @@ def parse_observations(stdout: str, stderr: str = "") -> Dict[str, Any]:
                     "NETWORK_ATTEMPTS", "NETWORK_SUCCESS", "CONCURRENCY",
                     "SERVICE_UNAVAILABLE", "AVAILABILITY", "OBJECT_MUTATED",
                     "AUTHZ_RESULT", "AUTHZ_NOTE", "JAVA_VERSION",
-                    "JDK8_RUNTIME_ACTIVE"):
+                    "JDK8_RUNTIME_ACTIVE", "RESIDUAL_ID", "RESIDUAL_STATUS",
+                    "RESIDUAL_FALSIFIER"):
             if line.startswith(key + "="):
                 obs[key] = line[len(key) + 1:]
     if "ERROR" not in obs:
@@ -575,6 +590,9 @@ class ShellMatrixRunner:
       STEP=<step-id>            ordered state/operation step reached
       STEP_EVIDENCE=<detail>    evidence for that step
       STATE=<state-id>          observed state checkpoint
+      RESIDUAL_ID=<rr-id>       declared residual identity under test
+      RESIDUAL_STATUS=<status>  explicit residual outcome marker
+      RESIDUAL_FALSIFIER=<id>   bounded residual falsifier code
 
     Loopback-only egress is enforced by the same static source scan used for
     Java PoCs; any non-loopback URL/IP in the script is refused before run.
@@ -969,6 +987,45 @@ def converge_s4_cells(workspace: Path, target: str, round_no: int,
                     "proxy_timeout_does_not_override": True}
 
 
+_RESIDUAL_ID = re.compile(r"^rr-[0-9a-f]{20}$")
+_RESIDUAL_CODE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def _residual_cell_ref(cell: Dict[str, Any], residual_id: str) -> str:
+    """Return a non-sensitive, stable reference for one S4 cell."""
+    core = "%s|%s|%s|%s|%s" % (
+        cell.get("candidate_id", ""), residual_id, cell.get("version", ""),
+        bool(cell.get("safe_mode")), cell.get("precondition", ""))
+    return "s4c-" + hashlib.sha256(core.encode("utf-8", errors="replace")).hexdigest()[:20]
+
+
+def _residual_execution_state(cell: Dict[str, Any], obs: Dict[str, Any]) -> str:
+    if cell.get("precondition_status") == RUNTIME_UNAVAILABLE:
+        return "precondition-unavailable"
+    blocked = str(obs.get("GATE_BLOCKED", "")).strip().lower()
+    if blocked and blocked not in _FALSY_MARKERS:
+        return "gate-blocked"
+    if (isinstance(cell.get("returncode"), int)
+            and cell.get("returncode") == 0
+            and not cell.get("compile_error")
+            and not cell.get("harness_error")
+            and not cell.get("timed_out")
+            and not obs.get("ERROR")
+            and not obs.get("ENV_ERROR")):
+        return "executed"
+    if cell.get("returncode") is not None or cell.get("harness_error") \
+            or cell.get("compile_error") or cell.get("timed_out"):
+        return "run-failed"
+    return "unexecuted"
+
+
+def _declared_residual_contracts(cell: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    experiment = cell.get("experiment") or {}
+    rows = normalize_residual_contracts(
+        cell.get("residual_contracts") or experiment.get("residual_contracts"))
+    return {row["residual_id"]: row for row in rows}
+
+
 def summarize_candidate(cells: List[Dict]) -> Dict:
     """Derive runtime facts from a candidate's cell results (data-driven, no hard-coding)."""
     harness_errors = [c.get("harness_error", "") for c in cells if c.get("harness_error")]
@@ -988,6 +1045,7 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
     capability_evidence = []
     authz_results = []
     authz_boundary_violations = []
+    residual_falsifiers = []
 
     def truthy(v: str) -> bool:
         # LLM-authored PoCs may emit INSTANTIATED=false / GATE_BLOCKED=none /
@@ -1132,6 +1190,31 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
             if ev and ev.lower() not in _FALSY_MARKERS:
                 rec["evidence"] = ev[:200]
             http_evidence.append(rec)
+        residual_id = str(obs.get("RESIDUAL_ID", "")).strip().lower()
+        residual_status = str(obs.get("RESIDUAL_STATUS", "")).strip().lower()[:40]
+        residual_code = str(obs.get("RESIDUAL_FALSIFIER", "")).strip().lower()[:64]
+        if _RESIDUAL_ID.fullmatch(residual_id):
+            effect_observed = bool(
+                (effect and effect_kind and not any(marker in effect_kind for marker in
+                                                    ("canary", "simulat", "shape-only", "in-memory")))
+                or (lk and lk.lower() not in _FALSY_MARKERS)
+                or (truthy(obs.get("NETWORK")) and "://" in str(obs.get("NETWORK")))
+                or (ev and ev.lower() not in _FALSY_MARKERS)
+                or bool(assertion and assertion.get("boundary_violation")))
+            contract = _declared_residual_contracts(c).get(residual_id, {})
+            residual_falsifiers.append({
+                "residual_id": residual_id,
+                "status": residual_status,
+                "falsifier_code": residual_code if _RESIDUAL_CODE.fullmatch(
+                    residual_code) else "",
+                "execution_state": _residual_execution_state(c, obs),
+                "effect_observed": effect_observed,
+                "contract_declared": bool(contract),
+                "contract_match": residual_code in set(
+                    contract.get("allowed_falsifiers") or []),
+                "cell_ref": _residual_cell_ref(c, residual_id),
+                "claim_status": "not-a-finding",
+            })
     summary = {
         "instantiated": instantiated,
         "errors": errors,
@@ -1148,6 +1231,8 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
         "capability_evidence": capability_evidence,
         "authz_results": authz_results,
         "authz_boundary_violations": authz_boundary_violations,
+        "residual_falsifiers": residual_falsifiers[:32],
+        "residual_falsifier_count": len(residual_falsifiers),
         "cells_ran": len(cells),
     }
     if harness_errors:

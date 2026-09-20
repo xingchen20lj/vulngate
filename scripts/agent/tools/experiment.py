@@ -21,6 +21,8 @@ MAX_CONCURRENCY = 64
 MAX_CAPABILITIES = 16
 MAX_TRANSITION_RULES = 16
 MAX_CAPABILITY_GOAL_LENGTH = 160
+MAX_RESIDUAL_CONTRACTS = 8
+MAX_RESIDUAL_FALSIFIERS = 8
 
 _STEP_ID = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,%d}$" % (MAX_STEP_ID_LENGTH - 1))
@@ -156,6 +158,48 @@ def normalize_capability_contract(value: Any) -> dict:
     }
 
 
+def normalize_residual_contracts(value: Any) -> List[dict]:
+    """Normalize the bounded S3->S4 residual closure checklist.
+
+    Only residual identities and identifier-shaped falsifier codes cross into
+    the PoC environment.  The contract is a research checklist; it never
+    asserts that a residual or a falsifier is true.
+    """
+    if isinstance(value, dict):
+        value = value.get("residual_contracts") or value.get("contracts") or []
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: List[dict] = []
+    seen = set()
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        residual_id = str(raw.get("residual_id", "")).strip().lower()
+        if not re.fullmatch(r"rr-[0-9a-f]{20}", residual_id) or residual_id in seen:
+            continue
+        allowed: List[str] = []
+        for item in raw.get("allowed_falsifiers") or raw.get("falsifiers") or []:
+            code = str(item).strip().lower()
+            if not _STEP_ID.fullmatch(code) or code in allowed:
+                continue
+            allowed.append(code)
+            if len(allowed) >= MAX_RESIDUAL_FALSIFIERS:
+                break
+        kind = str(raw.get("kind", "")).strip().lower()
+        reason_code = str(raw.get("reason_code", "")).strip().lower()
+        result.append({
+            "residual_id": residual_id,
+            "kind": kind[:64] if _STEP_ID.fullmatch(kind) else "",
+            "reason_code": reason_code[:64]
+            if _STEP_ID.fullmatch(reason_code) else "",
+            "allowed_falsifiers": allowed,
+        })
+        seen.add(residual_id)
+        if len(result) >= MAX_RESIDUAL_CONTRACTS:
+            break
+    return result
+
+
 def capability_contract_from_candidate(candidate: Any) -> dict:
     """Derive a cell contract from a static capability candidate or plan."""
     if not isinstance(candidate, dict):
@@ -187,6 +231,8 @@ def experiment_metadata(cell: Any) -> dict:
         "warnings": list(getattr(cell, "experiment_warnings", []) or []),
         "capability_contract": normalize_capability_contract(
             getattr(cell, "capability_contract", {})),
+        "residual_contracts": normalize_residual_contracts(
+            getattr(cell, "residual_contracts", [])),
     }
 
 
