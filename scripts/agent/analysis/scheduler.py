@@ -57,6 +57,7 @@ from ..memory.research import (
     memory_match,
     memory_prompt_rows,
 )
+from ..memory.portfolio import load_research_portfolio
 
 # ---------------------------------------------------------------------------
 # configuration
@@ -289,6 +290,7 @@ class ScheduleContext:
     reachability: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     prior_coverage: List[Dict[str, Any]] = field(default_factory=list)
     research_memory: List[Dict[str, Any]] = field(default_factory=list)
+    research_portfolio: Dict[str, Any] = field(default_factory=dict)
     weights: Dict[str, int] = field(default_factory=lambda: dict(DEFAULT_FACTOR_WEIGHTS))
     benchmark_feedback: Dict[str, Any] = field(default_factory=dict)
     weight_adjustments: Dict[str, int] = field(default_factory=dict)
@@ -308,12 +310,15 @@ class ScheduleContext:
     def from_store(cls, store: CoverageStore,
                    weights: Optional[Dict[str, int]] = None,
                    research_memory: Optional[Sequence[Dict[str, Any]]] = None,
-                   benchmark_feedback: Optional[Dict[str, Any]] = None
+                   benchmark_feedback: Optional[Dict[str, Any]] = None,
+                   research_portfolio: Optional[Dict[str, Any]] = None
                    ) -> "ScheduleContext":
         indices = load_inventory(store)
         reachability = {str(r.get("sink_id")): r
                         for r in indices.get("sink-reachability") or []}
         feedback = normalize_benchmark_feedback(benchmark_feedback or {})
+        portfolio = (research_portfolio if isinstance(research_portfolio, dict)
+                     else load_research_portfolio(store.workspace, store.target))
         effective_weights, weight_adjustments = apply_benchmark_feedback_weights(
             weights, feedback)
         return cls(
@@ -332,6 +337,7 @@ class ScheduleContext:
             prior_coverage=list(indices.get("candidate-coverage") or []),
             research_memory=[item for item in (research_memory or [])
                              if isinstance(item, dict)],
+            research_portfolio=portfolio,
             weights=effective_weights,
             benchmark_feedback=feedback,
             weight_adjustments=weight_adjustments,
@@ -1223,6 +1229,7 @@ class SchedulePlan:
     residual: Dict[str, Any] = field(default_factory=dict)
     weights: Dict[str, int] = field(default_factory=dict)
     benchmark_feedback: Dict[str, Any] = field(default_factory=dict)
+    research_portfolio: Dict[str, Any] = field(default_factory=dict)
     weight_adjustments: Dict[str, int] = field(default_factory=dict)
     #: Candidates selected outside the quota because they carry runtime
     #: evidence the static score cannot see (see :func:`stratified_select`).
@@ -1238,6 +1245,7 @@ class SchedulePlan:
             "weights": dict(self.weights),
             "weight_adjustments": dict(self.weight_adjustments),
             "benchmark_feedback": self.benchmark_feedback,
+            "research_portfolio": self.research_portfolio,
             "selected": [s.as_dict() for s in self.selected],
             "deferred": [s.as_dict() for s in self.deferred],
             "pinned": list(self.pinned),
@@ -1401,9 +1409,11 @@ def build_schedule(workspace: Path, target: str,
     if refresh:
         coverage = residual_sweep(store, workspace, target, round_no)
     memory = load_research_memory(workspace, target)
+    portfolio = load_research_portfolio(workspace, target)
     ctx = ScheduleContext.from_store(
         store, weights, research_memory=memory.get("entries") or [],
-        benchmark_feedback=benchmark_feedback)
+        benchmark_feedback=benchmark_feedback,
+        research_portfolio=portfolio)
     scores = score_candidates(candidates, ctx)
     selected, deferred, requested, filled, relocated = stratified_select(
         scores, slots, quota, pinned)
@@ -1426,6 +1436,7 @@ def build_schedule(workspace: Path, target: str,
         residual=residual,
         weights=dict(ctx.weights),
         benchmark_feedback=dict(ctx.benchmark_feedback),
+        research_portfolio=dict(ctx.research_portfolio),
         weight_adjustments=dict(ctx.weight_adjustments),
         pinned=[str(cid) for cid in pinned if str(cid) in selected_ids],
     )
@@ -1759,6 +1770,21 @@ def prompt_coverage_block(ctx: ScheduleContext, plan: Optional[SchedulePlan] = N
             row.get("candidate_id") or row.get("research_key"),
             row.get("state"), row.get("round", 0), review_text + variant_text, hints,
             row.get("claim_status", "not-a-finding")))
+
+    lines.append("## 项目级研究组合 / Project Research Portfolio")
+    if not ctx.research_portfolio:
+        lines.append("  （暂无项目级组合视图 / no project portfolio yet）")
+    else:
+        portfolio = ctx.research_portfolio
+        lines.append("  " + json.dumps({
+            "round": portfolio.get("round", 0),
+            "summary": portfolio.get("summary", {}),
+            "variant_coverage": list(
+                portfolio.get("variant_coverage") or [])[:12],
+            "next_probes": list(portfolio.get("next_probes") or [])[:8],
+            "benchmark": portfolio.get("benchmark", {}),
+            "claim_status": portfolio.get("claim_status", "not-a-finding"),
+        }, ensure_ascii=False))
 
     lines.append("## 评测反馈 / Benchmark Feedback")
     if not ctx.benchmark_feedback:

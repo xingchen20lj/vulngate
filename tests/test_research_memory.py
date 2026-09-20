@@ -327,11 +327,21 @@ class ResearchMemoryTests(unittest.TestCase):
                        / "research-memory.json")
         round_feedback = (self.root / "state" / "target" / "round-01" / "S8"
                           / "review-feedback.json")
+        round_portfolio = (self.root / "state" / "target" / "round-01" / "S8"
+                           / "research-portfolio.json")
+        target_portfolio = self.root / "state" / "target" / "research-portfolio.json"
         self.assertTrue(target_memory.exists())
         self.assertTrue(round_delta.exists())
         self.assertTrue(round_feedback.exists())
+        self.assertTrue(round_portfolio.exists())
+        self.assertTrue(target_portfolio.exists())
         self.assertEqual("state/target/research-memory.json",
                          result["research_memory"]["artifact"])
+        self.assertEqual("state/target/research-portfolio.json",
+                         result["research_portfolio"]["artifact"])
+        portfolio = json.loads(target_portfolio.read_text(encoding="utf-8"))
+        self.assertEqual("research-portfolio-v1", portfolio["schema_version"])
+        self.assertEqual("not-a-finding", portfolio["claim_status"])
         self.assertEqual("stable-reproducer",
                          json.loads(target_memory.read_text(encoding="utf-8")
                                     )["entries"][0]["events"][0]["state"])

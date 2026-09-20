@@ -490,6 +490,28 @@ secrets in them. A rejection lowers repeat priority, `needs-evidence` raises
 the next probe, and `accepted`/`scope-corrected` preserve the need for
 independent G4/G5 evidence. No review status is a vulnerability verdict.
 
+S8 also writes a bounded project portfolio to
+`state/<target>/research-portfolio.json` and the round snapshot
+`state/<target>/round-NN/S8/research-portfolio.json`. The
+`research-portfolio-v1` artifact aggregates only explicit research metadata
+(`research_surface`, `target_type`, `attack_class`, `variant`, and
+`precondition_class`), state counts, review status counts, benchmark trend
+summary, and deterministic `next_probes`. The next S2 prompt may use it to
+identify cross-surface or variant gaps. It must remain
+`claim_status=not-a-finding` and must not contain reviewer notes, raw
+arguments, payloads, commands, stdout/stderr, credentials, CVSS, or G4/G5
+evidence; a portfolio gap is a research priority, never proof of absence.
+
+Inspect the bounded view without opening the full memory file:
+
+```bash
+python3 scripts/agent_cli.py portfolio <target> --workspace <audit-dir> --json
+```
+
+Use `--rebuild` only when the target memory or review feedback was changed
+outside S8; an optional `--benchmark-feedback <json>` supplies the same
+explicit, normalized benchmark input used by the next schedule.
+
 Keep every cell, including harness failures and negative observations.
 
 #### Typed execution states
@@ -1222,6 +1244,22 @@ python3 scripts/agent_cli.py review <target> --workspace <audit-dir> \
 引用会有界、脱敏；不得写入原始 payload、命令、进程输出或 secret。`rejected` 只降低重复优先级，
 `needs-evidence` 提高下一步探针优先级，`accepted`/`scope-corrected` 仍必须独立补齐 G4/G5 证据。
 任何复核 status 都不是漏洞结论。
+
+S8 还会写出目标级 `state/<target>/research-portfolio.json` 与轮次快照
+`state/<target>/round-NN/S8/research-portfolio.json`。`research-portfolio-v1` 只按显式的
+`research_surface`、`target_type`、`attack_class`、`variant` 和 `precondition_class` 汇总机制、状态、
+复核和 benchmark 趋势，并生成确定性的 `next_probes`。下一轮 S2 可以利用它定位跨研究面/变体缺口，
+但组合视图仍必须保持 `claim_status=not-a-finding`；不得写入 reviewer note、原始参数、payload、命令、
+stdout/stderr、凭据、CVSS 或 G4/G5 证据，缺口也绝不是不存在的证明。
+
+查看有界组合视图：
+
+```bash
+python3 scripts/agent_cli.py portfolio <target> --workspace <audit-dir> --json
+```
+
+只有在 S8 之外修改了研究记忆或复核反馈时才使用 `--rebuild`；如需同时注入显式评测反馈，可传入
+`--benchmark-feedback <json>`。
 
 所有 cell 都保留，包括 harness error 和负向观测。
 

@@ -100,6 +100,7 @@ Current gate identifiers are **G0, G1, G1b, G3, G4, and G5**; G1b is the default
 - **Cross-surface research benchmark** — `benchmarks/research-benchmark-surfaces-v1.json` exercises web, protocol, cloud, mobile, and native variants with vulnerable, negative, and environment-gap cases; results preserve `research_profile` and `coverage_by_surface` while keeping unresolved cases pending.
 - **Surface-aware adaptation** — weak per-surface benchmark metrics become bounded `surface_guidance`; only explicitly tagged matching candidates receive a small scheduling boost and matching experiment plans receive the required observations/falsifiers.
 - **Longitudinal benchmark regression** — `benchmark --baseline <result.json>` compares bounded aggregate and per-surface metrics across runs, preserving regression signals as `research-benchmark-trend-v1` without copying case evidence or promoting a finding.
+- **Project research portfolio** — S8 composes memory, review feedback, and benchmark context into bounded `research-portfolio-v1` coverage by surface, attack class, variant, and precondition; it emits prioritized `next_probes` without turning portfolio state into a finding.
 - **Falsifiable experiment planning** — S2 emits bounded plans with required observations and explicit falsifiers for baseline, authz, state, availability, fix variants, and typed effects; plans remain `not-a-finding`.
 - **Capability-primitive path search** — S1 derives bounded `read` / `write` / `exec` / `ssrf` and credential/evaluation chains from the entry/sink/flow indices, preserves missing primitives, and emits minimal verification sequences; static chains remain `not-a-finding` until data-flow and runtime typed-effect evidence exist.
 - **Authorization-aware matrices** — web/application candidates can include identity × role × tenant × object context.
@@ -210,7 +211,7 @@ For an autonomous run using your own compatible LLM API key:
 | S5 | Novelty: upstream issue/PR/fix + public disclosure search and coverage | `S5/novelty.json`, `S5/novelty-coverage.json` | G3 novelty / downgrade |
 | S6 | CVSS + precondition/impact consistency | `S6/severity.json` | G5 consistency |
 | S7 | Self-contained local finding document | `reports/<target>/…` | disclosure hold |
-| S8 | Evidence ledger, exclusions, round summary, cross-round research memory and review feedback | `ledger/<target>/…`, `state/<target>/research-memory.json`, `state/<target>/review-feedback.json`, `S8/research-memory.json`, `S8/review-feedback.json` | final consistency checks |
+| S8 | Evidence ledger, exclusions, round summary, cross-round memory, review feedback and project research portfolio | `ledger/<target>/…`, `state/<target>/research-memory.json`, `state/<target>/review-feedback.json`, `state/<target>/research-portfolio.json`, `S8/research-memory.json`, `S8/review-feedback.json`, `S8/research-portfolio.json` | final consistency checks |
 
 The source-to-sink graph is intentionally conservative: heuristic proximity is marked as `heuristic-nearby` and `requires_manual_dataflow=true`; it is not presented as a substitute for sound semantic data-flow analysis.
 

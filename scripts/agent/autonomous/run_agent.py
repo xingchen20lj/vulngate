@@ -41,6 +41,8 @@ from ..memory.ledger import render_finding_md, write_round_artifacts
 from ..memory.research import (build_round_memory, load_research_memory,
                                 load_review_feedback, merge_research_memory,
                                 write_research_memory)
+from ..memory.portfolio import (build_research_portfolio,
+                                write_research_portfolio)
 from ..orchestrator.config import TargetConfig
 from ..orchestrator.gates import g3_novelty
 from ..sandbox.approval import ApprovalGate
@@ -1833,14 +1835,19 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             memory_summaries.setdefault(cid, item.get("evidence", {}))
             memory_conclusions.setdefault(cid, item.get("conclusion", ""))
     memory_delta = build_round_memory(
-        candidates, memory_summaries, memory_conclusions, runtime_lab, round_no)
+        candidates, memory_summaries, memory_conclusions, runtime_lab, round_no,
+        target_type=ctx.cfg.target_type)
     memory = merge_research_memory(
         load_research_memory(ctx.root, ctx.cfg.name), memory_delta)
     memory_file = write_research_memory(ctx.root, ctx.cfg.name, memory)
     review_feedback = load_review_feedback(ctx.root, ctx.cfg.name)
+    portfolio = build_research_portfolio(
+        memory, review_feedback, ctx.benchmark_feedback())
+    portfolio_file = write_research_portfolio(ctx.root, ctx.cfg.name, portfolio)
     ctx.write_artifact(round_no, "S8", "research-memory.json", memory_delta)
     ctx.write_artifact(round_no, "S8", "research-memory-summary.json", memory["summary"])
     ctx.write_artifact(round_no, "S8", "review-feedback.json", review_feedback)
+    ctx.write_artifact(round_no, "S8", "research-portfolio.json", portfolio)
     research_memory_info = {
         "artifact": str(memory_file.relative_to(ctx.root.resolve())),
         "round_entries": len(memory_delta.get("entries", [])),
@@ -1852,6 +1859,16 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         "artifact": "state/%s/review-feedback.json" % ctx.cfg.name,
         "count": review_feedback.get("summary", {}).get("feedback_count", 0),
         "statuses": review_feedback.get("summary", {}).get("statuses", {}),
+        "claim_status": "not-a-finding",
+    }
+    research_portfolio_info = {
+        "artifact": str(portfolio_file.relative_to(ctx.root.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-portfolio.json"
+                          % (ctx.cfg.name, round_no),
+        "mechanism_count": portfolio.get("summary", {}).get("mechanism_count", 0),
+        "unresolved_mechanisms": portfolio.get("summary", {}).get(
+            "unresolved_mechanisms", 0),
+        "next_probe_count": len(portfolio.get("next_probes") or []),
         "claim_status": "not-a-finding",
     }
     s8 = store.load_stage("S8")
@@ -1882,6 +1899,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             "next_round": [],
             "research_memory": research_memory_info,
             "review_feedback": review_feedback_info,
+            "research_portfolio": research_portfolio_info,
         }
         by_candidate_memory = {
             str(entry.get("candidate_id")): entry
@@ -1901,11 +1919,13 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         ctx.write_artifact(round_no, "S8", "llm-usage.json", ctx.llm.usage.to_dict())
         store.save_stage("S8", {"ledger_rows": len(ledger_rows), "excluded": len(excluded),
                                 "research_memory": research_memory_info,
-                                "review_feedback": review_feedback_info})
+                                "review_feedback": review_feedback_info,
+                                "research_portfolio": research_portfolio_info})
     print("[round-%02d] done: 确认=%d 排除=%d" % (round_no, len(rows), len(excluded)))
     return {"next_candidates": _propose_next(ctx, candidates, rows),
             "research_memory": research_memory_info,
-            "review_feedback": review_feedback_info}
+            "review_feedback": review_feedback_info,
+            "research_portfolio": research_portfolio_info}
 
 
 def _repro_text(row: Dict[str, Any]) -> str:

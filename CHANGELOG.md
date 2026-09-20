@@ -94,6 +94,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `research-benchmark-trend-v1` artifact compares fixed aggregate and common
   surface metrics, turns regressions into allowlisted feedback, and preserves
   all benchmark safety boundaries.
+- Added the bounded `research-portfolio-v1` project view. S8 aggregates
+  research memory, review feedback and benchmark context by research surface,
+  target type, attack class, variant and precondition class, and emits
+  deterministic `next_probes` without promoting portfolio state to a finding.
 
 ### Documentation
 
@@ -123,6 +127,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   the bounded `surface_guidance` safety boundary.
 - Documented `--baseline`, trend artifacts, fixed comparison metrics, and the
   rule that regressions are research guidance rather than findings.
+- Documented the project research portfolio, its S8 artifacts, bounded variant
+  coverage and next-probe contract, including its strict `not-a-finding`
+  boundary.
 
 ## [1.1.0] - 2026-09-16
 

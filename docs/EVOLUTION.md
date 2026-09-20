@@ -141,6 +141,17 @@ signals. A regression becomes the same allowlisted feedback/guidance path as
 an absolute deficit; it does not copy case rows, PoC output or conclusions and
 does not change G4/G5 or CVSS.
 
+S8 now also produces a bounded `research-portfolio-v1` at
+`state/<target>/research-portfolio.json`. It composes the target's research
+memory, review feedback and benchmark context into deterministic coverage
+views for explicit research surface, target type, attack class, variant and
+precondition class. Each variant keeps observed states and unresolved counts,
+while `next_probes` exposes only stable research keys, bounded classifications
+and probe hints. The round snapshot is written under `S8/`; the next S2 prompt
+can reuse the portfolio to choose cross-surface and variant follow-ups. The
+artifact remains `claim_status=not-a-finding` and never carries reviewer notes,
+payloads, commands, process output, CVSS or G4/G5 evidence.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

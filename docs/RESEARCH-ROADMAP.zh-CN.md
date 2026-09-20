@@ -26,6 +26,7 @@
 | 9 | 跨攻击面变体基准 | 已实现（五类研究面 + 三态契约） | `benchmarks/research-benchmark-surfaces-v1.json`、`benchmarks/research-benchmark-surfaces-sample-run.json`、`research_profile`、`coverage_by_surface` | Web、协议、云、移动端、native 均覆盖 vulnerable/negative/environment-gap；环境缺口不被误判为负向，结果保持 `not-a-finding` |
 | 10 | 研究面级自适应调度与规划 | 已实现（有界 surface guidance） | `surface_guidance`、候选级面向证据调度、面级 `benchmark_guidance` | 只对显式匹配研究面的候选加小幅优先级；计划补观测/证伪条件；默认无反馈行为不变，不改变 G4/G5/CVSS |
 | 11 | 纵向评测退化检测 | 已实现（bounded trend comparison） | `research-benchmark-trend-v1`、`--baseline`、趋势反馈 | 跨轮只比较固定聚合指标；全局/研究面退化进入有界 guidance；不复制 case、运行时输出或结论 |
+| 12 | 项目级研究组合与变体覆盖 | 已实现（bounded research portfolio） | `research-portfolio-v1`、`state/<target>/research-portfolio.json`、S8 组合视图 | 能按研究面/攻击类别/变体/前置条件汇总已观测状态，输出有界 next probes；不把组合统计升级为漏洞结论 |
 
 ## 当前阶段：可证伪实验规划
 
@@ -239,9 +240,25 @@ python3 scripts/agent_cli.py benchmark \
 case、PoC、stdout/stderr 都不会被复制。趋势仍是 `not-a-finding`，只要求下一轮用独立观测定位回归，
 不能改变候选状态、CVSS 或 G4/G5。
 
+## 阶段 12 初步实现：项目级研究组合与变体覆盖
+
+单个 `research-memory` 适合回答“这个机制上一次发生了什么”，但顶级研究员还需要回答“整个项目
+哪些面已经被实际验证、哪些变体仍然空白、下一轮最值得做什么”。S8 现在把目标级记忆、人工复核
+和显式 benchmark feedback 汇聚成有界 `research-portfolio-v1`：
+
+- 按 `research_surface`、`target_type`、`attack_class`、`variant` 和 `precondition_class` 统计机制数、事件数、稳定观察、可行动差异和环境缺口；
+- 为每个变体输出 `observed_states`、`unresolved_entries` 与 `status`，把“未观测”和“稳定观察”分开；
+- 生成按缺口优先级排序的 `next_probes`，只保留 research key、受控分类、状态和有界提示，不复制 reviewer note、payload、命令或 stdout/stderr；
+- 将纵向 benchmark 的回归面和告警码作为上下文带入组合视图，但仍保持 `claim_status=not-a-finding`。
+
+目标级产物是 `state/<target>/research-portfolio.json`，轮次快照是
+`state/<target>/round-NN/S8/research-portfolio.json`。下一轮 S2 prompt 会读取该视图，帮助宿主 Agent
+把跨面覆盖和变体缺口转成可证伪实验；它不改变候选状态、CVSS 或 G4/G5。
+
 ## 后续优先级
 
-1. 将纵向趋势与真实项目的多轮历史、人工复核和变体覆盖率做关联，校准 guidance 阈值但不放宽证据闸门。
-2. 继续扩展协议状态机、云身份边界、移动端生命周期和 native 方法体验证的合成变体，并为每类维持正向、负向和环境缺口对照。
+1. 将组合视图与真实项目的多轮历史、人工复核和变体覆盖率做更细粒度关联，校准 guidance 阈值但不放宽证据闸门。
+2. 将纵向趋势与组合缺口联合成可回放的研究策略实验，并保持策略与漏洞结论隔离。
+3. 继续扩展协议状态机、云身份边界、移动端生命周期和 native 方法体验证的合成变体，并为每类维持正向、负向和环境缺口对照。
 
 每一阶段都必须同时更新实现、技能契约、回归测试和 CHANGELOG；只有测试、artifact schema 和安全边界一起稳定后，才适合提交为一个独立变更。

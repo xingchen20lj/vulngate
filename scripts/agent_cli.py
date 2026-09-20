@@ -22,6 +22,8 @@ Usage:
                            --status <accepted|rejected|needs-evidence|scope-corrected>
                            [--reason-code <code>] [--note <text>] [--evidence-ref <ref>]
                            [--next-probe <hint>] [--round <N>] [--json]
+  agent_cli.py portfolio <target> --workspace <dir> [--rebuild]
+                              [--benchmark-feedback <json>] [--json]
   agent_cli.py coverage <target> [--workspace <dir>] [--rebuild] [--show-uncovered]
                            [--json] [--risk high|medium|low] [--category authz]
                            [--module <prefix>] [--lang zh|en]
@@ -653,6 +655,63 @@ def cmd_review(args: argparse.Namespace) -> int:
         print("review feedback recorded: %s %s (%s) -> %s" % (
             feedback["status"], feedback["research_key"],
             feedback["reason_code"], payload["feedback_file"]))
+    return 0
+
+
+def cmd_portfolio(args: argparse.Namespace) -> int:
+    """Show the bounded project research portfolio (or rebuild it explicitly)."""
+    from agent.memory.portfolio import (build_research_portfolio,
+                                        load_research_portfolio,
+                                        portfolio_path,
+                                        write_research_portfolio)
+    from agent.memory.research import (load_review_feedback,
+                                       load_research_memory)
+
+    workspace = Path(args.workspace).resolve()
+    portfolio = load_research_portfolio(workspace, args.target)
+    if args.rebuild:
+        benchmark_feedback: Dict[str, Any] = {}
+        if args.benchmark_feedback:
+            try:
+                feedback_path = Path(args.benchmark_feedback)
+                if not feedback_path.is_absolute():
+                    feedback_path = workspace / feedback_path
+                benchmark_feedback = json.loads(
+                    feedback_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                _out({"error": "%s: %s" % (type(exc).__name__, exc)})
+                return 2
+        portfolio = build_research_portfolio(
+            load_research_memory(workspace, args.target),
+            load_review_feedback(workspace, args.target),
+            benchmark_feedback)
+        write_research_portfolio(workspace, args.target, portfolio)
+    if not portfolio:
+        _out({"error": "research portfolio not found",
+              "hint": "run an S8 round or pass --rebuild",
+              "artifact": str(portfolio_path(workspace, args.target))})
+        return 2
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "artifact": str(portfolio_path(workspace, args.target).relative_to(workspace)),
+        "portfolio": portfolio,
+    }
+    if args.json:
+        _out(payload)
+    else:
+        summary = portfolio.get("summary", {})
+        print("portfolio: %s" % payload["artifact"])
+        print("  mechanisms=%s unresolved=%s next_probes=%d claim_status=%s" % (
+            summary.get("mechanism_count", 0),
+            summary.get("unresolved_mechanisms", 0),
+            len(portfolio.get("next_probes") or []),
+            portfolio.get("claim_status", "not-a-finding")))
+        for probe in portfolio.get("next_probes") or []:
+            print("  next: %s [%s] %s" % (
+                probe.get("candidate_id") or probe.get("research_key"),
+                probe.get("state"),
+                "; ".join(probe.get("next_probe_hints") or []) or "-"))
     return 0
 
 
@@ -1327,6 +1386,21 @@ def build_parser() -> argparse.ArgumentParser:
     rv.add_argument("--json", action="store_true",
                     help="machine-readable output")
     rv.set_defaults(fn=cmd_review)
+
+    po = sub.add_parser(
+        "portfolio",
+        help="show the bounded project research portfolio and next probes",
+    )
+    po.add_argument("target", help="target name (state/<target>/...)")
+    po.add_argument("--workspace", required=True,
+                    help="workspace root containing state/<target>/")
+    po.add_argument("--rebuild", action="store_true",
+                    help="rebuild from current research memory/review feedback")
+    po.add_argument("--benchmark-feedback", default=None,
+                    help="optional bounded benchmark result/feedback JSON for --rebuild")
+    po.add_argument("--json", action="store_true",
+                    help="machine-readable output")
+    po.set_defaults(fn=cmd_portfolio)
 
     cvr = sub.add_parser(
         "coverage",

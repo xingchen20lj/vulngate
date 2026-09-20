@@ -13,6 +13,8 @@ from ..memory.ledger import render_finding_md, write_round_artifacts
 from ..memory.research import (build_round_memory, load_research_memory,
                                 load_review_feedback, merge_research_memory,
                                 write_research_memory)
+from ..memory.portfolio import (build_research_portfolio,
+                                write_research_portfolio)
 from ..memory.state import CheckpointStore
 from ..analysis.languages import ALL_SUFFIXES
 from ..sandbox.approval import ApprovalGate
@@ -1140,14 +1142,19 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
     memory_delta = build_round_memory(
         ctx.config.candidates, summaries,
         {r["candidate_id"]: r.get("conclusion", "") for r in rows},
-        runtime_lab, ctx.round_no)
+        runtime_lab, ctx.round_no, target_type=ctx.config.target_type)
     memory = merge_research_memory(
         load_research_memory(ctx.workspace, ctx.target), memory_delta)
     memory_file = write_research_memory(ctx.workspace, ctx.target, memory)
     review_feedback = load_review_feedback(ctx.workspace, ctx.target)
+    portfolio = build_research_portfolio(
+        memory, review_feedback, ctx.benchmark_feedback())
+    portfolio_file = write_research_portfolio(
+        ctx.workspace, ctx.target, portfolio)
     ctx.store.write_artifact("S8", "research-memory.json", memory_delta)
     ctx.store.write_artifact("S8", "research-memory-summary.json", memory["summary"])
     ctx.store.write_artifact("S8", "review-feedback.json", review_feedback)
+    ctx.store.write_artifact("S8", "research-portfolio.json", portfolio)
     by_candidate_memory = {
         str(entry.get("candidate_id")): entry for entry in memory_delta.get("entries", [])
     }
@@ -1174,11 +1181,22 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
         "statuses": review_feedback.get("summary", {}).get("statuses", {}),
         "claim_status": "not-a-finding",
     }
+    summary["research_portfolio"] = {
+        "artifact": str(portfolio_file.relative_to(ctx.workspace.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-portfolio.json"
+                          % (ctx.target, ctx.round_no),
+        "mechanism_count": portfolio.get("summary", {}).get("mechanism_count", 0),
+        "unresolved_mechanisms": portfolio.get("summary", {}).get(
+            "unresolved_mechanisms", 0),
+        "next_probe_count": len(portfolio.get("next_probes") or []),
+        "claim_status": "not-a-finding",
+    }
     out_dir = write_round_artifacts(ctx.workspace, ctx.target, ctx.round_no, rows, excluded,
                                     summary, lang=ctx.config.output_lang)
     return {"ledger_dir": str(out_dir.relative_to(ctx.workspace)), "rows": len(rows),
             "excluded": len(excluded), "metrics": metrics,
-            "research_memory": summary["research_memory"]}
+            "research_memory": summary["research_memory"],
+            "research_portfolio": summary["research_portfolio"]}
 
 
 def _precondition_distribution(rows: List[Dict[str, Any]]) -> str:

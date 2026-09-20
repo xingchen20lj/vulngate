@@ -212,17 +212,41 @@ def research_key(candidate: Dict[str, Any]) -> str:
 
 
 def _candidate_meta(candidate: Dict[str, Any], key: str) -> Dict[str, Any]:
+    research_surface = _text(candidate.get("research_surface"), 32).lower()
+    if research_surface not in {"web", "protocol", "cloud", "mobile", "native"}:
+        exact_surface = _text(candidate.get("surface"), 32).lower()
+        research_surface = (exact_surface if exact_surface in {
+            "web", "protocol", "cloud", "mobile", "native"
+        } else "")
+    target_type = _text(candidate.get("target_type"), 60).lower()
+    attack_class = _text(
+        candidate.get("attack_class") or candidate.get("vuln_class")
+        or candidate.get("category"), 80).lower()
+    variant = _text(candidate.get("variant"), 100)
+    precondition_class = _text(
+        candidate.get("precondition_class")
+        or candidate.get("precondition_tier")
+        or candidate.get("precondition_tier_hint"), 60).lower()
+    fix_variants = _bounded_strings(
+        candidate.get("patch_variants") or candidate.get("fix_variants"),
+        8, 160)
     return {
         "candidate_id": _text(candidate.get("candidate_id"), 120),
         "surface": _text(candidate.get("surface"), MAX_SURFACE),
+        "research_surface": research_surface,
+        "target_type": target_type,
+        "attack_class": attack_class,
+        "variant": variant,
+        "precondition_class": precondition_class,
+        "variants": _bounded_strings([variant] + fix_variants, 12, 100),
+        "attack_classes": _bounded_strings([attack_class], 8, 80),
+        "precondition_classes": _bounded_strings([precondition_class], 8, 60),
         "entry": _text(candidate.get("entry"), 180),
         "input_shape": _text(candidate.get("input_shape"), 140),
         "code_locations": _locations(candidate),
         "target_classes": _bounded_strings(candidate.get("target_classes"),
                                              MAX_TARGET_CLASSES, 160),
-        "fix_variants": _bounded_strings(
-            candidate.get("patch_variants") or candidate.get("fix_variants"),
-            8, 160),
+        "fix_variants": fix_variants,
         "patch_commit": _text(candidate.get("patch_commit"), 80),
         "research_key": key,
     }
@@ -499,7 +523,8 @@ def build_round_memory(candidates: Sequence[Dict[str, Any]],
                        summaries: Optional[Dict[str, Any]],
                        conclusions: Optional[Dict[str, str]],
                        runtime_lab: Optional[Dict[str, Any]],
-                       round_no: int) -> Dict[str, Any]:
+                       round_no: int,
+                       target_type: str = "") -> Dict[str, Any]:
     """Create a bounded, target-independent memory delta for one round."""
     summaries = summaries if isinstance(summaries, dict) else {}
     conclusions = conclusions if isinstance(conclusions, dict) else {}
@@ -540,6 +565,19 @@ def build_round_memory(candidates: Sequence[Dict[str, Any]],
                 "claim_status": MEMORY_CLAIM_STATUS,
             })
         entry = _candidate_meta(candidate, key)
+        if not entry.get("target_type") and target_type:
+            entry["target_type"] = _text(target_type, 60).lower()
+        if not entry.get("research_surface"):
+            target_surface = {
+                "web-app": "web",
+                "middleware": "protocol",
+                "message-rpc": "protocol",
+                "cloud-service": "cloud",
+                "mobile-app": "mobile",
+                "native-app": "native",
+            }.get(entry.get("target_type", ""), "")
+            if target_surface:
+                entry["research_surface"] = target_surface
         entry.update({
             "round": int(round_no),
             "decision": _text(conclusions.get(cid, ""), 100),
@@ -997,6 +1035,11 @@ def _normalize_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
         "research_key": _text(entry.get("research_key"), 80),
         "candidate_id": _text(entry.get("candidate_id"), 120),
         "surface": _text(entry.get("surface"), MAX_SURFACE),
+        "research_surface": _text(entry.get("research_surface"), 32).lower(),
+        "target_type": _text(entry.get("target_type"), 60).lower(),
+        "attack_class": _text(entry.get("attack_class"), 80).lower(),
+        "variant": _text(entry.get("variant"), 100),
+        "precondition_class": _text(entry.get("precondition_class"), 60).lower(),
         "entry": _text(entry.get("entry"), 180),
         "input_shape": _text(entry.get("input_shape"), 140),
         "code_locations": _bounded_strings(entry.get("code_locations"),
@@ -1009,6 +1052,14 @@ def _normalize_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
         "decision": _text(entry.get("decision"), 100),
         "decision_status": _text(entry.get("decision_status"), 80),
     }
+    normalized["variants"] = _bounded_strings(
+        entry.get("variants") or [normalized["variant"]]
+        + list(normalized.get("fix_variants") or []), 12, 100)
+    normalized["attack_classes"] = _bounded_strings(
+        entry.get("attack_classes") or [normalized["attack_class"]], 8, 80)
+    normalized["precondition_classes"] = _bounded_strings(
+        entry.get("precondition_classes") or [normalized["precondition_class"]],
+        8, 60)
     events = []
     seen = set()
     for event in entry.get("events") or []:
@@ -1067,10 +1118,25 @@ def merge_research_memory(existing: Optional[Dict[str, Any]],
             target = merged[key]
             if source.get("candidate_id"):
                 target["candidate_id"] = _text(source.get("candidate_id"), 120)
-            for field in ("surface", "entry", "input_shape"):
+            for field in ("surface", "entry", "input_shape", "variant"):
                 if source.get(field):
                     target[field] = _text(source.get(field),
-                                          MAX_SURFACE if field == "surface" else 180)
+                                          MAX_SURFACE if field == "surface" else
+                                          (100 if field == "variant" else 180))
+            for field, limit in (("research_surface", 32),
+                                 ("target_type", 60),
+                                 ("attack_class", 80),
+                                 ("precondition_class", 60)):
+                if source.get(field):
+                    target[field] = _text(source.get(field), limit).lower()
+            for field, limit, item_limit, fallback in (
+                    ("variants", 12, 100,
+                     [source.get("variant")] + list(source.get("fix_variants") or [])),
+                    ("attack_classes", 8, 80, [source.get("attack_class")]),
+                    ("precondition_classes", 8, 60,
+                     [source.get("precondition_class")])):
+                values = list(target.get(field) or []) + list(source.get(field) or fallback)
+                target[field] = _bounded_strings(values, limit, item_limit)
             if source.get("code_locations"):
                 target["code_locations"] = _bounded_strings(
                     source.get("code_locations"), MAX_LOCATIONS, 180)

@@ -1,0 +1,253 @@
+"""Tests for the bounded project-level research portfolio."""
+
+from __future__ import annotations
+
+import json
+import contextlib
+import io
+import shutil
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from agent.evaluation.benchmark import (  # noqa: E402
+    BENCHMARK_FEEDBACK_SCHEMA_VERSION,
+    BENCHMARK_TREND_SCHEMA_VERSION,
+)
+from agent.analysis.inventory import CoverageStore  # noqa: E402
+from agent.analysis.scheduler import (  # noqa: E402
+    ScheduleContext,
+    prompt_coverage_block,
+)
+import agent_cli  # noqa: E402
+from agent.memory.portfolio import (  # noqa: E402
+    PORTFOLIO_CLAIM_STATUS,
+    PORTFOLIO_SCHEMA_VERSION,
+    build_research_portfolio,
+    load_research_portfolio,
+    normalize_research_portfolio,
+    write_research_portfolio,
+)
+from agent.memory.research import (  # noqa: E402
+    build_round_memory,
+    merge_research_memory,
+    research_key,
+)
+
+
+def candidate(candidate_id: str, **extra):
+    value = {
+        "candidate_id": candidate_id,
+        "surface": "explicit research surface",
+        "entry": "handle",
+        "input_shape": "bounded request",
+        "logic": "candidate logic",
+        "code_location": ["src/Handler.java:42"],
+        "target_classes": ["com.example.Target"],
+    }
+    value.update(extra)
+    return value
+
+
+def lab_for(candidate_id: str, diff_status: str = "no-difference",
+            replay_status: str = "stable", reproduces=True):
+    return {
+        "fixtures": [{
+            "fixture": {
+                "candidate_id": candidate_id,
+                "fixture_id": "fixture-%s" % candidate_id,
+                "fixture_kind": "bounded",
+            },
+            "replay": {"status": replay_status, "attempts": 2},
+            "reproduces_expected": reproduces,
+            "differential": {
+                "status": diff_status,
+                "primary_version": "v2",
+                "differences": [],
+                "inconclusive_cells": [],
+            },
+        }],
+        "claim_status": "not-a-finding",
+    }
+
+
+class ResearchPortfolioTests(unittest.TestCase):
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="vulngate-portfolio-"))
+        self.addCleanup(lambda: shutil.rmtree(self.root, ignore_errors=True))
+
+    def _memory(self):
+        web = candidate(
+            "WEB-1", research_surface="web", target_type="web-app",
+            surface="web authorization path",
+            attack_class="authorization", variant="tenant-object",
+            precondition_class="app-cooperation",
+            fix_variants=["ownership-check"],
+        )
+        protocol = candidate(
+            "PROTO-1", research_surface="protocol", target_type="message-rpc",
+            surface="protocol serializer path",
+            attack_class="deserialization", variant="serializer-guard",
+            precondition_class="single-feature",
+        )
+        cloud = candidate(
+            "CLOUD-1", research_surface="cloud", target_type="cloud-service",
+            surface="cloud metadata path",
+            attack_class="ssrf", variant="provider-emulator",
+            precondition_class="app-cooperation",
+        )
+        memory = merge_research_memory(
+            {}, build_round_memory([web], {"WEB-1": {}}, {},
+                                   lab_for("WEB-1"), 1))
+        memory = merge_research_memory(
+            memory, build_round_memory([protocol], {"PROTO-1": {}}, {},
+                                       lab_for("PROTO-1", "difference-observed"), 2))
+        memory = merge_research_memory(
+            memory, build_round_memory([cloud], {"CLOUD-1": {}}, {},
+                                       lab_for("CLOUD-1", "inconclusive",
+                                               "precondition-unavailable", None), 3))
+        return memory, web, protocol, cloud
+
+    def test_portfolio_aggregates_surface_variants_and_next_probes(self):
+        memory, web, protocol, cloud = self._memory()
+        feedback = {
+            "schema_version": BENCHMARK_FEEDBACK_SCHEMA_VERSION,
+            "benchmark_id": "benchmark-current",
+            "trend": {
+                "schema_version": BENCHMARK_TREND_SCHEMA_VERSION,
+                "baseline_benchmark_id": "benchmark-old",
+                "current_benchmark_id": "benchmark-current",
+                "regressions": [{
+                    "metric": "evidence_completeness",
+                    "baseline": 0.9, "current": 0.7,
+                    "delta": -0.2, "threshold": 0.0,
+                }],
+                "surface_regressions": [{
+                    "surface": "cloud", "metric": "environment_gap_fidelity",
+                    "baseline": 0.9, "current": 0.5,
+                    "delta": -0.4, "threshold": 0.0,
+                }],
+                "status": "regressed",
+                "claim_status": "not-a-finding",
+            },
+        }
+        reviews = {"entries": [{
+            "research_key": research_key(protocol),
+            "status": "needs-evidence",
+            "reason_code": "missing-typed-effect",
+            "reviewer_note": "secret-review-note",
+            "next_probe_hints": ["add an independent typed-effect observation"],
+            "round": 3,
+        }]}
+        portfolio = build_research_portfolio(memory, reviews, feedback)
+
+        self.assertEqual(PORTFOLIO_SCHEMA_VERSION, portfolio["schema_version"])
+        self.assertEqual(PORTFOLIO_CLAIM_STATUS, portfolio["claim_status"])
+        self.assertEqual(3, portfolio["summary"]["mechanism_count"])
+        self.assertEqual(1, portfolio["summary"]["stable_mechanisms"])
+        self.assertEqual(1, portfolio["summary"]["actionable_differences"])
+        self.assertEqual(1, portfolio["summary"]["unresolved_mechanisms"])
+        self.assertEqual({"web", "protocol", "cloud"}, {
+            row["value"] for row in portfolio["dimensions"]["research_surface"]
+        })
+        variants = {row["variant"]: row for row in portfolio["variant_coverage"]}
+        self.assertEqual("stable-observed", variants["tenant-object"]["status"])
+        self.assertEqual("gap", variants["provider-emulator"]["status"])
+        self.assertEqual("regressed",
+                         portfolio["benchmark"]["trend"]["status"])
+        self.assertIn("CLOUD-1", json.dumps(portfolio, ensure_ascii=False))
+        self.assertNotIn("secret-review-note", json.dumps(portfolio, ensure_ascii=False))
+        self.assertNotIn("payload", json.dumps(portfolio, ensure_ascii=False).lower())
+        self.assertEqual("not-a-finding",
+                         portfolio["next_probes"][0]["claim_status"])
+        self.assertGreaterEqual(portfolio["next_probes"][0]["priority"], 4)
+
+        # Building the same view twice is safe for resumable S8 and produces
+        # byte-for-byte equivalent JSON semantics.
+        self.assertEqual(
+            portfolio,
+            build_research_portfolio(memory, reviews, feedback),
+        )
+
+    def test_portfolio_round_trip_is_bounded_and_rejects_unknown_fields(self):
+        memory, _web, _protocol, _cloud = self._memory()
+        portfolio = build_research_portfolio(memory)
+        path = write_research_portfolio(self.root, "target", portfolio)
+        self.assertTrue(path.exists())
+        loaded = load_research_portfolio(self.root, "target")
+        self.assertEqual(portfolio, loaded)
+
+        forged = dict(portfolio)
+        forged["secret_payload"] = "do-not-copy"
+        forged["next_probes"] = list(portfolio["next_probes"]) + [{
+            "research_key": "rk-forged", "state": "environment-gap",
+            "payload": "raw payload", "claim_status": "confirmed",
+        }]
+        normalized = normalize_research_portfolio(forged)
+        encoded = json.dumps(normalized, ensure_ascii=False)
+        self.assertNotIn("do-not-copy", encoded)
+        self.assertNotIn("raw payload", encoded)
+        self.assertNotIn('"claim_status": "confirmed"', encoded)
+        self.assertEqual("not-a-finding", normalized["claim_status"])
+
+    def test_same_mechanism_keeps_multiple_variant_labels_after_merge(self):
+        first = candidate(
+            "VAR-1", research_surface="protocol", target_type="message-rpc",
+            surface="same mechanism", attack_class="deserialization",
+            variant="serializer-a", precondition_class="single-feature",
+        )
+        second = candidate(
+            "VAR-2", research_surface="protocol", target_type="message-rpc",
+            surface="same mechanism", attack_class="deserialization",
+            variant="serializer-b", precondition_class="app-cooperation",
+        )
+        first_memory = build_round_memory(
+            [first], {"VAR-1": {}}, {}, lab_for("VAR-1"), 1)
+        second_memory = build_round_memory(
+            [second], {"VAR-2": {}}, {}, lab_for("VAR-2"), 2)
+        self.assertEqual(first_memory["entries"][0]["research_key"],
+                         second_memory["entries"][0]["research_key"])
+        merged = merge_research_memory(first_memory, second_memory)
+        portfolio = build_research_portfolio(merged)
+        variants = {row["variant"] for row in portfolio["variant_coverage"]}
+        preconditions = {
+            row["value"] for row in portfolio["dimensions"]["precondition_class"]
+        }
+        self.assertIn("serializer-a", variants)
+        self.assertIn("serializer-b", variants)
+        self.assertEqual({"single-feature", "app-cooperation"}, preconditions)
+
+    def test_scheduler_prompt_exposes_portfolio_as_research_context(self):
+        memory, _web, _protocol, _cloud = self._memory()
+        portfolio = build_research_portfolio(memory)
+        store = CoverageStore(self.root, "target")
+        context = ScheduleContext.from_store(
+            store, research_portfolio=portfolio)
+        prompt = prompt_coverage_block(context)
+        self.assertIn("项目级研究组合 / Project Research Portfolio", prompt)
+        self.assertIn("provider-emulator", prompt)
+        self.assertIn("not-a-finding", prompt)
+
+    def test_portfolio_cli_reads_and_rebuilds_the_bounded_artifact(self):
+        memory, _web, _protocol, _cloud = self._memory()
+        write_research_portfolio(
+            self.root, "target", build_research_portfolio(memory))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = agent_cli.main([
+                "portfolio", "target", "--workspace", str(self.root), "--json",
+            ])
+        self.assertEqual(0, code)
+        payload = json.loads(output.getvalue())
+        self.assertEqual("research-portfolio-v1",
+                         payload["portfolio"]["schema_version"])
+        self.assertEqual("not-a-finding", payload["portfolio"]["claim_status"])
+
+
+if __name__ == "__main__":
+    unittest.main()

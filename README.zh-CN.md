@@ -101,6 +101,7 @@ Evidence Gates
 - **跨攻击面研究基准** —— `benchmarks/research-benchmark-surfaces-v1.json` 覆盖 Web、协议、云、移动端和 native 变体，并分别测试可确认、负向与环境缺口；结果保留 `research_profile` 与 `coverage_by_surface`，未满足运行条件的 case 仍保持 pending。
 - **按研究面自适应** —— 研究面级指标会生成有界 `surface_guidance`；只有显式标注且匹配的候选才会获得小幅调度优先级，匹配的实验计划才会追加对应的必需观测与证伪条件。
 - **纵向评测退化检测** —— `benchmark --baseline <result.json>` 对比多轮有界聚合指标与研究面指标，将退化保存为 `research-benchmark-trend-v1`，不复制 case 证据，也不会升级为漏洞结论。
+- **项目级研究组合** —— S8 将研究记忆、人工复核和评测上下文汇聚为有界 `research-portfolio-v1`，按研究面、攻击类别、变体和前置条件展示覆盖与缺口，并输出 `next_probes`；组合统计保持 `not-a-finding`。
 - **逐 cell 运行时前置** —— 声明需要的 JDK/runtime 必须真实可用，否则记录 `precondition-unavailable`，不会静默使用其他运行时替代。
 - **S4 证据收敛** —— 已落盘矩阵证据不会被 Agent/spawn 超时元数据覆盖。
 - **保守 Novelty** —— 公开查询失败会保留为不确定状态，而不会被转化为“未发现公开记录”。
@@ -202,7 +203,7 @@ npm install -g @openai/codex
 | S5 | Novelty：上游 issue/PR/fix + 公开披露搜索与覆盖记录 | `S5/novelty.json`、`S5/novelty-coverage.json` | G3 Novelty / 强制降级 |
 | S6 | CVSS + 前置条件/影响一致性 | `S6/severity.json` | G5 一致性 |
 | S7 | 自包含本地发现文档 | `reports/<target>/…` | 披露冻结 |
-| S8 | Evidence Ledger、排除项、轮次汇总、跨轮研究记忆 | `ledger/<target>/…`、`state/<target>/research-memory.json`、`S8/research-memory.json` | 最终一致性检查 |
+| S8 | Evidence Ledger、排除项、轮次汇总、跨轮研究记忆、人工复核和项目级研究组合 | `ledger/<target>/…`、`state/<target>/research-memory.json`、`state/<target>/review-feedback.json`、`state/<target>/research-portfolio.json`、`S8/research-portfolio.json` | 最终一致性检查 |
 
 Source→Sink 图刻意保持保守：启发式邻近路径会明确标记为 `heuristic-nearby` 与 `requires_manual_dataflow=true`，不会冒充严格语义数据流证明。包含授权边界和危险 Sink 的路径会进一步生成 `chain-*` S2 候选，交给源码审计和授权/效果矩阵验证，而不是停留在提示文件中。
 
