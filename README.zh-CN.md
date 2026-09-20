@@ -93,6 +93,7 @@ Evidence Gates
 - **能力原语与攻击路径图** —— S1 从 entry/sink/flow 索引生成有界 `read` / `write` / `exec` / `ssrf` 等能力链候选，区分已观察与缺失原语，并自动生成最小验证序列；链路始终保持 `not-a-finding`，等待数据流与运行时 typed effect 证据。
 - **能力链运行时契约** —— 能力候选会把有界 `capability_contract` 传入 S4 cell；`CAPABILITY`/`TRANSITION` 轨迹会被分类为 `no-trace`、`partial` 或 `complete`，终点 typed effect 仍单独要求真实证据。
 - **运行时研究实验室** —— 定向 fuzz 输入会固化为 corpus fixture 和缩减 reproducer；有界重放与版本 × SafeMode 对照会保留稳定性、差分、签名漂移和前置缺口证据，但不会直接升级为漏洞结论。
+- **普通 S4 fixture 适配器** —— Java 与 Shell PoC cell 可固化为脱敏执行 fixture 并有界重放；`S4/runtime-lab.json` 将稳定性、版本/SafeMode 差异和 harness 缺口与 G4/G5 结论分开。
 - **逐 cell 运行时前置** —— 声明需要的 JDK/runtime 必须真实可用，否则记录 `precondition-unavailable`，不会静默使用其他运行时替代。
 - **S4 证据收敛** —— 已落盘矩阵证据不会被 Agent/spawn 超时元数据覆盖。
 - **保守 Novelty** —— 公开查询失败会保留为不确定状态，而不会被转化为“未发现公开记录”。
@@ -187,7 +188,7 @@ npm install -g @openai/codex
 | S1 | 攻击面、入口、危险调用点、修复历史/变体、项目画像、目标类型规则、复合攻击链、能力原语候选 | `S1/entry-inventory.json`、`S1/security-fix-history.json`、`S1/patch-variants.json`、`S1/project-profile.json`、`S1/target-rules.json`、`S1/composite-chain-candidates.json`、`S1/capability-graph.json`、`S1/capability-candidates.json` | G0 死代码、G1 可达性 |
 | S2 | 候选矩阵与可证伪研究计划：surface × entry × input × mechanism | `S2/candidate-matrix.json`、`S2/experiment-plans.json` | — |
 | S3 | 带 file:line 证据的源码审计、Source→Sink hints、residuals | `S3/audit-notes.json`、`S3/residuals.json` | G1b 默认配置门控 |
-| S4 | PoC 矩阵：版本 × safe mode × 前置条件；可选 authz、有界状态/并发与能力 transition 实验 | `S4/matrix-runs/<c>/cells.json`、`S4/execution-status.json`、`S4/authz-matrix.json` | G4 运行时证据 |
+| S4 | PoC 矩阵：版本 × safe mode × 前置条件；可选 authz、有界状态/并发、能力 transition 与重放/差分实验室 | `S4/matrix-runs/<c>/cells.json`、`S4/execution-status.json`、`S4/authz-matrix.json`、`S4/runtime-lab.json` | G4 运行时证据 |
 | S5 | Novelty：上游 issue/PR/fix + 公开披露搜索与覆盖记录 | `S5/novelty.json`、`S5/novelty-coverage.json` | G3 Novelty / 强制降级 |
 | S6 | CVSS + 前置条件/影响一致性 | `S6/severity.json` | G5 一致性 |
 | S7 | 自包含本地发现文档 | `reports/<target>/…` | 披露冻结 |

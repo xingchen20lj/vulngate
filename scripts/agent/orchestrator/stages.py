@@ -28,6 +28,7 @@ from ..tools.project_profile import build_project_profile
 from ..tools.experiment_planner import plan_candidate_experiments
 from ..tools.experiment import capability_contract_from_candidate
 from ..tools.research_strategies import composite_chain_candidates
+from ..tools.s4_runtime_lab import run_s4_runtime_lab
 from ..tools.target_rules import collect_target_rule_hits, composite_chain_hints
 from ..tools.novelty import (Disclosure, NoveltyChecker, UpstreamRef,
                              mechanism_audit_llm)
@@ -609,6 +610,7 @@ def _shell_poc_specs(ctx: StageContext) -> List[ShellPOCSpec]:
                 script=poc["script"],
                 cells=cells,
                 env=dict(poc.get("env", {})),
+                urls=dict(poc.get("urls", ctx.config.target_urls)),
                 entry=cand.get("entry", ""),
                 input_shape=cand.get("input_shape", ""),
                 logic=cand.get("logic", ""),
@@ -646,6 +648,25 @@ def run_s4(ctx: StageContext) -> Dict[str, Any]:
         shell_runner = ShellMatrixRunner(ctx.workspace, ctx.target, ctx.round_no, ctx.approval)
         for cid, cells in shell_runner.run_manifest(shell_specs).items():
             results.setdefault(cid, []).extend(cells)
+    try:
+        runtime_lab = run_s4_runtime_lab(
+            ctx.workspace, ctx.target, ctx.round_no, ctx.config,
+            ctx.config.candidates, java_specs, shell_specs, jars_by_version,
+            baseline_results=results, approval=ctx.approval,
+            version_universe=sorted(set(jars_by_version)
+                                    | set(ctx.config.target_urls)))
+    except Exception as exc:  # keep ordinary S4 usable while preserving gap
+        runtime_lab = {
+            "schema_version": "runtime-lab-v1",
+            "scope": "ordinary-s4",
+            "status": "run-failed",
+            "reason": "%s: %s" % (type(exc).__name__, str(exc)[:240]),
+            "fixtures": [],
+            "claim_status": "not-a-finding",
+        }
+    runtime_lab_ref = "state/%s/round-%02d/S4/runtime-lab.json" % (
+        ctx.target, ctx.round_no)
+    ctx.store.write_artifact("S4", "runtime-lab.json", runtime_lab)
     summaries = {}
     authz_matrix = []
     for cand in ctx.config.candidates:
@@ -655,6 +676,16 @@ def run_s4(ctx: StageContext) -> Dict[str, Any]:
         summaries[cid] = summarize_candidate(cells)
         summaries[cid]["s4_result_sources"] = convergence["sources"]
         summaries[cid]["s4_persisted_matrix"] = convergence["persisted_matrix"]
+        candidate_lab = (runtime_lab.get("candidate_status") or {}).get(str(cid))
+        if candidate_lab:
+            summaries[cid]["runtime_lab"] = {
+                "artifact_ref": runtime_lab_ref,
+                "fixture_count": candidate_lab.get("fixture_count", 0),
+                "replay_statuses": candidate_lab.get("replay_statuses", []),
+                "differential_statuses": candidate_lab.get(
+                    "differential_statuses", []),
+                "claim_status": "not-a-finding",
+            }
         for cell in cells:
             assertion = cell.get("authz_assertion")
             if assertion and assertion.get("status") != "not_applicable":
@@ -675,7 +706,7 @@ def run_s4(ctx: StageContext) -> Dict[str, Any]:
         for cid, summary in summaries.items()
     })
     ctx.store.write_artifact("S4", "authz-matrix.json", authz_matrix)
-    return {"summaries": summaries}
+    return {"summaries": summaries, "runtime_lab": runtime_lab}
 
 
 def _derive_conclusion(candidate: Dict[str, Any], summary: Dict[str, Any],

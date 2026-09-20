@@ -19,7 +19,7 @@
 | 2 | 复合攻击链和状态/竞态实验契约 | 已完成 | `chain-*`、`sequence`、`STEP/STATE`、可用性证据 | 声明并发不等于 A:H；每一步可追踪 |
 | 3 | 可证伪实验规划器 | 本阶段已实现 | `S2/experiment-plans.json`、S3 计划上下文 | 每个候选有必需观测和 falsifier，且 `not-a-finding` |
 | 4 | 能力原语与攻击路径图 | 已实现（含 S4 运行时契约） | `capability-graph.json`、`capability-candidates.json`、`capability_contract`、`CAPABILITY/TRANSITION` 证据 | 低危原语只有在链路、transition 和终点 typed effect 均有观测时才允许继续评估 |
-| 5 | 运行时研究实验室与差分验证 | 初步实现（定向 fuzz 路径） | `fuzz-corpus.json`、`runtime-lab.json`、版本/安全模式差分、缩减 reproducer | 固定输入可重复重放；差分、签名漂移与前置失败分开记录 |
+| 5 | 运行时研究实验室与差分验证 | 已实现（定向 fuzz + 普通 S4） | `fuzz-corpus.json`、`FUZZ/runtime-lab.json`、`S4/runtime-lab.json`、版本/安全模式差分、缩减 reproducer | 固定输入可重复重放；差分、签名漂移与前置/harness 失败分开记录 |
 | 6 | 研究记忆与反馈学习 | 后续 | candidate/finding/negative-result 记忆、重复检测、跨轮 next probe | 不重复跑已证伪路径；新轮次能利用旧证据 |
 | 7 | 专家级评测基准 | 后续 | 真实/合成案例集、变体集、误报/漏报指标 | 用证据质量、覆盖率、校准度衡量，而不是只看候选数量 |
 
@@ -79,12 +79,16 @@ digest。触发器经 ddmin 后会形成独立的缩减 reproducer，原始输�
   artifact 引用；所有实验结果仍是 `claim_status=not-a-finding`。
 
 这一步已经把“定向 fuzz 发现”与“可复现、可差分的研究证据”连接起来；下一步是把同一
-套 fixture adapter 扩展到普通 S4 候选和固定服务 fixture，再加入跨轮记忆。
+套 fixture adapter 扩展到了普通 Java/Shell S4 候选：从既有 cell 的参数、前置条件、
+授权元数据、有状态声明和能力契约生成稳定身份，但 artifact 只保存参数 digest，不落原始
+参数或进程输出。普通 S4 也会复用隔离矩阵执行有限重放与版本 × SafeMode 对照，并把
+`S4/runtime-lab.json` 关联回 `verification-matrix.json`；所有结果仍保持
+`claim_status=not-a-finding`。下一步是跨轮研究记忆与固定服务生命周期的更细粒度适配。
 
 ## 后续优先级
 
-1. 将 runtime-lab fixture adapter 扩展到普通 S4 候选和固定服务/配置 fixture。
-2. 再做跨轮记忆和反馈学习，利用稳定负结果和差分结果减少重复实验。
+1. 增加跨轮研究记忆和反馈学习，利用稳定负结果和差分结果减少重复实验。
+2. 补充固定服务生命周期、配置快照和更细粒度的 authz/tenant fixture adapter。
 3. 最后做评测基准，用负结果、重复率、证据完整度和严重性校准反向约束 Agent。
 
 每一阶段都必须同时更新实现、技能契约、回归测试和 CHANGELOG；只有测试、artifact schema 和安全边界一起稳定后，才适合提交为一个独立变更。

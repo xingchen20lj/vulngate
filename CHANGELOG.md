@@ -42,6 +42,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   configured version × SafeMode cell, separating stable reproduction, bucket
   changes, signature-only drift, and precondition/harness gaps in
   `runtime-lab.json`; the lab remains `not-a-finding` evidence.
+- Ordinary Java and shell S4 PoCs now have the same bounded fixture adapter.
+  It derives a stable identity from the execution context without persisting
+  raw arguments, reuses the isolated matrix runners for replay and version ×
+  SafeMode comparison, and writes `S4/runtime-lab.json`; replay and
+  differential gaps remain `not-a-finding` evidence.
 
 ### Documentation
 

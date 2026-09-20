@@ -390,6 +390,16 @@ research evidence with `claim_status=not-a-finding`, not an automatic G4/G5
 promotion. The lab must preserve a precondition or harness gap rather than
 turning it into a negative result.
 
+The same adapter applies to ordinary Java and shell S4 PoCs. Group cells by a
+bounded execution template, derive a stable fixture id from the candidate,
+PoC and execution context, and persist only redacted metadata plus argument
+digests (never raw arguments or process output). Reuse the isolated matrix
+runner for bounded replay and version × SafeMode comparison, and write the
+aggregate to `S4/runtime-lab.json`. Link the per-candidate status from the S4
+verification summary, but keep every replay/differential result at
+`claim_status=not-a-finding`; a missing baseline, service, runtime or harness
+must remain an explicit gap.
+
 Keep every cell, including harness failures and negative observations.
 
 #### Typed execution states
@@ -984,6 +994,13 @@ sequence（步骤标识，最多 16 个）× concurrency（1..64）× availabili
 `gate-blocked`；版本 × SafeMode 对照单独记录 bucket 变化、仅签名漂移和不可比较的
 cell。所有产物都是 `claim_status=not-a-finding` 的研究证据，不得自动升级 G4/G5；
 前置条件或 harness 缺口必须保留为缺口，不能转成负面结论。
+
+同一适配器也适用于普通 Java 和 Shell S4 PoC：按候选、PoC 和执行上下文将 cell
+分组为有界 execution template，生成稳定 fixture id；artifact 只能保存脱敏元数据和
+参数 digest，不能复制原始参数或进程输出。复用隔离矩阵 runner 做有限重放与版本 ×
+SafeMode 对照，聚合结果写入 `S4/runtime-lab.json`，并从 S4 verification summary
+关联到候选。所有重放/差分结果仍必须是 `claim_status=not-a-finding`；缺少基线、服务、
+runtime 或 harness 时必须保留为显式缺口。
 
 所有 cell 都保留，包括 harness error 和负向观测。
 

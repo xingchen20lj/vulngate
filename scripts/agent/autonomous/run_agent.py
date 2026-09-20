@@ -57,6 +57,8 @@ from ..tools.project_profile import build_project_profile
 from ..tools.experiment_planner import plan_candidate_experiments
 from ..tools.experiment import capability_contract_from_candidate
 from ..tools.research_strategies import composite_chain_candidates
+from ..tools.s4_runtime_lab import (merge_runtime_lab_artifacts,
+                                    run_s4_runtime_lab)
 from ..tools.target_rules import collect_target_rule_hits, composite_chain_hints
 from ..tools.public_scan import scan_all
 from ..tools.seeds import load_seeds, seed_reference_block
@@ -317,6 +319,7 @@ def prepare_target(root: Path, name: str, target_dir: Path) -> TargetConfig:
         "target_urls": target_urls,
         "scope_constraints": scope_constraints,
         "upstream_repo": "",
+        "runtime_lab": {},
         "jars": [{"version": "local", "path": jars[0]}] if jars else [],
         "deps": [],
         "source_dirs": source_dirs,
@@ -1018,6 +1021,7 @@ def _verify_web_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
         log_path=ctx.root / "state" / ctx.cfg.name
         / ("round-%02d" % round_no) / "approval-log.jsonl")
     runner = ShellMatrixRunner(ctx.root, ctx.cfg.name, round_no, approval=approval)
+    results: Dict[str, List[Dict[str, Any]]] = {}
     try:
         results = runner.run_manifest([spec])
         cells, convergence = converge_s4_cells(
@@ -1050,9 +1054,22 @@ def _verify_web_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
         summary = summarize_candidate(cells)
         summary["harness_error"] = "%s: %s" % (type(exc).__name__, exc)
         summary["s4_result_sources"] = convergence["sources"]
+    try:
+        runtime_lab = run_s4_runtime_lab(
+            ctx.root, ctx.cfg.name, round_no, ctx.cfg, [cand], [], [spec], {},
+            baseline_results=results, approval=approval,
+            version_universe=sorted(ctx.cfg.target_urls))
+    except Exception as exc:
+        runtime_lab = {
+            "schema_version": "runtime-lab-v1", "scope": "ordinary-s4",
+            "status": "run-failed",
+            "reason": "%s: %s" % (type(exc).__name__, str(exc)[:240]),
+            "fixtures": [], "claim_status": "not-a-finding",
+        }
     conclusion = _derive(summary, cand, cells)
     return {"candidate": cand, "audit": audit, "summary": summary,
-            "conclusion": conclusion, "spec": spec}
+            "conclusion": conclusion, "spec": spec,
+            "runtime_lab": runtime_lab}
 
 
 def poc_consistency(cand: Dict[str, Any], src_text: str) -> List[str]:
@@ -1181,6 +1198,7 @@ def verify_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
         / ("round-%02d" % round_no) / "approval-log.jsonl")
     runner = JavaMatrixRunner(ctx.root, ctx.cfg.name, round_no, approval=approval)
     cells: List[Dict[str, Any]] = []
+    results: Dict[str, List[Dict[str, Any]]] = {}
     try:
         results = runner.run_manifest([spec], ctx.jars_by_version())
         cells, convergence = converge_s4_cells(
@@ -1234,9 +1252,22 @@ def verify_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
         summary = summarize_candidate(cells)
         summary["harness_error"] = "%s: %s" % (type(exc).__name__, exc)
         summary["s4_result_sources"] = convergence["sources"]
+    try:
+        runtime_lab = run_s4_runtime_lab(
+            ctx.root, ctx.cfg.name, round_no, ctx.cfg, [cand], [spec], [],
+            ctx.jars_by_version(), baseline_results=results, approval=approval,
+            version_universe=sorted(ctx.jars_by_version()))
+    except Exception as exc:
+        runtime_lab = {
+            "schema_version": "runtime-lab-v1", "scope": "ordinary-s4",
+            "status": "run-failed",
+            "reason": "%s: %s" % (type(exc).__name__, str(exc)[:240]),
+            "fixtures": [], "claim_status": "not-a-finding",
+        }
     conclusion = _derive(summary, cand, cells)
     return {"candidate": cand, "audit": audit, "summary": summary,
-            "conclusion": conclusion, "spec": spec}
+            "conclusion": conclusion, "spec": spec,
+            "runtime_lab": runtime_lab}
 
 
 def _verify_fuzz_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
@@ -1612,6 +1643,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                         "surface": cand.get("surface"),
                         "conclusion": row["conclusion"],
                         "evidence": row.get("summary", {}),
+                        "runtime_lab": row.get("runtime_lab"),
                     })
                 print("  %s -> %s" % (cand["candidate_id"], row["conclusion"]))
         serializable = []
@@ -1627,6 +1659,13 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             }
             for r in rows if (r.get("summary") or {}).get("authz_results")
         ])
+    lab_artifacts = [
+        row.get("runtime_lab") for row in rows + excluded
+        if isinstance(row.get("runtime_lab"), dict)
+    ]
+    ctx.write_artifact(
+        round_no, "S4", "runtime-lab.json",
+        merge_runtime_lab_artifacts(lab_artifacts, scope="autonomous-s4"))
 
     # ---- S5: Novelty (resumable) --------------------------------------
     s5 = store.load_stage("S5")

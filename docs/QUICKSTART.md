@@ -58,6 +58,12 @@ The host agent will:
 Results land under `state/<target>/`, `reports/<target>/`, and
 `ledger/<target>/`.
 
+Ordinary S4 PoCs also produce a bounded replay/differential artifact at
+`S4/runtime-lab.json`. Set `runtime_lab.enabled=false` in the target config (or
+on one candidate) for an intentionally non-repeatable PoC; otherwise stable
+replay, version × SafeMode differences, and harness gaps remain separate from
+G4/G5.
+
 ## 4. Run the pipeline (autonomous mode)
 
 When you want a hands-off run with your own LLM API key:

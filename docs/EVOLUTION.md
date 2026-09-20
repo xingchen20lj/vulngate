@@ -55,6 +55,13 @@ Java matrix and compared across configured versions and SafeMode states.
 changes, signature-only drift, and precondition/harness gaps. These records are
 research evidence only and remain `claim_status=not-a-finding`.
 
+The same adapter now covers ordinary Java and shell S4 PoCs. It groups cells
+into stable execution templates, stores only bounded metadata and argument
+digests, and reuses the isolated matrix runners for repeated replay and
+version × SafeMode comparison. The result is persisted as
+`S4/runtime-lab.json` and linked from the ordinary S4 summary; raw arguments
+and process output are not copied into that artifact.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

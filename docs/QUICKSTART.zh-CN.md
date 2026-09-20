@@ -87,6 +87,10 @@ Feature）——它决定了每一条发现的前置分级。
 （也可写 `java_bin`）。VulnGate 会用该 cell 的 `java` 和同一 JDK 的 `javac`，并在
 `cells.json` 记录实际路径与版本；找不到或版本不匹配时只记录前置不可用，不会假装用默认 JDK。
 
+普通 S4 PoC 还会生成有界重放/差分产物 `S4/runtime-lab.json`。如果某个 PoC
+有意不可重复，可在目标配置中设置 `runtime_lab.enabled=false`，或在候选上关闭；默认
+适配器会把稳定重放、版本 × SafeMode 差异和 harness 缺口与 G4/G5 结论分开保存。
+
 ## 5. 运行管线（自主模式）
 
 需要无人值守运行，并愿意使用自己的 LLM API Key 时：

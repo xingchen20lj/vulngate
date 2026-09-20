@@ -1,0 +1,214 @@
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from agent.orchestrator.config import TargetConfig  # noqa: E402
+from agent.orchestrator.stages import StageContext, run_s4  # noqa: E402
+from agent.tools.build import MatrixCell, POCSpec, ShellPOCSpec  # noqa: E402
+from agent.tools.s4_runtime_lab import (  # noqa: E402
+    build_s4_fixture,
+    merge_runtime_lab_artifacts,
+    normalize_matrix_record,
+    run_s4_runtime_lab,
+)
+
+
+class S4RuntimeLabTests(unittest.TestCase):
+    def test_fixture_is_stable_and_does_not_persist_raw_arguments(self):
+        cell = MatrixCell(
+            version="1.1", safe_mode=False,
+            args=["--body", "token=super-secret-value"],
+            authz={"case_id": "owner", "role": "user"},
+        )
+        spec = POCSpec(
+            candidate_id="C1", class_name="Probe", src="Probe.java",
+            cells=[cell], entry="parse", input_shape="json",
+        )
+        candidate = {"candidate_id": "C1", "entry": "parse"}
+        first = build_s4_fixture(candidate, spec, cell, "java", 0)
+        second = build_s4_fixture(candidate, spec, cell, "java", 0)
+        self.assertEqual(first["fixture_id"], second["fixture_id"])
+        self.assertEqual(first["digest"], second["digest"])
+        encoded = json.dumps(first, ensure_ascii=False)
+        self.assertNotIn("super-secret-value", encoded)
+        self.assertNotIn("token=", encoded)
+        self.assertEqual(first["claim_status"], "not-a-finding")
+
+    def test_matrix_adapter_runs_replay_and_version_safe_mode_cells(self):
+        class FakeJavaRunner:
+            calls = []
+
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def run_manifest(self, specs, jars):
+                spec = specs[0]
+                self.calls.append((spec.candidate_id, spec.cells, jars))
+                rows = []
+                for cell in spec.cells:
+                    observations = {"PARSED": "ok"}
+                    if cell.version == "1.0" and cell.safe_mode:
+                        observations = {"ERROR": "RejectedFixture"}
+                    rows.append({
+                        "candidate_id": spec.candidate_id,
+                        "poc_class": spec.class_name,
+                        "version": cell.version,
+                        "safe_mode": cell.safe_mode,
+                        "precondition": cell.precondition,
+                        "returncode": 0,
+                        "timed_out": False,
+                        "observations": observations,
+                    })
+                return {spec.candidate_id: rows}
+
+        cfg = TargetConfig(
+            name="lab", discovery_date="2026-09-21",
+            runtime_lab={"max_fixtures": 1, "replay_runs": 2},
+        )
+        candidate = {"candidate_id": "C1", "entry": "parse",
+                     "input_shape": "json"}
+        base = MatrixCell(version="1.1", safe_mode=False,
+                          args=["--fixture", "fixed"])
+        spec = POCSpec(candidate_id="C1", class_name="Probe", src="Probe.java",
+                       cells=[base], entry="parse", input_shape="json")
+        baseline = {
+            "C1": [{
+                "poc_class": "Probe", "version": "1.1",
+                "safe_mode": False, "precondition": "none",
+                "returncode": 0, "timed_out": False,
+                "observations": {"PARSED": "ok"},
+            }]
+        }
+        FakeJavaRunner.calls = []
+        with tempfile.TemporaryDirectory() as td, patch(
+                "agent.tools.s4_runtime_lab.JavaMatrixRunner", FakeJavaRunner):
+            artifact = run_s4_runtime_lab(
+                Path(td), "lab", 1, cfg, [candidate], [spec], [],
+                {"1.0": [Path("a.jar")], "1.1": [Path("b.jar")]},
+                baseline_results=baseline,
+                version_universe=["1.0", "1.1"],
+            )
+
+        self.assertEqual(artifact["status"], "completed")
+        self.assertEqual(artifact["fixture_count"], 1)
+        item = artifact["fixtures"][0]
+        self.assertEqual(item["replay"]["status"], "stable")
+        self.assertTrue(item["reproduces_expected"])
+        self.assertEqual(len(FakeJavaRunner.calls), 2)
+        self.assertEqual(len(FakeJavaRunner.calls[0][1]), 2)
+        self.assertEqual(len(FakeJavaRunner.calls[1][1]), 4)
+        self.assertEqual(FakeJavaRunner.calls[1][2]["1.0"], [Path("a.jar")])
+        self.assertEqual(item["claim_status"], "not-a-finding")
+
+    def test_target_can_disable_non_repeatable_fixture_lab(self):
+        cfg = TargetConfig(
+            name="disabled-lab", discovery_date="2026-09-21",
+            runtime_lab={"enabled": False},
+        )
+        cell = MatrixCell(version="local", safe_mode=False)
+        spec = POCSpec(candidate_id="C1", class_name="Probe", src="Probe.java",
+                       cells=[cell])
+        artifact = run_s4_runtime_lab(
+            Path(tempfile.gettempdir()), "disabled-lab", 1, cfg,
+            [{"candidate_id": "C1"}], [spec], [], {},
+        )
+        self.assertEqual(artifact["status"], "disabled")
+        self.assertEqual(artifact["claim_status"], "not-a-finding")
+
+    def test_shell_adapter_reuses_loopback_runner(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "poc" / "shell-lab" / "round-01" / "src"
+            src.mkdir(parents=True)
+            (src / "probe.sh").write_text(
+                "#!/bin/sh\nprintf 'PARSED=ok\\n'\n", encoding="utf-8")
+            cfg = TargetConfig(
+                name="shell-lab", discovery_date="2026-09-21",
+                runtime_lab={"max_fixtures": 1, "replay_runs": 2},
+            )
+            cell = MatrixCell(version="local", safe_mode=False)
+            spec = ShellPOCSpec(
+                candidate_id="C1", script="probe.sh", cells=[cell],
+                urls={"local": ""},
+            )
+            artifact = run_s4_runtime_lab(
+                root, "shell-lab", 1, cfg, [{"candidate_id": "C1"}],
+                [], [spec], {}, version_universe=["local"],
+            )
+        self.assertEqual(artifact["status"], "completed")
+        self.assertEqual(artifact["fixtures"][0]["replay"]["status"], "stable")
+
+    def test_normalization_and_merge_retain_typed_gaps(self):
+        row = normalize_matrix_record({
+            "version": "1.0", "safe_mode": True,
+            "precondition_status": "precondition-unavailable",
+            "harness_error": "missing JDK",
+        }, "s4fx-1", "replay")
+        self.assertEqual(row["bucket"], "precondition-unavailable")
+        self.assertEqual(row["claim_status"], "not-a-finding")
+
+        merged = merge_runtime_lab_artifacts([{
+            "status": "completed", "replay_runs": 2, "version_count": 2,
+            "candidate_status": {"C1": {"fixture_count": 1}},
+            "fixtures": [{"fixture": {"candidate_id": "C1"}}],
+        }, {
+            "status": "run-failed", "fixtures": [],
+        }])
+        self.assertEqual(merged["status"], "completed-with-gaps")
+        self.assertEqual(merged["fixture_count"], 1)
+        self.assertEqual(merged["claim_status"], "not-a-finding")
+
+    def test_config_pipeline_persists_ordinary_s4_lab_artifact(self):
+        class FakeJavaRunner:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def run_manifest(self, specs, _jars):
+                spec = specs[0]
+                return {spec.candidate_id: [{
+                    "candidate_id": spec.candidate_id,
+                    "poc_class": spec.class_name,
+                    "version": cell.version,
+                    "safe_mode": cell.safe_mode,
+                    "precondition": cell.precondition,
+                    "returncode": 0,
+                    "timed_out": False,
+                    "observations": {"PARSED": "ok"},
+                } for cell in spec.cells]}
+
+        cfg = TargetConfig(
+            name="pipeline-lab", discovery_date="2026-09-21",
+            jars=[{"version": "1.0", "path": "missing.jar"}],
+            candidates=[{
+                "candidate_id": "C1", "surface": "parser",
+                "pocs": [{
+                    "class_name": "Probe", "src": "Probe.java",
+                    "cells": [{"version": "1.0", "safe_mode": False}],
+                }],
+            }],
+        )
+        with tempfile.TemporaryDirectory() as td, patch(
+                "agent.orchestrator.stages.JavaMatrixRunner", FakeJavaRunner), \
+                patch("agent.tools.s4_runtime_lab.JavaMatrixRunner", FakeJavaRunner):
+            result = run_s4(StageContext(Path(td), "pipeline-lab", 1, cfg,
+                                         offline=True))
+            artifact_path = (Path(td) / "state" / "pipeline-lab" /
+                             "round-01" / "S4" / "runtime-lab.json")
+            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result["runtime_lab"]["scope"], "ordinary-s4")
+        self.assertEqual(artifact["fixture_count"], 1)
+        self.assertEqual(
+            result["summaries"]["C1"]["runtime_lab"]["claim_status"],
+            "not-a-finding")
+
+
+if __name__ == "__main__":
+    unittest.main()
