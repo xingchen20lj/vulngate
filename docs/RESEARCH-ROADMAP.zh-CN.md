@@ -22,6 +22,7 @@
 | 5 | 运行时研究实验室与差分验证 | 已实现（定向 fuzz + 普通 S4） | `fuzz-corpus.json`、`FUZZ/runtime-lab.json`、`S4/runtime-lab.json`、版本/安全模式差分、缩减 reproducer | 固定输入可重复重放；差分、签名漂移与前置/harness 失败分开记录 |
 | 6 | 研究记忆与反馈学习 | 已实现（上下文 + 可回放人工复核） | `state/<target>/research-memory.json`、`state/<target>/review-feedback.json`、`S8/research-memory.json`、`S8/review-feedback.json`、`S4/runtime-lab.json`、`S4/processes.json`、配置快照、authz fixture、修复变体提示 | 新轮次能利用旧证据；服务/配置/授权/修复上下文可复现；人工复核可回放；环境缺口不被当成负证据；重复实验只降权不删除 |
 | 7 | 专家级评测基准 | 已实现（核心契约 + 确定性评分器） | `benchmarks/research-benchmark-v1.json`、`benchmarks/research-benchmark-sample-run.json`、`benchmark-result.json` | 同时衡量负向安全、环境缺口保真度、重复率、证据完整度、结论解析和严重性校准 |
+| 8 | 评测驱动的自适应研究闭环 | 已实现（有界反馈接入） | `research-benchmark-feedback-v1`、调度权重快照、`benchmark-guidance` 实验提示 | 评测指标只能改变下一轮研究优先级和必需观测；默认行为可回归，且不改变 G4/G5/CVSS |
 
 ## 当前阶段：可证伪实验规划
 
@@ -157,10 +158,36 @@ python3 scripts/agent_cli.py benchmark \
 所有结果标记 `claim_status=not-a-finding`。评测只约束工程改进方向：负向安全、证据完整度或
 严重性校准下降时，必须回到候选生成、实验计划、调度或结论规则修正，不能用调高阈值掩盖问题。
 
+## 阶段 8 初步实现：评测驱动的自适应研究闭环
+
+评测结果现在可以显式转换为 `research-benchmark-feedback-v1`。反馈只保留有界的指标快照、固定
+告警码、最多 6 点的七因子权重微调，以及实验计划需要补齐的观测/证伪条件；不会复制 case、PoC、
+命令、stdout/stderr，也不会携带或自动改写 CVSS。
+
+生成反馈并接入下一轮调度：
+
+```bash
+python3 scripts/agent_cli.py benchmark \
+  --manifest benchmarks/research-benchmark-v1.json \
+  --run benchmarks/research-benchmark-sample-run.json \
+  --out state/benchmark-result.json \
+  --feedback-out state/research-benchmark-feedback.json --json
+
+python3 scripts/agent_cli.py schedule <target> \
+  --candidates state/<target>/round-01/S2/candidate-matrix.json \
+  --benchmark-result state/research-benchmark-feedback.json \
+  --slots 8 --round 2 --json
+```
+
+调度计划会落盘 `benchmark_feedback`、实际 `weight_adjustments` 和候选级反馈证据；S2
+`experiment-plans.json` 会追加 `benchmark_guidance`。配置驱动/自治管线可在目标配置中显式提供
+`benchmark_feedback_path`（或内嵌 `benchmark_feedback`），从而复用同一反馈。反馈只影响排序、
+prompt 和研究清单，不会删除候选、确认漏洞、填补运行时证据或绕过 G4/G5。
+
 ## 后续优先级
 
-1. 将 benchmark 结果接入候选生成、实验计划和调度权重，形成可量化的持续改进闭环。
-2. 扩展真实/合成变体集，覆盖更多 Web、协议、云、移动端和 native 研究面，同时保持负结果
+1. 扩展真实/合成变体集，覆盖更多 Web、协议、云、移动端和 native 研究面，同时保持负结果
    与环境缺口分离。
+2. 将反馈与真实项目的多轮历史、人工复核和变体覆盖率做纵向对比，校准告警阈值但不放宽证据闸门。
 
 每一阶段都必须同时更新实现、技能契约、回归测试和 CHANGELOG；只有测试、artifact schema 和安全边界一起稳定后，才适合提交为一个独立变更。

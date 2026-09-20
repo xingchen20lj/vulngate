@@ -16,7 +16,8 @@ Usage:
   agent_cli.py cvss --vector <CVSS:3.1/...> [--tier <tier>] [--implicit-default-on]
   agent_cli.py ledger --workspace <dir> --target <name> --round <N> --entries <json>
   agent_cli.py deps --target <dir> [--out <report.md>] [--offline] [--cache <dir>]
-  agent_cli.py benchmark --manifest <gold.json> [--run <run.json>] [--out <result.json>] [--json]
+  agent_cli.py benchmark --manifest <gold.json> [--run <run.json>] [--out <result.json>]
+                           [--feedback-out <feedback.json>] [--json]
   agent_cli.py review <target> --workspace <dir> (--research-key <rk>|--candidate-id <id>)
                            --status <accepted|rejected|needs-evidence|scope-corrected>
                            [--reason-code <code>] [--note <text>] [--evidence-ref <ref>]
@@ -530,6 +531,7 @@ def cmd_deps(args: argparse.Namespace) -> int:
 def cmd_benchmark(args: argparse.Namespace) -> int:
     """Score a deterministic research run against a gold benchmark manifest."""
     from agent.evaluation.benchmark import (evaluate_benchmark,
+                                             derive_benchmark_feedback,
                                              load_benchmark_json,
                                              normalize_manifest,
                                              render_benchmark_text,
@@ -554,6 +556,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
             else:
                 runs.append(loaded)
         result = evaluate_benchmark(manifest, runs if runs else None)
+        feedback = derive_benchmark_feedback(result)
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         _out({"error": "%s: %s" % (type(exc).__name__, exc)})
         return 2
@@ -563,15 +566,25 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False),
                             encoding="utf-8")
+    if args.feedback_out:
+        feedback_path = Path(args.feedback_out)
+        feedback_path.parent.mkdir(parents=True, exist_ok=True)
+        feedback_path.write_text(json.dumps(feedback, indent=2, ensure_ascii=False),
+                                 encoding="utf-8")
     if args.json:
         payload = dict(result)
+        payload["feedback"] = feedback
         if args.out:
             payload["written_to"] = str(Path(args.out).resolve())
+        if args.feedback_out:
+            payload["feedback_written_to"] = str(Path(args.feedback_out).resolve())
         _out(payload)
     else:
         print(render_benchmark_text(result))
         if args.out:
             print("  written_to: %s" % Path(args.out).resolve())
+        if args.feedback_out:
+            print("  feedback_written_to: %s" % Path(args.feedback_out).resolve())
     return 0
 
 
@@ -810,6 +823,8 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     """
     from agent.analysis import scheduler as sched
     from agent.analysis.inventory import CoverageStore
+    from agent.evaluation.benchmark import (benchmark_feedback_from_input,
+                                             load_benchmark_json)
 
     workspace = Path(args.workspace).resolve()
     store = CoverageStore(workspace, args.target)
@@ -824,9 +839,22 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     if args.limit_pool:
         pool = pool[:args.limit_pool]
 
+    benchmark_feedback = {}
+    if args.benchmark_result:
+        try:
+            benchmark_input = load_benchmark_json(Path(args.benchmark_result))
+            benchmark_feedback = benchmark_feedback_from_input(benchmark_input)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            _out({"error": "benchmark result is not valid JSON: %s" % exc})
+            return 2
+        if not benchmark_feedback:
+            _out({"error": "benchmark result has no supported metrics/feedback",
+                  "path": str(Path(args.benchmark_result).resolve())})
+            return 2
+
     selected, plan, note = sched.round_selection(
         workspace, args.target, pool, slots, round_no=args.round,
-        refresh=not args.no_refresh)
+        refresh=not args.no_refresh, benchmark_feedback=benchmark_feedback)
     if plan is None:
         _out({"error": note, "target": args.target,
               "hint": "run S1 or `agent_cli coverage --rebuild` first"})
@@ -853,7 +881,8 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     if note:
         print(("!! %s" if args.lang == "zh" else "!! %s") % note)
     if args.prompt:
-        context = sched.ScheduleContext.from_store(store)
+        context = sched.ScheduleContext.from_store(
+            store, benchmark_feedback=benchmark_feedback)
         print("")
         print(sched.prompt_coverage_block(context, plan=plan))
     return 0
@@ -1255,6 +1284,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="run JSON; repeat for independent runs")
     bm.add_argument("--out", default=None,
                     help="write the bounded result JSON to this path")
+    bm.add_argument("--feedback-out", default=None,
+                    help="write deterministic scheduler/planner feedback JSON")
     bm.add_argument("--json", action="store_true",
                     help="machine-readable output")
     bm.set_defaults(fn=cmd_benchmark)
@@ -1343,6 +1374,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="score only the first N pool entries (debug aid)")
     sch.add_argument("--no-refresh", action="store_true",
                      help="skip the residual sweep before scoring (spec §14)")
+    sch.add_argument("--benchmark-result", default=None,
+                     help="benchmark result/feedback JSON; affects only bounded "
+                          "S2 weights and prompt guidance")
     sch.add_argument("--prompt", action="store_true",
                      help="also print the spec §15 structured prompt block")
     sch.add_argument("--json", action="store_true", help="machine-readable output")

@@ -97,6 +97,7 @@ Evidence Gates
 - **跨轮研究记忆** —— S8 将稳定机制键、重放/差分状态、环境缺口和 next probe 写入 `state/<target>/research-memory.json`；S2 据此降低完全重复探针、优先处理可行动差异，但不会把记忆升级成漏洞结论。
 - **人工复核反馈闭环** —— `agent_cli.py review` 按稳定 research key 记录 accepted/rejected/needs-evidence/scope-corrected；S8 回放到目标记忆，S2 只据此调整后续优先级，不替代 G4/G5。
 - **研究质量评测基准** —— `agent_cli.py benchmark` 对 gold case/run 计算观测覆盖、负向安全、环境缺口保真度、重复率、证据完整度、决策稳定性和严重性校准；结果保持 `not-a-finding`。
+- **评测驱动研究闭环** —— `research-benchmark-feedback-v1` 将指标转换为有界告警、调度因子微调和实验观测提示；`schedule --benchmark-result` 或目标配置显式接入下一轮，但不会改变漏洞结论、CVSS 或 G4/G5。
 - **逐 cell 运行时前置** —— 声明需要的 JDK/runtime 必须真实可用，否则记录 `precondition-unavailable`，不会静默使用其他运行时替代。
 - **S4 证据收敛** —— 已落盘矩阵证据不会被 Agent/spawn 超时元数据覆盖。
 - **保守 Novelty** —— 公开查询失败会保留为不确定状态，而不会被转化为“未发现公开记录”。
@@ -123,7 +124,8 @@ python3 scripts/agent_cli.py controls demo --workspace /path/to/audit --show-can
 python3 scripts/agent_cli.py differential demo --workspace /path/to/audit --show-candidates
 python3 scripts/agent_cli.py capability demo --workspace /path/to/audit --show-candidates
 python3 scripts/agent_cli.py benchmark --manifest benchmarks/research-benchmark-v1.json \
-  --run benchmarks/research-benchmark-sample-run.json --json
+  --run benchmarks/research-benchmark-sample-run.json \
+  --feedback-out state/research-benchmark-feedback.json --json
 bash macos/run-audit.sh /Applications/Target.app /path/to/native-audit
 ```
 

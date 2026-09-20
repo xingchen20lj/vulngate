@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from agent.tools.experiment_planner import plan_candidate_experiments  # noqa: E402
+from agent.evaluation.benchmark import BENCHMARK_FEEDBACK_SCHEMA_VERSION  # noqa: E402
 from agent.autonomous.run_agent import (  # noqa: E402
     AutoCtx, _attach_experiment_plans,
 )
@@ -16,6 +17,43 @@ from agent.orchestrator.config import TargetConfig  # noqa: E402
 
 
 class ExperimentPlannerTests(unittest.TestCase):
+    def test_benchmark_feedback_adds_bounded_observation_without_changing_claims(self):
+        feedback = {
+            "schema_version": BENCHMARK_FEEDBACK_SCHEMA_VERSION,
+            "benchmark_id": "planner-feedback",
+            "alerts": [{
+                "code": "severity-overstatement-high", "priority": "medium",
+                "metric": "severity_overstatement_rate", "value": 0.5,
+                "threshold": 0.2, "direction": "gt",
+                "action": "tighten-severity-calibration",
+            }],
+            "weight_deltas": {"evidence_quality": 2,
+                              "sink_impact": -1,
+                              "coverage_novelty": -1},
+            "planner_guidance": {
+                "strategy_tags": ["benchmark-severity-calibration"],
+                "required_observations": [
+                    "severity must be consistent with observed typed effect and precondition tier",
+                ],
+                "falsifiers": [
+                    "an unobserved stronger effect keeps the conservative severity",
+                ],
+            },
+            "claim_status": "not-a-finding",
+        }
+        result = plan_candidate_experiments(
+            {"candidate_id": "B-FEEDBACK", "surface": "command effect"},
+            benchmark_feedback=feedback)
+        baseline = next(item for item in result["plans"]
+                        if item["kind"] == "baseline")
+        self.assertIn("benchmark-severity-calibration", result["strategy_tags"])
+        self.assertIn("severity must be consistent with observed typed effect and precondition tier",
+                      baseline["required_observations"])
+        self.assertEqual("planner-feedback",
+                         result["benchmark_guidance"]["source_benchmark_id"])
+        self.assertEqual("not-a-finding", result["provenance"]["claim_status"])
+        self.assertNotIn("cvss", str(result).lower())
+
     def test_race_dos_plan_requires_actual_availability_evidence(self):
         candidate = {
             "candidate_id": "R1",

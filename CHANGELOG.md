@@ -72,6 +72,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   unjustified research-key repeats, evidence completeness, decision stability,
   and CVSS/severity calibration; benchmark output remains
   `claim_status=not-a-finding`.
+- Added deterministic `research-benchmark-feedback-v1`: benchmark metrics can
+  produce capped alert codes, signed scheduler-factor deltas, and bounded
+  experiment observations. CLI scheduling, config-driven S2, and the
+  autonomous loop accept the feedback explicitly; plans and schedules record
+  the source and actual adjustments while preserving default behavior and
+  never changing G4/G5 conclusions or CVSS.
 
 ### Documentation
 
@@ -91,6 +97,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   statuses/reason codes, and its separation from G4/G5 conclusions.
 - Documented the benchmark manifest/run contract and the metrics that constrain
   planner, scheduler and conclusion-rule regressions.
+- Documented the benchmark feedback artifact, `--feedback-out`, explicit
+  `schedule --benchmark-result` wiring, target-config opt-in, and its strict
+  `not-a-finding` boundary.
 
 ## [1.1.0] - 2026-09-16
 

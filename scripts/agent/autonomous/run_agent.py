@@ -427,6 +427,7 @@ class AutoCtx:
         self.carryover: List[Dict[str, Any]] = []
         self.stop_file = root / "state" / cfg.name / "STOP"
         self._public_scan_cache: Optional[Dict[str, Any]] = None
+        self._benchmark_feedback_cache: Optional[Dict[str, Any]] = None
 
     def public_disclosures(self) -> Dict[str, Any]:
         """Memoized internet disclosure scan (plan 2.7); [] when offline."""
@@ -448,6 +449,25 @@ class AutoCtx:
 
     def jars_by_version(self) -> Dict[str, List[Path]]:
         return self.cfg.resolve_jars(self.root)
+
+    def benchmark_feedback(self) -> Dict[str, Any]:
+        """Load only explicitly configured benchmark feedback for this target."""
+        if self._benchmark_feedback_cache is not None:
+            return dict(self._benchmark_feedback_cache)
+        from ..evaluation.benchmark import benchmark_feedback_from_input
+
+        value: Any = getattr(self.cfg, "benchmark_feedback", {}) or {}
+        configured_path = getattr(self.cfg, "benchmark_feedback_path", None)
+        if configured_path:
+            path = Path(configured_path)
+            if not path.is_absolute():
+                path = self.root / path
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                value = {}
+        self._benchmark_feedback_cache = benchmark_feedback_from_input(value)
+        return dict(self._benchmark_feedback_cache)
 
 
 def _fmt_entries(entries: List[Dict[str, Any]]) -> str:
@@ -523,8 +543,10 @@ def _coverage_prompt_block(ctx: AutoCtx, round_no: int) -> str:
         from ..memory.research import load_research_memory
         store = CoverageStore(ctx.root, ctx.cfg.name)
         memory = load_research_memory(ctx.root, ctx.cfg.name)
+        benchmark_feedback = ctx.benchmark_feedback()
         sctx = sched.ScheduleContext.from_store(
-            store, research_memory=memory.get("entries") or [])
+            store, research_memory=memory.get("entries") or [],
+            benchmark_feedback=benchmark_feedback)
         if not sctx.entries and not sctx.sinks:
             return ""
         plan = sched.load_schedule(store, round_no)
@@ -547,7 +569,8 @@ def schedule_candidates(ctx: AutoCtx, round_no: int,
     from ..analysis import scheduler as sched
     selected, plan, note = sched.round_selection(
         ctx.root, ctx.cfg.name, candidates, ctx.max_candidates,
-        round_no=round_no, pinned=pinned or ())
+        round_no=round_no, pinned=pinned or (),
+        benchmark_feedback=ctx.benchmark_feedback())
     if plan is not None:
         print("[round-%02d] schedule: %d/%d selected, %s"
               % (round_no, len(selected), len(candidates),
@@ -572,9 +595,14 @@ def _attach_experiment_plans(ctx: AutoCtx, round_no: int,
                        if j.get("version")})
     selected_ids = {str(c.get("candidate_id")) for c in candidates}
     plan_candidates = pool if pool is not None else candidates
+    benchmark_feedback = ctx.benchmark_feedback()
+    if benchmark_feedback:
+        ctx.write_artifact(round_no, "S2", "benchmark-feedback.json",
+                           benchmark_feedback)
     plans = []
     for candidate in plan_candidates:
-        research_plan = plan_candidate_experiments(candidate, versions)
+        research_plan = plan_candidate_experiments(
+            candidate, versions, benchmark_feedback=benchmark_feedback)
         candidate["experiment_plan"] = research_plan
         plan_row = dict(research_plan)
         plan_row["scheduled"] = (str(candidate.get("candidate_id")) in selected_ids

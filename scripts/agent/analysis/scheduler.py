@@ -41,6 +41,11 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import coverage as cov
 from .inventory import CoverageStore, load_inventory
+from ..evaluation.benchmark import (
+    BENCHMARK_FEEDBACK_FACTORS,
+    MAX_FEEDBACK_WEIGHT_DELTA,
+    normalize_benchmark_feedback,
+)
 from ..memory.research import (
     STATE_DECISION_RECORDED,
     STATE_REVIEW_ACCEPTED,
@@ -85,6 +90,71 @@ DEFAULT_QUOTA: Dict[str, int] = {
 #: Priority bands, as a fraction of the achievable total.
 BAND_HIGH = 0.65
 BAND_MEDIUM = 0.40
+
+
+def _safe_weight(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _normalize_weight_total(raw: Dict[str, int], target: int) -> Dict[str, int]:
+    """Scale integer weights back to the original total deterministically."""
+    names = list(FACTOR_ORDER)
+    if target <= 0:
+        return {name: 0 for name in names}
+    total = sum(max(0, int(raw.get(name, 0))) for name in names)
+    if total <= 0:
+        return {name: 0 for name in names}
+    floors: Dict[str, int] = {}
+    fractions: List[Tuple[float, int, str]] = []
+    for index, name in enumerate(names):
+        exact = max(0, int(raw.get(name, 0))) * target / float(total)
+        floor_value = int(exact)
+        floors[name] = floor_value
+        fractions.append((exact - floor_value, -index, name))
+    remainder = target - sum(floors.values())
+    for _fraction, _order, name in sorted(fractions, reverse=True)[:max(0, remainder)]:
+        floors[name] += 1
+    return floors
+
+
+def apply_benchmark_feedback_weights(
+        weights: Optional[Dict[str, int]],
+        benchmark_feedback: Optional[Dict[str, Any]],
+        ) -> Tuple[Dict[str, int], Dict[str, int]]:
+    """Apply bounded feedback while preserving the caller's weight scale.
+
+    A feedback artifact can only move existing scheduler factors by a small
+    signed delta.  Unknown factors and oversized values are ignored/clamped;
+    the resulting weights are rescaled to the original total so benchmark
+    feedback cannot silently change the meaning of a score from a percentage
+    into an arbitrary raw number.
+    """
+    provided = dict(weights or DEFAULT_FACTOR_WEIGHTS)
+    feedback = normalize_benchmark_feedback(benchmark_feedback or {})
+    if not feedback:
+        return provided, {}
+    base = {name: _safe_weight(provided.get(name, 0))
+            for name in FACTOR_ORDER}
+    target = sum(base.values())
+    requested = feedback.get("weight_deltas") or {}
+    adjusted = dict(base)
+    for name in FACTOR_ORDER:
+        # Parse the signed value explicitly so a balanced feedback object stays
+        # explainable instead of silently dropping negative deltas.
+        try:
+            signed = int(requested.get(name, 0))
+        except (TypeError, ValueError):
+            signed = 0
+        signed = max(-MAX_FEEDBACK_WEIGHT_DELTA,
+                     min(MAX_FEEDBACK_WEIGHT_DELTA, signed))
+        adjusted[name] = max(0, base[name] + signed)
+    effective = _normalize_weight_total(adjusted, target)
+    actual = {name: effective[name] - base[name]
+              for name in FACTOR_ORDER if effective[name] != base[name]}
+    return effective, actual
 
 # --- coarse category buckets (spec §13.3) ----------------------------------
 
@@ -214,6 +284,8 @@ class ScheduleContext:
     prior_coverage: List[Dict[str, Any]] = field(default_factory=list)
     research_memory: List[Dict[str, Any]] = field(default_factory=list)
     weights: Dict[str, int] = field(default_factory=lambda: dict(DEFAULT_FACTOR_WEIGHTS))
+    benchmark_feedback: Dict[str, Any] = field(default_factory=dict)
+    weight_adjustments: Dict[str, int] = field(default_factory=dict)
 
     #: Indexes built on demand (memoised, never mutated afterwards).
     _flows_by_entry: Optional[Dict[str, List[Dict[str, Any]]]] = None
@@ -229,11 +301,15 @@ class ScheduleContext:
     @classmethod
     def from_store(cls, store: CoverageStore,
                    weights: Optional[Dict[str, int]] = None,
-                   research_memory: Optional[Sequence[Dict[str, Any]]] = None
+                   research_memory: Optional[Sequence[Dict[str, Any]]] = None,
+                   benchmark_feedback: Optional[Dict[str, Any]] = None
                    ) -> "ScheduleContext":
         indices = load_inventory(store)
         reachability = {str(r.get("sink_id")): r
                         for r in indices.get("sink-reachability") or []}
+        feedback = normalize_benchmark_feedback(benchmark_feedback or {})
+        effective_weights, weight_adjustments = apply_benchmark_feedback_weights(
+            weights, feedback)
         return cls(
             entries={str(e.get("entry_id")): e
                      for e in indices.get("entry-index") or []},
@@ -250,7 +326,9 @@ class ScheduleContext:
             prior_coverage=list(indices.get("candidate-coverage") or []),
             research_memory=[item for item in (research_memory or [])
                              if isinstance(item, dict)],
-            weights=dict(weights or DEFAULT_FACTOR_WEIGHTS),
+            weights=effective_weights,
+            benchmark_feedback=feedback,
+            weight_adjustments=weight_adjustments,
         )
 
     # --- lazy indexes ------------------------------------------------------
@@ -1036,6 +1114,15 @@ def score_candidate(candidate: Dict[str, Any], ctx: ScheduleContext,
                     "evidence_refs", "feedback_id"):
             if latest_evidence.get(key) not in (None, "", []):
                 evidence["research_memory"][key] = latest_evidence[key]
+    if ctx.benchmark_feedback:
+        evidence["benchmark_feedback"] = {
+            "benchmark_id": ctx.benchmark_feedback.get("benchmark_id", ""),
+            "alert_codes": [str(item.get("code")) for item in
+                            ctx.benchmark_feedback.get("alerts", [])
+                            if isinstance(item, dict) and item.get("code")][:8],
+            "weight_adjustments": dict(ctx.weight_adjustments),
+            "claim_status": "not-a-finding",
+        }
     return CandidateScore(
         candidate_id=str(candidate.get("candidate_id") or ""),
         category=candidate_category(candidate),
@@ -1076,6 +1163,8 @@ class SchedulePlan:
     coverage: Dict[str, Any] = field(default_factory=dict)
     residual: Dict[str, Any] = field(default_factory=dict)
     weights: Dict[str, int] = field(default_factory=dict)
+    benchmark_feedback: Dict[str, Any] = field(default_factory=dict)
+    weight_adjustments: Dict[str, int] = field(default_factory=dict)
     #: Candidates selected outside the quota because they carry runtime
     #: evidence the static score cannot see (see :func:`stratified_select`).
     pinned: List[str] = field(default_factory=list)
@@ -1088,6 +1177,8 @@ class SchedulePlan:
             "round": self.round_no,
             "slots": self.slots,
             "weights": dict(self.weights),
+            "weight_adjustments": dict(self.weight_adjustments),
+            "benchmark_feedback": self.benchmark_feedback,
             "selected": [s.as_dict() for s in self.selected],
             "deferred": [s.as_dict() for s in self.deferred],
             "pinned": list(self.pinned),
@@ -1230,7 +1321,9 @@ def build_schedule(workspace: Path, target: str,
                    weights: Optional[Dict[str, int]] = None,
                    round_no: int = 0,
                    refresh: bool = True,
-                   pinned: Sequence[str] = ()) -> SchedulePlan:
+                   pinned: Sequence[str] = (),
+                   benchmark_feedback: Optional[Dict[str, Any]] = None
+                   ) -> SchedulePlan:
     """Score, dedupe and select this round's candidates.
 
     Writes ``state/<target>/coverage/schedule-round-NN.json`` (and
@@ -1250,7 +1343,8 @@ def build_schedule(workspace: Path, target: str,
         coverage = residual_sweep(store, workspace, target, round_no)
     memory = load_research_memory(workspace, target)
     ctx = ScheduleContext.from_store(
-        store, weights, research_memory=memory.get("entries") or [])
+        store, weights, research_memory=memory.get("entries") or [],
+        benchmark_feedback=benchmark_feedback)
     scores = score_candidates(candidates, ctx)
     selected, deferred, requested, filled, relocated = stratified_select(
         scores, slots, quota, pinned)
@@ -1272,6 +1366,8 @@ def build_schedule(workspace: Path, target: str,
         coverage=coverage,
         residual=residual,
         weights=dict(ctx.weights),
+        benchmark_feedback=dict(ctx.benchmark_feedback),
+        weight_adjustments=dict(ctx.weight_adjustments),
         pinned=[str(cid) for cid in pinned if str(cid) in selected_ids],
     )
     payload = plan.as_dict()
@@ -1373,7 +1469,8 @@ def round_selection(workspace, target: str,
                     quota: Optional[Dict[str, int]] = None,
                     weights: Optional[Dict[str, int]] = None,
                     pinned: Sequence[str] = (),
-                    refresh: bool = True
+                    refresh: bool = True,
+                    benchmark_feedback: Optional[Dict[str, Any]] = None
                     ) -> Tuple[List[Dict[str, Any]], Optional[SchedulePlan], str]:
     """Pick this round's candidates, degrading to proposal order on failure.
 
@@ -1391,7 +1488,8 @@ def round_selection(workspace, target: str,
     try:
         plan = build_schedule(workspace, target, pool, slots=slots, quota=quota,
                               weights=weights, round_no=round_no,
-                              refresh=refresh, pinned=pinned)
+                              refresh=refresh, pinned=pinned,
+                              benchmark_feedback=benchmark_feedback)
     except Exception as exc:  # pragma: no cover - defensive by design
         return pool[:slots], None, (
             "scheduler unavailable (%s: %s); fell back to proposal order"
@@ -1602,6 +1700,20 @@ def prompt_coverage_block(ctx: ScheduleContext, plan: Optional[SchedulePlan] = N
             row.get("candidate_id") or row.get("research_key"),
             row.get("state"), row.get("round", 0), review_text + variant_text, hints,
             row.get("claim_status", "not-a-finding")))
+
+    lines.append("## 评测反馈 / Benchmark Feedback")
+    if not ctx.benchmark_feedback:
+        lines.append("  （暂无：本轮未提供 research-benchmark feedback / none supplied）")
+    else:
+        feedback = ctx.benchmark_feedback
+        lines.append("  " + json.dumps({
+            "benchmark_id": feedback.get("benchmark_id"),
+            "alerts": [item.get("code") for item in feedback.get("alerts", [])
+                       if isinstance(item, dict)],
+            "weight_adjustments": ctx.weight_adjustments,
+            "prompt_hints": list(feedback.get("prompt_hints") or [])[:8],
+            "claim_status": feedback.get("claim_status", "not-a-finding"),
+        }, ensure_ascii=False))
 
     lines.append("## 覆盖新颖性要求 / Coverage Novelty Requirement")
     lines.append("  优先生成来自未覆盖区域的候选；禁止重复已排除的机制，"

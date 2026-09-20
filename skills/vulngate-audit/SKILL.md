@@ -237,6 +237,9 @@ applicable. Each plan contains required observations and explicit falsifiers.
 The artifact is a research plan with `claim_status=not-a-finding`; it is never
 runtime evidence or a final conclusion. S3 may use it to choose the next
 probe, while G4/G5 still require the corresponding persisted observations.
+When an explicit `research-benchmark-feedback-v1` artifact is supplied, the
+planner adds bounded benchmark observations and falsifiers to the checklist;
+it never changes candidate status, impact, CVSS, or G4/G5.
 
 #### S2 candidate scheduling (coverage-driven, spec §13/§14/§15)
 
@@ -252,6 +255,12 @@ python3 scripts/agent_cli.py schedule <target> \
 
 # include the structured prompt block S2 feeds the model
 python3 scripts/agent_cli.py schedule <target> --config targets/<t>.json --prompt
+
+# feed a prior benchmark result into the next round's bounded research priority
+python3 scripts/agent_cli.py schedule <target> \
+  --candidates state/<target>/round-01/S2/candidate-matrix.json \
+  --benchmark-result state/research-benchmark-feedback.json \
+  --slots 8 --round 2 --json
 
 # the same schedule, summarised next to the coverage report
 python3 scripts/agent_cli.py coverage <target> --schedule
@@ -666,7 +675,8 @@ separate from the target's finding ledger:
 
 ```bash
 python3 scripts/agent_cli.py benchmark --manifest <gold.json> \
-  --run <run.json> --out <benchmark-result.json> --json
+  --run <run.json> --out <benchmark-result.json> \
+  --feedback-out <research-benchmark-feedback.json> --json
 ```
 
 The manifest declares each case's `truth` (`vulnerable`, `negative`, or
@@ -688,7 +698,10 @@ keeps `claim_status=not-a-finding` and reports:
 Do not use a benchmark score to promote a real finding or to bypass G4/G5. Use
 low negative-result fidelity, high unjustified-repeat rate, missing evidence,
 or severity overstatement as a reason to revise the planner, scheduler or
-conclusion rules, then rerun the same manifest.
+conclusion rules, then rerun the same manifest. The derived
+`research-benchmark-feedback-v1` contains only bounded metric snapshots,
+fixed alert codes, capped scheduler-factor deltas and planner observations;
+without explicit feedback input, the default schedule is unchanged.
 
 ## 7. Hard gates summary
 
@@ -977,7 +990,9 @@ S2 还会写出 `S2/experiment-plans.json`，覆盖完整候选池并标记哪�
 授权边界、有状态步骤、并发/可用性、修复变体，以及适用时的 typed effect。
 每个计划都带有必需观测和明确证伪条件。该产物的
 `claim_status=not-a-finding`，只是研究计划，不是运行时证据或最终结论；S3 可以
-用它选择下一步探针，但 G4/G5 仍只接受相应的已落盘观测。
+用它选择下一步探针，但 G4/G5 仍只接受相应的已落盘观测。若显式提供
+`research-benchmark-feedback-v1`，计划只会追加有界观测/证伪提示，不会改变候选状态、影响、
+CVSS 或 G4/G5。
 
 #### S2 候选调度（覆盖驱动，spec §13/§14/§15）
 
@@ -992,6 +1007,12 @@ python3 scripts/agent_cli.py schedule <target> \
 
 # 连 spec §15 的结构化 prompt 块一起打印
 python3 scripts/agent_cli.py schedule <target> --config targets/<t>.json --prompt
+
+# 将上一轮 benchmark 反馈接入下一轮有限的研究优先级
+python3 scripts/agent_cli.py schedule <target> \
+  --candidates state/<target>/round-01/S2/candidate-matrix.json \
+  --benchmark-result state/research-benchmark-feedback.json \
+  --slots 8 --round 2 --json
 
 # 在覆盖报告旁边带上最近一轮的调度摘要
 python3 scripts/agent_cli.py coverage <target> --schedule
@@ -1346,7 +1367,8 @@ python3 scripts/agent_cli.py ledger --workspace <path> --target <name> --round <
 
 ```bash
 python3 scripts/agent_cli.py benchmark --manifest <gold.json> \
-  --run <run.json> --out <benchmark-result.json> --json
+  --run <run.json> --out <benchmark-result.json> \
+  --feedback-out <research-benchmark-feedback.json> --json
 ```
 
 manifest 为每个 case 声明 `truth`（`vulnerable`、`negative`、`environment-gap`）、期望 status、
@@ -1357,7 +1379,9 @@ research-key 事件；原始 PoC payload、命令和进程输出不能作为 ben
 分以内比例/严重性夸大率。
 
 评测分数不能升级真实漏洞或绕过 G4/G5。负向保真度低、无新证据重复率高、证据缺失或严重性
-夸大时，应修改计划器、调度器或结论规则，并用同一份 manifest 重跑。
+夸大时，应修改计划器、调度器或结论规则，并用同一份 manifest 重跑。生成的
+`research-benchmark-feedback-v1` 只包含有界指标快照、固定告警码、调度因子微调和实验提示；
+没有显式提供反馈时，默认调度行为不变。
 
 ## 7. 硬闸门摘要
 

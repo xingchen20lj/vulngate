@@ -30,6 +30,12 @@ class TargetConfig:
     # owns a workspace-local argv-only process with a loopback healthcheck.
     runtime_lab: Dict[str, Any] = field(default_factory=dict)
     public_scan: Dict[str, Any] = field(default_factory=dict)  # internet novelty scan (plan 2.7)
+    # Optional, explicitly supplied research-quality feedback.  It only
+    # influences S2 prioritisation and experiment checklists; it never changes
+    # a candidate conclusion or CVSS value.  A path is resolved relative to the
+    # workspace and must contain a benchmark result or feedback artifact.
+    benchmark_feedback: Dict[str, Any] = field(default_factory=dict)
+    benchmark_feedback_path: Optional[str] = None
     jars: List[Dict[str, str]] = field(default_factory=list)
     deps: List[Dict[str, str]] = field(default_factory=list)
     source_dirs: List[str] = field(default_factory=list)

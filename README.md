@@ -96,6 +96,7 @@ Current gate identifiers are **G0, G1, G1b, G3, G4, and G5**; G1b is the default
 - **Cross-round research memory** — S8 persists stable mechanism keys, replay/differential states, environment gaps, and next-probe hints in `state/<target>/research-memory.json`; S2 reuses that evidence to damp exact repeats and prioritize actionable differences without treating memory as a finding.
 - **Human review feedback loop** — `agent_cli.py review` records bounded accepted/rejected/needs-evidence/scope-corrected feedback by stable research key; S8 replays it into target memory and S2 uses it only to reprioritize follow-up work, never to replace G4/G5 evidence.
 - **Research-quality benchmark** — `agent_cli.py benchmark` scores deterministic gold cases and run records for observation coverage, negative-result safety, environment-gap fidelity, repeat rate, evidence completeness, decision stability, and severity calibration; results remain `not-a-finding`.
+- **Benchmark-guided research loop** — `research-benchmark-feedback-v1` turns those metrics into capped alert codes, scheduler-factor deltas, and experiment observations; `schedule --benchmark-result` and explicit target-config opt-in feed the next round without changing findings, CVSS, or G4/G5.
 - **Falsifiable experiment planning** — S2 emits bounded plans with required observations and explicit falsifiers for baseline, authz, state, availability, fix variants, and typed effects; plans remain `not-a-finding`.
 - **Capability-primitive path search** — S1 derives bounded `read` / `write` / `exec` / `ssrf` and credential/evaluation chains from the entry/sink/flow indices, preserves missing primitives, and emits minimal verification sequences; static chains remain `not-a-finding` until data-flow and runtime typed-effect evidence exist.
 - **Authorization-aware matrices** — web/application candidates can include identity × role × tenant × object context.
@@ -129,7 +130,8 @@ python3 scripts/agent_cli.py controls demo --workspace /path/to/audit --show-can
 python3 scripts/agent_cli.py differential demo --workspace /path/to/audit --show-candidates
 python3 scripts/agent_cli.py capability demo --workspace /path/to/audit --show-candidates
 python3 scripts/agent_cli.py benchmark --manifest benchmarks/research-benchmark-v1.json \
-  --run benchmarks/research-benchmark-sample-run.json --json
+  --run benchmarks/research-benchmark-sample-run.json \
+  --feedback-out state/research-benchmark-feedback.json --json
 bash macos/run-audit.sh /Applications/Target.app /path/to/native-audit
 ```
 

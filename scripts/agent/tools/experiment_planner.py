@@ -9,8 +9,9 @@ consume only actual runtime evidence.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+from ..evaluation.benchmark import normalize_benchmark_feedback
 from .authz import normalize_authz_case, normalize_authz_cases
 from .experiment import capability_contract_from_candidate
 from .redaction import redact_text
@@ -108,8 +109,68 @@ def _plan(candidate_id: str, kind: str, objective: str,
     return result
 
 
+def apply_benchmark_feedback(research_plan: Dict[str, Any],
+                             benchmark_feedback: Dict[str, Any]) -> Dict[str, Any]:
+    """Add bounded benchmark follow-ups to an existing research checklist.
+
+    The feedback can add observations and falsifiers to the baseline plan, and
+    tags that help the host choose a probe.  It cannot add a finding, change a
+    candidate status, alter a CVSS value, or remove an existing experiment.
+    """
+    feedback = normalize_benchmark_feedback(benchmark_feedback or {})
+    if not feedback or not isinstance(research_plan, dict):
+        return research_plan
+    result = dict(research_plan)
+    result["strategy_tags"] = list(research_plan.get("strategy_tags") or [])
+    result["plans"] = []
+    for item in research_plan.get("plans") or []:
+        if not isinstance(item, dict):
+            continue
+        copied = dict(item)
+        copied["required_observations"] = list(item.get("required_observations") or [])
+        copied["falsifiers"] = list(item.get("falsifiers") or [])
+        result["plans"].append(copied)
+
+    guidance = feedback.get("planner_guidance") or {}
+    tags = [str(item) for item in guidance.get("strategy_tags") or []]
+    required = [str(item) for item in guidance.get("required_observations") or []]
+    falsifiers = [str(item) for item in guidance.get("falsifiers") or []]
+    for tag in tags + (["benchmark-feedback"] if guidance else []):
+        if tag and tag not in result["strategy_tags"]:
+            result["strategy_tags"].append(tag)
+    baseline = next((item for item in result["plans"]
+                     if item.get("kind") == "baseline"), None)
+    if baseline is not None:
+        for observation in required:
+            if observation not in baseline["required_observations"]:
+                baseline["required_observations"].append(observation)
+        for falsifier in falsifiers:
+            if falsifier not in baseline["falsifiers"]:
+                baseline["falsifiers"].append(falsifier)
+        baseline["required_observations"] = baseline["required_observations"][:24]
+        baseline["falsifiers"] = baseline["falsifiers"][:24]
+
+    alert_codes = [str(item.get("code")) for item in feedback.get("alerts", [])
+                   if isinstance(item, dict) and item.get("code")]
+    result["benchmark_guidance"] = {
+        "schema_version": feedback.get("schema_version"),
+        "source_benchmark_id": feedback.get("benchmark_id", ""),
+        "alert_codes": alert_codes[:8],
+        "required_observations": required[:12],
+        "falsifiers": falsifiers[:12],
+        "claim_status": "not-a-finding",
+    }
+    provenance = dict(result.get("provenance") or {})
+    provenance["benchmark_feedback"] = True
+    provenance["claim_status"] = "not-a-finding"
+    result["provenance"] = provenance
+    return result
+
+
 def plan_candidate_experiments(candidate: Dict[str, Any],
-                               versions: Sequence[Any] = ()) -> Dict[str, Any]:
+                               versions: Sequence[Any] = (),
+                               benchmark_feedback: Optional[Dict[str, Any]] = None
+                               ) -> Dict[str, Any]:
     """Return a stable, bounded experiment plan for one candidate.
 
     The output is a research checklist, not a verdict.  In particular, a plan
@@ -259,7 +320,7 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
         ))
 
     plans = plans[:MAX_PLANS]
-    return {
+    result = {
         "candidate_id": candidate_id,
         "planner_version": PLANNER_VERSION,
         "strategy_tags": tags,
@@ -278,3 +339,4 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
             "claim_status": "not-a-finding",
         },
     }
+    return apply_benchmark_feedback(result, benchmark_feedback or {})

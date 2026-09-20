@@ -105,6 +105,18 @@ and CVSS/severity calibration. The result is deliberately marked
 `not-a-finding`; it is a regression signal for the planner, scheduler and
 conclusion rules, not a way to promote a real report.
 
+Benchmark results can now be explicitly converted into a bounded
+`research-benchmark-feedback-v1` artifact. The feedback contains only numeric
+metric snapshots, fixed alert codes, capped signed deltas for the seven
+scheduler factors, and planner observations/falsifiers. `agent_cli.py schedule
+--benchmark-result` applies it while preserving the original weight scale and
+records the actual adjustments in the schedule; S2 experiment plans carry the
+same guidance. Config-driven and autonomous runs can opt in with the explicit
+`benchmark_feedback_path` or inline `benchmark_feedback` target setting. The
+feedback is `not-a-finding`: it cannot confirm/exclude a candidate, synthesize
+runtime evidence, change CVSS, or bypass G4/G5. With no feedback, the default
+schedule and plan remain byte-for-byte compatible.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

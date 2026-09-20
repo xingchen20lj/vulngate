@@ -65,6 +65,79 @@ GAP_EXECUTION_STATES = frozenset({
 SEVERITY_ORDER = {"none": 0, "low": 1, "medium": 2, "high": 3,
                   "critical": 4}
 
+# Feedback is deliberately a separate contract from the benchmark result.
+# It may change *what gets researched next*, but it is never a finding and it
+# never changes G4/G5 or a CVSS value.  Keep this list independent of the
+# scheduler module so the evaluator stays usable by offline tooling.
+BENCHMARK_FEEDBACK_SCHEMA_VERSION = "research-benchmark-feedback-v1"
+BENCHMARK_FEEDBACK_CLAIM_STATUS = BENCHMARK_CLAIM_STATUS
+BENCHMARK_FEEDBACK_FACTORS = (
+    "reachability", "attacker_control", "security_boundary", "sink_impact",
+    "control_gap", "evidence_quality", "coverage_novelty",
+)
+MAX_FEEDBACK_ALERTS = 8
+MAX_FEEDBACK_HINTS = 8
+MAX_FEEDBACK_GUIDANCE_ITEMS = 12
+MAX_FEEDBACK_WEIGHT_DELTA = 6
+BENCHMARK_FEEDBACK_ALERT_CODES = frozenset({
+    "unsafe-confirmation", "evidence-completeness-low",
+    "unjustified-repeat-high", "environment-gap-fidelity-low",
+    "severity-overstatement-high", "decision-stability-low",
+})
+BENCHMARK_FEEDBACK_ACTIONS = frozenset({
+    "tighten-confirmation-evidence", "require-missing-evidence",
+    "increase-novelty-differential-probes", "preserve-and-probe-preconditions",
+    "tighten-severity-calibration", "stabilize-resolution-evidence",
+})
+BENCHMARK_FEEDBACK_TAGS = frozenset({
+    "benchmark-confirmation-safety", "benchmark-evidence-completeness",
+    "benchmark-novelty-followup", "benchmark-precondition-probe",
+    "benchmark-severity-calibration", "benchmark-decision-stability",
+})
+BENCHMARK_FEEDBACK_OBSERVATIONS = frozenset({
+    "TYPED_EFFECT must match the claimed impact before confirmation",
+    "required evidence fields must be observed or explicitly unsupported",
+    "new evidence or a differential probe is required before repeating a key",
+    "record the required runtime/precondition before interpreting a result",
+    "severity must be consistent with observed typed effect and precondition tier",
+    "repeat the decision only with an independent bounded observation",
+})
+BENCHMARK_FEEDBACK_FALSIFIERS = frozenset({
+    "a missing typed effect keeps the case candidate/pending",
+    "missing required evidence is not a negative result",
+    "an exact repeat without new evidence remains unjustified",
+    "precondition-unavailable cannot be classified as excluded",
+    "an unobserved stronger effect keeps the conservative severity",
+    "a status change without new evidence is not a valid resolution",
+})
+BENCHMARK_FEEDBACK_HINTS = frozenset({
+    "存在错误确认：下一轮优先补齐与声明影响一致的 typed effect，不能靠改阈值掩盖。",
+    "证据完整度偏低：下一轮把缺失字段转成显式实验观测。",
+    "无新证据重复率偏高：优先做版本/路径/控制差分，避免原样重跑。",
+    "环境缺口保真度偏低：先补 runtime/前置条件探针，再解释负结果。",
+    "严重性夸大偏高：下一轮补 typed effect 与前置一致性检查；不自动改 CVSS。",
+    "决策稳定性偏低：为状态变化补独立、可复核的观测。",
+})
+
+
+def _finite_number(value: Any) -> Optional[float]:
+    """Return a finite numeric value, never a NaN/Infinity feedback input."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _bounded_int(value: Any, default: int = 0, limit: int = 1000000) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(-limit, min(limit, number))
+
 
 def _text(value: Any, limit: int = MAX_ID) -> str:
     try:
@@ -642,6 +715,271 @@ def evaluate_benchmark(manifest: Dict[str, Any],
         "case_results": results[:MAX_CASES * MAX_RUNS],
         "claim_status": BENCHMARK_CLAIM_STATUS,
     }
+
+
+def normalize_benchmark_feedback(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep only the bounded, scheduling-safe part of benchmark feedback.
+
+    This is an input boundary as well as a renderer.  A caller may hand the
+    scheduler an artifact produced by an older version, a hand-written config,
+    or an accidentally copied benchmark result.  Only the feedback schema is
+    accepted here; arbitrary run rows, prose, payloads and CVSS suggestions
+    are intentionally discarded.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    if raw.get("schema_version") != BENCHMARK_FEEDBACK_SCHEMA_VERSION:
+        return {}
+    benchmark_id = _text(raw.get("benchmark_id"), 120)
+    raw_snapshot = (raw.get("metric_snapshot")
+                    if isinstance(raw.get("metric_snapshot"), dict) else {})
+    snapshot: Dict[str, float] = {}
+    for name in (
+        "case_observation_coverage", "confirmed_precision", "confirmed_recall",
+        "resolution_accuracy", "unsafe_confirmation_rate",
+        "negative_result_fidelity", "environment_gap_fidelity",
+        "evidence_completeness", "decision_stability", "repeat_rate",
+        "unjustified_repeat_rate", "severity_overstatement_rate",
+        "severity_ordinal_overstatement_rate", "severity_mean_absolute_error",
+    ):
+        number = _finite_number(raw_snapshot.get(name))
+        if number is None:
+            continue
+        snapshot[name] = round(max(0.0, min(10.0, number)), 4)
+
+    alerts: List[Dict[str, Any]] = []
+    for item in raw.get("alerts") or []:
+        if not isinstance(item, dict):
+            continue
+        code = _text(item.get("code"), 80)
+        metric = _text(item.get("metric"), 80)
+        priority = _text(item.get("priority"), 16).lower()
+        action = _text(item.get("action"), 100)
+        value = _finite_number(item.get("value"))
+        threshold = _finite_number(item.get("threshold"))
+        direction = _text(item.get("direction"), 8).lower()
+        if (code not in BENCHMARK_FEEDBACK_ALERT_CODES or not metric
+                or priority not in {"high", "medium", "low"}
+                or action not in BENCHMARK_FEEDBACK_ACTIONS
+                or value is None or threshold is None
+                or direction not in {"gt", "lt"}):
+            continue
+        alerts.append({
+            "code": code,
+            "priority": priority,
+            "metric": metric,
+            "value": round(value, 4),
+            "threshold": round(threshold, 4),
+            "direction": direction,
+            "action": action,
+        })
+        if len(alerts) >= MAX_FEEDBACK_ALERTS:
+            break
+
+    raw_deltas = (raw.get("weight_deltas")
+                  if isinstance(raw.get("weight_deltas"), dict) else {})
+    deltas: Dict[str, int] = {}
+    for factor in BENCHMARK_FEEDBACK_FACTORS:
+        value = _bounded_int(raw_deltas.get(factor), 0,
+                             MAX_FEEDBACK_WEIGHT_DELTA)
+        if value:
+            deltas[factor] = value
+
+    guidance = raw.get("planner_guidance")
+    if not isinstance(guidance, dict):
+        guidance = {}
+    planner_guidance = {
+        "strategy_tags": _bounded_strings(
+            [item for item in (guidance.get("strategy_tags") or [])
+             if isinstance(item, str) and item in BENCHMARK_FEEDBACK_TAGS],
+            MAX_FEEDBACK_GUIDANCE_ITEMS, 80),
+        "required_observations": _bounded_strings(
+            [item for item in (guidance.get("required_observations") or [])
+             if isinstance(item, str) and item in BENCHMARK_FEEDBACK_OBSERVATIONS],
+            MAX_FEEDBACK_GUIDANCE_ITEMS, 120),
+        "falsifiers": _bounded_strings(
+            [item for item in (guidance.get("falsifiers") or [])
+             if isinstance(item, str) and item in BENCHMARK_FEEDBACK_FALSIFIERS],
+            MAX_FEEDBACK_GUIDANCE_ITEMS, 160),
+    }
+    hints = _bounded_strings(
+        [item for item in (raw.get("prompt_hints") or [])
+         if isinstance(item, str) and item in BENCHMARK_FEEDBACK_HINTS],
+        MAX_FEEDBACK_HINTS, 180)
+    source = raw.get("source") if isinstance(raw.get("source"), dict) else {}
+    return {
+        "schema_version": BENCHMARK_FEEDBACK_SCHEMA_VERSION,
+        "benchmark_id": benchmark_id or "benchmark",
+        "source": {
+            "benchmark_id": _text(source.get("benchmark_id"), 120)
+                           or benchmark_id or "benchmark",
+            "run_count": max(0, min(MAX_RUNS, _bounded_int(source.get("run_count")))),
+            "case_count": max(0, min(MAX_CASES, _bounded_int(source.get("case_count")))),
+        },
+        "metric_snapshot": snapshot,
+        "alerts": alerts,
+        "weight_deltas": deltas,
+        "planner_guidance": planner_guidance,
+        "prompt_hints": hints,
+        "claim_status": BENCHMARK_FEEDBACK_CLAIM_STATUS,
+    }
+
+
+def derive_benchmark_feedback(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Turn benchmark metrics into bounded, deterministic next-step guidance.
+
+    Thresholds and maximum deltas are intentionally fixed in code.  A low
+    score produces a prompt hint and a small, explainable scheduling change;
+    it never rewrites a candidate status, a conclusion, a CVSS vector or a
+    runtime observation.
+    """
+    if not isinstance(result, dict):
+        return {}
+    metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+    if not metrics:
+        return {}
+    repeat = metrics.get("repeat") if isinstance(metrics.get("repeat"), dict) else {}
+    severity = (metrics.get("severity_calibration")
+                if isinstance(metrics.get("severity_calibration"), dict) else {})
+
+    snapshot: Dict[str, float] = {}
+    for name in (
+        "case_observation_coverage", "confirmed_precision", "confirmed_recall",
+        "resolution_accuracy", "unsafe_confirmation_rate",
+        "negative_result_fidelity", "environment_gap_fidelity",
+        "evidence_completeness", "decision_stability",
+    ):
+        number = _finite_number(metrics.get(name))
+        if number is not None:
+            snapshot[name] = round(max(0.0, min(10.0, number)), 4)
+    repeat_rate = _finite_number(repeat.get("repeat_rate"))
+    unjustified_repeat = _finite_number(repeat.get("unjustified_repeat_rate"))
+    severity_overstatement = _finite_number(severity.get("overstatement_rate"))
+    severity_ordinal = _finite_number(severity.get("ordinal_overstatement_rate"))
+    severity_mae = _finite_number(severity.get("mean_absolute_error"))
+    for name, value in (
+        ("repeat_rate", repeat_rate),
+        ("unjustified_repeat_rate", unjustified_repeat),
+        ("severity_overstatement_rate", severity_overstatement),
+        ("severity_ordinal_overstatement_rate", severity_ordinal),
+        ("severity_mean_absolute_error", severity_mae),
+    ):
+        if value is not None:
+            snapshot[name] = round(max(0.0, min(10.0, value)), 4)
+
+    deltas: Counter = Counter()
+    alerts: List[Dict[str, Any]] = []
+    tags: List[str] = []
+    observations: List[str] = []
+    falsifiers: List[str] = []
+    hints: List[str] = []
+
+    def add(code: str, priority: str, metric: str, value: float,
+            threshold: float, direction: str, action: str,
+            weight_delta: Dict[str, int], tag: str,
+            required: str, falsifier: str, hint: str) -> None:
+        alerts.append({
+            "code": code, "priority": priority, "metric": metric,
+            "value": round(value, 4), "threshold": round(threshold, 4),
+            "direction": direction, "action": action,
+        })
+        deltas.update(weight_delta)
+        tags.append(tag)
+        observations.append(required)
+        falsifiers.append(falsifier)
+        hints.append(hint)
+
+    if (unsafe := _finite_number(metrics.get("unsafe_confirmation_rate"))) is not None \
+            and unsafe > 0.0:
+        add("unsafe-confirmation", "high", "unsafe_confirmation_rate", unsafe, 0.0,
+            "gt", "tighten-confirmation-evidence",
+            {"evidence_quality": 4, "coverage_novelty": -2, "sink_impact": -2},
+            "benchmark-confirmation-safety",
+            "TYPED_EFFECT must match the claimed impact before confirmation",
+            "a missing typed effect keeps the case candidate/pending",
+            "存在错误确认：下一轮优先补齐与声明影响一致的 typed effect，不能靠改阈值掩盖。")
+    if (completeness := _finite_number(metrics.get("evidence_completeness"))) is not None \
+            and completeness < 0.85:
+        add("evidence-completeness-low", "medium", "evidence_completeness", completeness,
+            0.85, "lt", "require-missing-evidence",
+            {"evidence_quality": 4, "coverage_novelty": -2, "sink_impact": -2},
+            "benchmark-evidence-completeness",
+            "required evidence fields must be observed or explicitly unsupported",
+            "missing required evidence is not a negative result",
+            "证据完整度偏低：下一轮把缺失字段转成显式实验观测。")
+    if unjustified_repeat is not None and unjustified_repeat > 0.15:
+        add("unjustified-repeat-high", "medium", "unjustified_repeat_rate",
+            unjustified_repeat, 0.15, "gt", "increase-novelty-differential-probes",
+            {"coverage_novelty": 4, "evidence_quality": -2, "sink_impact": -2},
+            "benchmark-novelty-followup",
+            "new evidence or a differential probe is required before repeating a key",
+            "an exact repeat without new evidence remains unjustified",
+            "无新证据重复率偏高：优先做版本/路径/控制差分，避免原样重跑。")
+    if (gap_fidelity := _finite_number(metrics.get("environment_gap_fidelity"))) is not None \
+            and gap_fidelity < 0.90:
+        add("environment-gap-fidelity-low", "high", "environment_gap_fidelity",
+            gap_fidelity, 0.90, "lt", "preserve-and-probe-preconditions",
+            {"reachability": 2, "control_gap": 2, "coverage_novelty": -2,
+             "sink_impact": -2},
+            "benchmark-precondition-probe",
+            "record the required runtime/precondition before interpreting a result",
+            "precondition-unavailable cannot be classified as excluded",
+            "环境缺口保真度偏低：先补 runtime/前置条件探针，再解释负结果。")
+    if severity_overstatement is not None and severity_overstatement > 0.20:
+        add("severity-overstatement-high", "medium", "severity_overstatement_rate",
+            severity_overstatement, 0.20, "gt", "tighten-severity-calibration",
+            {"evidence_quality": 2, "sink_impact": -1, "coverage_novelty": -1},
+            "benchmark-severity-calibration",
+            "severity must be consistent with observed typed effect and precondition tier",
+            "an unobserved stronger effect keeps the conservative severity",
+            "严重性夸大偏高：下一轮补 typed effect 与前置一致性检查；不自动改 CVSS。")
+    if (stability := _finite_number(metrics.get("decision_stability"))) is not None \
+            and stability < 0.80:
+        add("decision-stability-low", "low", "decision_stability", stability, 0.80,
+            "lt", "stabilize-resolution-evidence",
+            {"evidence_quality": 2, "coverage_novelty": 2,
+             "attacker_control": -2, "sink_impact": -2},
+            "benchmark-decision-stability",
+            "repeat the decision only with an independent bounded observation",
+            "a status change without new evidence is not a valid resolution",
+            "决策稳定性偏低：为状态变化补独立、可复核的观测。")
+
+    raw = {
+        "schema_version": BENCHMARK_FEEDBACK_SCHEMA_VERSION,
+        "benchmark_id": _text(result.get("benchmark_id"), 120) or "benchmark",
+        "source": {
+            "benchmark_id": _text(result.get("benchmark_id"), 120) or "benchmark",
+            "run_count": _bounded_int(result.get("run_count"), 0, MAX_RUNS),
+            "case_count": _bounded_int(result.get("case_count"), 0, MAX_CASES),
+        },
+        "metric_snapshot": snapshot,
+        "alerts": alerts,
+        "weight_deltas": {
+            factor: max(-MAX_FEEDBACK_WEIGHT_DELTA,
+                        min(MAX_FEEDBACK_WEIGHT_DELTA, int(value)))
+            for factor, value in sorted(deltas.items())
+            if factor in BENCHMARK_FEEDBACK_FACTORS and value
+        },
+        "planner_guidance": {
+            "strategy_tags": sorted(set(tags))[:MAX_FEEDBACK_GUIDANCE_ITEMS],
+            "required_observations": sorted(set(observations))[:MAX_FEEDBACK_GUIDANCE_ITEMS],
+            "falsifiers": sorted(set(falsifiers))[:MAX_FEEDBACK_GUIDANCE_ITEMS],
+        },
+        "prompt_hints": hints[:MAX_FEEDBACK_HINTS],
+        "claim_status": BENCHMARK_FEEDBACK_CLAIM_STATUS,
+    }
+    return normalize_benchmark_feedback(raw)
+
+
+def benchmark_feedback_from_input(value: Dict[str, Any]) -> Dict[str, Any]:
+    """Accept either a benchmark result or an already-derived feedback file."""
+    if not isinstance(value, dict):
+        return {}
+    if value.get("schema_version") == BENCHMARK_FEEDBACK_SCHEMA_VERSION:
+        return normalize_benchmark_feedback(value)
+    if isinstance(value.get("metrics"), dict):
+        return derive_benchmark_feedback(value)
+    return {}
 
 
 def load_benchmark_json(path: Path) -> Dict[str, Any]:

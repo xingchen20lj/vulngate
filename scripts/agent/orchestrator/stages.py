@@ -58,6 +58,7 @@ class StageContext:
         self.runner = CommandRunner(workspace, self.approval)
         self.checked_at = datetime.now().isoformat(timespec="seconds")
         self._public_scan_cache: Optional[Dict[str, Any]] = None
+        self._benchmark_feedback_cache: Optional[Dict[str, Any]] = None
 
     def public_disclosures(self) -> Dict[str, Any]:
         if self._public_scan_cache is None:
@@ -69,6 +70,25 @@ class StageContext:
     def fixture_dir(self) -> Optional[Path]:
         d = self.workspace / "agent" / "regression" / "fixtures"
         return d if d.exists() else None
+
+    def benchmark_feedback(self) -> Dict[str, Any]:
+        """Load only explicitly configured benchmark feedback for this target."""
+        if self._benchmark_feedback_cache is not None:
+            return dict(self._benchmark_feedback_cache)
+        from ..evaluation.benchmark import benchmark_feedback_from_input
+
+        value: Any = getattr(self.config, "benchmark_feedback", {}) or {}
+        configured_path = getattr(self.config, "benchmark_feedback_path", None)
+        if configured_path:
+            path = Path(configured_path)
+            if not path.is_absolute():
+                path = self.workspace / path
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                value = {}
+        self._benchmark_feedback_cache = benchmark_feedback_from_input(value)
+        return dict(self._benchmark_feedback_cache)
 
 
 def _gate_scan(ctx: StageContext) -> List[Dict[str, Any]]:
@@ -393,9 +413,14 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
     selected_ids = {str(c.get("candidate_id")) for c in selected}
     versions = sorted({str(j.get("version")) for j in ctx.config.jars
                        if j.get("version")})
+    benchmark_feedback = ctx.benchmark_feedback()
+    if benchmark_feedback:
+        ctx.store.write_artifact("S2", "benchmark-feedback.json",
+                                 benchmark_feedback)
     experiment_plans = []
     for cand in pool:
-        research_plan = plan_candidate_experiments(cand, versions)
+        research_plan = plan_candidate_experiments(
+            cand, versions, benchmark_feedback=benchmark_feedback)
         cand["experiment_plan"] = research_plan
         plan_row = dict(research_plan)
         plan_row["scheduled"] = str(cand.get("candidate_id")) in selected_ids
@@ -436,6 +461,13 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
               "candidates": selected,
               "pool_size": len(pool),
               "schedule_note": schedule_note,
+              "benchmark_feedback": {
+                  "benchmark_id": benchmark_feedback.get("benchmark_id", ""),
+                  "alerts": [item.get("code") for item in
+                             benchmark_feedback.get("alerts", [])
+                             if isinstance(item, dict)],
+                  "claim_status": "not-a-finding",
+              } if benchmark_feedback else {},
               "experiment_plan_count": len(experiment_plans),
               "scheduled_experiment_plan_count": sum(
                   1 for item in experiment_plans if item.get("scheduled"))}
@@ -496,7 +528,8 @@ def _schedule_round(ctx: StageContext,
     try:
         return sched.round_selection(
             ctx.workspace, ctx.target, pool, slots,
-            round_no=ctx.round_no, refresh=False)
+            round_no=ctx.round_no, refresh=False,
+            benchmark_feedback=ctx.benchmark_feedback())
     except Exception as exc:  # pragma: no cover - defensive by design
         return pool[:slots], None, (
             "scheduler unavailable (%s: %s); fell back to proposal order"

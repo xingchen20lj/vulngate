@@ -16,6 +16,10 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import agent_cli  # noqa: E402
 from agent.evaluation.benchmark import (  # noqa: E402
     BENCHMARK_CLAIM_STATUS,
+    BENCHMARK_FEEDBACK_CLAIM_STATUS,
+    BENCHMARK_FEEDBACK_FACTORS,
+    BENCHMARK_FEEDBACK_SCHEMA_VERSION,
+    derive_benchmark_feedback,
     evaluate_benchmark,
     load_benchmark_json,
 )
@@ -119,6 +123,42 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual("unsafe-false-positive",
                          result["case_results"][1]["classification"])
 
+    def test_feedback_is_deterministic_bounded_and_not_a_finding(self):
+        result = {
+            "benchmark_id": "feedback-test",
+            "run_count": 99,
+            "case_count": 999,
+            "metrics": {
+                "unsafe_confirmation_rate": 1.0,
+                "evidence_completeness": 0.2,
+                "environment_gap_fidelity": 0.1,
+                "decision_stability": 0.1,
+                "repeat": {"unjustified_repeat_rate": 0.9},
+                "severity_calibration": {"overstatement_rate": 0.9},
+            },
+        }
+        first = derive_benchmark_feedback(result)
+        second = derive_benchmark_feedback(result)
+        self.assertEqual(first, second)
+        self.assertEqual(BENCHMARK_FEEDBACK_SCHEMA_VERSION,
+                         first["schema_version"])
+        self.assertEqual(BENCHMARK_FEEDBACK_CLAIM_STATUS,
+                         first["claim_status"])
+        self.assertTrue(first["alerts"])
+        self.assertTrue({
+            "unsafe-confirmation", "evidence-completeness-low",
+            "unjustified-repeat-high", "environment-gap-fidelity-low",
+            "severity-overstatement-high", "decision-stability-low",
+        } <= {item["code"] for item in first["alerts"]})
+        self.assertTrue(set(first["weight_deltas"]) <= set(BENCHMARK_FEEDBACK_FACTORS))
+        self.assertTrue(all(abs(value) <= 6
+                            for value in first["weight_deltas"].values()))
+        self.assertNotIn("case_results", first)
+        self.assertNotIn("cvss", first)
+
+    def test_feedback_without_metrics_is_empty(self):
+        self.assertEqual({}, derive_benchmark_feedback({"benchmark_id": "empty"}))
+
     def test_sample_manifest_and_cli_are_machine_readable(self):
         gold = load_benchmark_json(ROOT / "benchmarks" / "research-benchmark-v1.json")
         run = load_benchmark_json(ROOT / "benchmarks" / "research-benchmark-sample-run.json")
@@ -132,18 +172,24 @@ class BenchmarkTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(prefix="vulngate-benchmark-") as td:
             out_path = Path(td) / "result.json"
+            feedback_path = Path(td) / "feedback.json"
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
                 code = agent_cli.main([
                     "benchmark", "--manifest",
                     str(ROOT / "benchmarks" / "research-benchmark-v1.json"),
                     "--run", str(ROOT / "benchmarks" / "research-benchmark-sample-run.json"),
-                    "--out", str(out_path), "--json",
+                    "--out", str(out_path), "--feedback-out", str(feedback_path),
+                    "--json",
                 ])
             self.assertEqual(0, code)
             self.assertTrue(out_path.exists())
             self.assertEqual("research-benchmark-v1",
                              json.loads(out_path.read_text(encoding="utf-8"))["schema_version"])
+            feedback = json.loads(feedback_path.read_text(encoding="utf-8"))
+            self.assertEqual(BENCHMARK_FEEDBACK_SCHEMA_VERSION,
+                             feedback["schema_version"])
+            self.assertIn("feedback", json.loads(stdout.getvalue()))
             self.assertIn("case_results", stdout.getvalue())
 
 
