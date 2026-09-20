@@ -149,7 +149,9 @@ precondition class. Each variant keeps observed states and unresolved counts,
 while `next_probes` exposes only stable research keys, bounded classifications
 and probe hints. The round snapshot is written under `S8/`; the next S2 prompt
 can reuse the portfolio to choose cross-surface and variant follow-ups. The
-artifact remains `claim_status=not-a-finding` and never carries reviewer notes,
+deterministic scheduler gives only a stable research-key or multi-dimension
+explicit match a small, explainable nudge and records the match in its
+schedule evidence. The artifact remains `claim_status=not-a-finding` and never carries reviewer notes,
 payloads, commands, process output, CVSS or G4/G5 evidence.
 
 ## Native targets

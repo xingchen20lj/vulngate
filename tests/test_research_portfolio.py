@@ -22,6 +22,7 @@ from agent.analysis.inventory import CoverageStore  # noqa: E402
 from agent.analysis.scheduler import (  # noqa: E402
     ScheduleContext,
     prompt_coverage_block,
+    score_candidate,
 )
 import agent_cli  # noqa: E402
 from agent.memory.portfolio import (  # noqa: E402
@@ -232,6 +233,18 @@ class ResearchPortfolioTests(unittest.TestCase):
         self.assertIn("项目级研究组合 / Project Research Portfolio", prompt)
         self.assertIn("provider-emulator", prompt)
         self.assertIn("not-a-finding", prompt)
+
+    def test_scheduler_gives_only_bounded_boost_to_matching_next_probe(self):
+        memory, _web, protocol, _cloud = self._memory()
+        portfolio = build_research_portfolio(memory)
+        before = score_candidate(protocol, ScheduleContext())
+        after = score_candidate(
+            protocol, ScheduleContext(research_portfolio=portfolio))
+        self.assertGreater(after.total, before.total)
+        guidance = after.evidence["research_portfolio"]
+        self.assertEqual("research-key", guidance["match_kind"])
+        self.assertEqual("not-a-finding", guidance["claim_status"])
+        self.assertLessEqual(guidance["applied_delta"], 2.0)
 
     def test_portfolio_cli_reads_and_rebuilds_the_bounded_artifact(self):
         memory, _web, _protocol, _cloud = self._memory()

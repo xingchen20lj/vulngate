@@ -98,6 +98,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   research memory, review feedback and benchmark context by research surface,
   target type, attack class, variant and precondition class, and emits
   deterministic `next_probes` without promoting portfolio state to a finding.
+- The scheduler now gives only an exact research-key or multi-dimension
+  explicit portfolio match a small, recorded priority nudge; broad/free-form
+  labels cannot steer a candidate and the nudge never changes G4/G5, CVSS or
+  finding status.
 
 ### Documentation
 

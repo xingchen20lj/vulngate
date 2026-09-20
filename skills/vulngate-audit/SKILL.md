@@ -512,6 +512,13 @@ Use `--rebuild` only when the target memory or review feedback was changed
 outside S8; an optional `--benchmark-feedback <json>` supplies the same
 explicit, normalized benchmark input used by the next schedule.
 
+The scheduler may apply at most a small bounded nudge to a candidate only when
+its stable research key matches a pending probe, or when at least two explicit
+metadata dimensions match and a declared variant also matches. Free-form
+surface prose is never enough. The match is recorded as scheduling evidence
+with `claim_status=not-a-finding`; it cannot select a finding, change CVSS, or
+satisfy G4/G5.
+
 Keep every cell, including harness failures and negative observations.
 
 #### Typed execution states
@@ -1260,6 +1267,10 @@ python3 scripts/agent_cli.py portfolio <target> --workspace <audit-dir> --json
 
 只有在 S8 之外修改了研究记忆或复核反馈时才使用 `--rebuild`；如需同时注入显式评测反馈，可传入
 `--benchmark-feedback <json>`。
+
+调度器只有在 research key 精确匹配，或至少两个显式维度且变体也匹配时，才会给待验证探针一个很小的
+有界排序提示；自由文本 surface 不足以触发。匹配会作为 `claim_status=not-a-finding` 的调度证据落盘，
+不能确认漏洞、修改 CVSS 或满足 G4/G5。
 
 所有 cell 都保留，包括 harness error 和负向观测。
 

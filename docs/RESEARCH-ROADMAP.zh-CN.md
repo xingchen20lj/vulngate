@@ -252,8 +252,9 @@ case、PoC、stdout/stderr 都不会被复制。趋势仍是 `not-a-finding`，�
 - 将纵向 benchmark 的回归面和告警码作为上下文带入组合视图，但仍保持 `claim_status=not-a-finding`。
 
 目标级产物是 `state/<target>/research-portfolio.json`，轮次快照是
-`state/<target>/round-NN/S8/research-portfolio.json`。下一轮 S2 prompt 会读取该视图，帮助宿主 Agent
-把跨面覆盖和变体缺口转成可证伪实验；它不改变候选状态、CVSS 或 G4/G5。
+`state/<target>/round-NN/S8/research-portfolio.json`。下一轮 S2 prompt 会读取该视图；调度器只对
+research key 或至少两个显式维度（含变体）的精确匹配施加很小的优先级增量，并把匹配证据写入
+schedule，帮助宿主 Agent 把跨面覆盖和变体缺口转成可证伪实验；它不改变候选状态、CVSS 或 G4/G5。
 
 ## 后续优先级
 

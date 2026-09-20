@@ -56,6 +56,7 @@ from ..memory.research import (
     load_research_memory,
     memory_match,
     memory_prompt_rows,
+    research_key,
 )
 from ..memory.portfolio import load_research_portfolio
 
@@ -253,6 +254,10 @@ RESEARCH_REVIEW_ACCEPTED_DAMPING = 0.75
 RESEARCH_REVIEW_REJECTED_DAMPING = 0.35
 RESEARCH_REVIEW_SCOPE_DAMPING = 0.85
 RESEARCH_REVIEW_NEEDS_EVIDENCE_BOOST = 4.0
+# The portfolio is a project-level view, so its scheduling signal is smaller
+# than a mechanism's direct runtime/review event.  It is a nudge for an
+# explicitly matching pending probe, never a finding or a hard selection.
+RESEARCH_PORTFOLIO_PROBE_BOOST = 2.0
 
 #: Duplicate threshold, used two ways.  Against a *reviewed region* it is the
 #: fraction of the candidate's own evidence that must already be covered
@@ -532,6 +537,89 @@ def _benchmark_surface_guidance(candidate: Dict[str, Any],
                 "claim_status": "not-a-finding",
             }
     return {}
+
+
+def _candidate_portfolio_values(candidate: Dict[str, Any]) -> Dict[str, set]:
+    """Return exact, explicit metadata eligible for portfolio matching."""
+    surface = candidate_research_surface(candidate)
+    target_type = str(candidate.get("target_type") or "").strip().lower()
+    attack_class = str(candidate.get("attack_class") or
+                       candidate.get("vuln_class") or
+                       candidate.get("category") or "").strip().lower()
+    precondition = str(candidate.get("precondition_class") or
+                       candidate.get("precondition_tier") or
+                       candidate.get("precondition_tier_hint") or "").strip().lower()
+    if precondition == "0":
+        precondition = "default"
+    variants = set()
+    for value in ([candidate.get("variant")] +
+                  list(candidate.get("variants") or []) +
+                  list(candidate.get("fix_variants") or []) +
+                  list(candidate.get("patch_variants") or [])):
+        text = str(value or "").strip().lower()
+        if text:
+            variants.add(text)
+    return {
+        "research_surface": {surface} if surface else set(),
+        "target_type": {target_type} if target_type else set(),
+        "attack_class": {attack_class} if attack_class else set(),
+        "precondition_class": {precondition} if precondition else set(),
+        "variant": variants,
+    }
+
+
+def _portfolio_probe_guidance(candidate: Dict[str, Any],
+                              portfolio: Dict[str, Any]) -> Dict[str, Any]:
+    """Find a bounded exact metadata match for a pending portfolio probe.
+
+    A free-form surface or a single shared word is never enough.  The match is
+    either the stable research key or at least two explicit dimensions,
+    including a variant when one is present.  This keeps project-level memory
+    useful without turning broad labels into an authorization or impact claim.
+    """
+    if not isinstance(portfolio, dict):
+        return {}
+    probes = [item for item in portfolio.get("next_probes") or []
+              if isinstance(item, dict)]
+    if not probes:
+        return {}
+    candidate_key = research_key(candidate)
+    values = _candidate_portfolio_values(candidate)
+    matches: List[Tuple[int, int, str, Dict[str, Any]]] = []
+    for probe in probes:
+        probe_key = str(probe.get("research_key") or "")
+        if not probe_key:
+            continue
+        probe_priority = min(5, _safe_weight(probe.get("priority")))
+        if probe_key == candidate_key:
+            matches.append((2, probe_priority, probe_key, probe))
+            continue
+        probe_values = {
+            "research_surface": {str(probe.get("research_surface") or "").lower()},
+            "target_type": {str(probe.get("target_type") or "").lower()},
+            "attack_class": {str(probe.get("attack_class") or "").lower()},
+            "precondition_class": {str(probe.get("precondition_class") or "").lower()},
+            "variant": {str(value).strip().lower()
+                        for value in (probe.get("variant") or [])
+                        if str(value).strip()},
+        }
+        dimensions = sum(bool(values[name] and probe_values[name] and
+                              values[name] & probe_values[name])
+                         for name in values)
+        variant_match = bool(values["variant"] & probe_values["variant"])
+        if dimensions >= 2 and (variant_match or not probe_values["variant"]):
+            matches.append((1, probe_priority, probe_key, probe))
+    if not matches:
+        return {}
+    match_kind, priority, probe_key, probe = sorted(
+        matches, key=lambda item: (-item[0], -item[1], item[2]))[0]
+    return {
+        "match_kind": "research-key" if match_kind == 2 else "explicit-dimensions",
+        "research_key": probe_key,
+        "priority": max(0, min(5, priority)),
+        "state": str(probe.get("state") or ""),
+        "claim_status": "not-a-finding",
+    }
 
 
 @dataclass
@@ -1178,6 +1266,13 @@ def score_candidate(candidate: Dict[str, Any], ctx: ScheduleContext,
                     "evidence_refs", "feedback_id"):
             if latest_evidence.get(key) not in (None, "", []):
                 evidence["research_memory"][key] = latest_evidence[key]
+    portfolio_guidance = _portfolio_probe_guidance(
+        candidate, ctx.research_portfolio)
+    if portfolio_guidance:
+        before = total
+        total = min(scale, total + RESEARCH_PORTFOLIO_PROBE_BOOST)
+        portfolio_guidance["applied_delta"] = round(total - before, 4)
+        evidence["research_portfolio"] = portfolio_guidance
     if ctx.benchmark_feedback:
         evidence["benchmark_feedback"] = {
             "benchmark_id": ctx.benchmark_feedback.get("benchmark_id", ""),
