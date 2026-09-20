@@ -1,0 +1,90 @@
+{
+  "schema_version": "research-benchmark-v1",
+  "benchmark_id": "vulngate-research-core-v1",
+  "description": "Small deterministic contract for claim safety, research efficiency, evidence completeness, and severity calibration.",
+  "cases": [
+    {
+      "case_id": "authz-tenant-bypass",
+      "truth": "vulnerable",
+      "expected_status": "confirmed",
+      "category": "authz",
+      "mechanism_key": "rk-authz-tenant-bypass",
+      "required_evidence": [
+        "source_to_sink",
+        "runtime_effect",
+        "authz_boundary",
+        "typed_effect",
+        "novelty_status",
+        "severity"
+      ],
+      "expected_severity": {"severity": "High", "score": 8.1}
+    },
+    {
+      "case_id": "guarded-parser-default",
+      "truth": "negative",
+      "expected_status": "excluded",
+      "category": "parser",
+      "mechanism_key": "rk-guarded-parser",
+      "required_evidence": [
+        "source_to_sink",
+        "negative_runtime",
+        "guard_evidence",
+        "novelty_status"
+      ],
+      "expected_severity": {"severity": "None", "score": 0.0}
+    },
+    {
+      "case_id": "capability-only-no-effect",
+      "truth": "negative",
+      "expected_status": "candidate",
+      "category": "capability-chain",
+      "mechanism_key": "rk-capability-only",
+      "required_evidence": ["source_to_sink", "negative_runtime"]
+    },
+    {
+      "case_id": "missing-jdk-gap",
+      "truth": "environment-gap",
+      "expected_status": "candidate",
+      "category": "precondition",
+      "mechanism_key": "rk-missing-jdk",
+      "required_evidence": ["environment_gap", "precondition", "reproduction"]
+    },
+    {
+      "case_id": "small-input-dos",
+      "truth": "vulnerable",
+      "expected_status": "confirmed",
+      "category": "dos",
+      "mechanism_key": "rk-small-input-dos",
+      "required_evidence": [
+        "source_to_sink",
+        "runtime_effect",
+        "typed_effect",
+        "precondition",
+        "severity"
+      ],
+      "expected_severity": {"severity": "Medium", "score": 6.5}
+    },
+    {
+      "case_id": "fixed-sibling-variant",
+      "truth": "negative",
+      "expected_status": "excluded",
+      "category": "fix-completeness",
+      "mechanism_key": "rk-fixed-sibling",
+      "required_evidence": [
+        "source_to_sink",
+        "negative_runtime",
+        "guard_evidence",
+        "fix_variant"
+      ],
+      "expected_severity": {"severity": "None", "score": 0.0}
+    },
+    {
+      "case_id": "novelty-uncertain-vulnerable",
+      "truth": "vulnerable",
+      "expected_status": "candidate",
+      "category": "novelty",
+      "mechanism_key": "rk-novelty-uncertain",
+      "required_evidence": ["source_to_sink", "runtime_effect", "novelty_status"]
+    }
+  ]
+}

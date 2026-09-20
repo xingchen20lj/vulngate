@@ -16,6 +16,7 @@ Usage:
   agent_cli.py cvss --vector <CVSS:3.1/...> [--tier <tier>] [--implicit-default-on]
   agent_cli.py ledger --workspace <dir> --target <name> --round <N> --entries <json>
   agent_cli.py deps --target <dir> [--out <report.md>] [--offline] [--cache <dir>]
+  agent_cli.py benchmark --manifest <gold.json> [--run <run.json>] [--out <result.json>] [--json]
   agent_cli.py review <target> --workspace <dir> (--research-key <rk>|--candidate-id <id>)
                            --status <accepted|rejected|needs-evidence|scope-corrected>
                            [--reason-code <code>] [--note <text>] [--evidence-ref <ref>]
@@ -523,6 +524,54 @@ def cmd_deps(args: argparse.Namespace) -> int:
                  "severity": f.severity,
                  "fixed_version": f.fixed_version} for f in findings[:30]],
     })
+    return 0
+
+
+def cmd_benchmark(args: argparse.Namespace) -> int:
+    """Score a deterministic research run against a gold benchmark manifest."""
+    from agent.evaluation.benchmark import (evaluate_benchmark,
+                                             load_benchmark_json,
+                                             normalize_manifest,
+                                             render_benchmark_text,
+                                             validate_manifest)
+
+    try:
+        manifest = load_benchmark_json(Path(args.manifest))
+        errors = validate_manifest(manifest)
+        if errors:
+            _out({"error": "invalid benchmark manifest", "errors": errors[:20],
+                  "manifest": str(Path(args.manifest).resolve())})
+            return 2
+        if not normalize_manifest(manifest).get("cases"):
+            _out({"error": "benchmark manifest has no valid cases",
+                  "manifest": str(Path(args.manifest).resolve())})
+            return 2
+        runs = []
+        for filename in args.run or []:
+            loaded = load_benchmark_json(Path(filename))
+            if isinstance(loaded.get("runs"), list) and "observations" not in loaded:
+                runs.extend(loaded["runs"])
+            else:
+                runs.append(loaded)
+        result = evaluate_benchmark(manifest, runs if runs else None)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        _out({"error": "%s: %s" % (type(exc).__name__, exc)})
+        return 2
+
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False),
+                            encoding="utf-8")
+    if args.json:
+        payload = dict(result)
+        if args.out:
+            payload["written_to"] = str(Path(args.out).resolve())
+        _out(payload)
+    else:
+        print(render_benchmark_text(result))
+        if args.out:
+            print("  written_to: %s" % Path(args.out).resolve())
     return 0
 
 
@@ -1195,6 +1244,20 @@ def build_parser() -> argparse.ArgumentParser:
     dp.add_argument("--offline", action="store_true")
     dp.add_argument("--cache", default=None)
     dp.set_defaults(fn=cmd_deps)
+
+    bm = sub.add_parser(
+        "benchmark",
+        help="score research behaviour against a deterministic gold manifest",
+    )
+    bm.add_argument("--manifest", required=True,
+                    help="benchmark JSON with cases and optional embedded runs")
+    bm.add_argument("--run", action="append", default=[],
+                    help="run JSON; repeat for independent runs")
+    bm.add_argument("--out", default=None,
+                    help="write the bounded result JSON to this path")
+    bm.add_argument("--json", action="store_true",
+                    help="machine-readable output")
+    bm.set_defaults(fn=cmd_benchmark)
 
     rv = sub.add_parser(
         "review",

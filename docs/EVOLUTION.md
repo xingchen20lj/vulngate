@@ -94,6 +94,17 @@ variant hints. Rejected mechanisms are damped, items marked
 remain visible; none of these signals changes a finding conclusion or satisfies
 G4/G5. The round S8 directory snapshots the feedback file for auditability.
 
+The next layer is a deterministic research-quality benchmark. A
+`research-benchmark-v1` manifest separates gold truth (`vulnerable`, `negative`,
+`environment-gap`) from the claim status the agent is allowed to emit and
+declares the evidence fields required for that case. `agent_cli.py benchmark`
+then measures observation coverage, confirmed precision/recall, unsafe
+confirmation of negative cases, environment-gap fidelity, repeated research
+keys with and without new evidence, evidence completeness, decision stability,
+and CVSS/severity calibration. The result is deliberately marked
+`not-a-finding`; it is a regression signal for the planner, scheduler and
+conclusion rules, not a way to promote a real report.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

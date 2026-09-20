@@ -21,7 +21,7 @@
 | 4 | 能力原语与攻击路径图 | 已实现（含 S4 运行时契约） | `capability-graph.json`、`capability-candidates.json`、`capability_contract`、`CAPABILITY/TRANSITION` 证据 | 低危原语只有在链路、transition 和终点 typed effect 均有观测时才允许继续评估 |
 | 5 | 运行时研究实验室与差分验证 | 已实现（定向 fuzz + 普通 S4） | `fuzz-corpus.json`、`FUZZ/runtime-lab.json`、`S4/runtime-lab.json`、版本/安全模式差分、缩减 reproducer | 固定输入可重复重放；差分、签名漂移与前置/harness 失败分开记录 |
 | 6 | 研究记忆与反馈学习 | 已实现（上下文 + 可回放人工复核） | `state/<target>/research-memory.json`、`state/<target>/review-feedback.json`、`S8/research-memory.json`、`S8/review-feedback.json`、`S4/runtime-lab.json`、`S4/processes.json`、配置快照、authz fixture、修复变体提示 | 新轮次能利用旧证据；服务/配置/授权/修复上下文可复现；人工复核可回放；环境缺口不被当成负证据；重复实验只降权不删除 |
-| 7 | 专家级评测基准 | 后续 | 真实/合成案例集、变体集、误报/漏报指标 | 用证据质量、覆盖率、校准度衡量，而不是只看候选数量 |
+| 7 | 专家级评测基准 | 已实现（核心契约 + 确定性评分器） | `benchmarks/research-benchmark-v1.json`、`benchmarks/research-benchmark-sample-run.json`、`benchmark-result.json` | 同时衡量负向安全、环境缺口保真度、重复率、证据完整度、结论解析和严重性校准 |
 
 ## 当前阶段：可证伪实验规划
 
@@ -127,9 +127,40 @@ python3 scripts/agent_cli.py review <target> --workspace <audit-dir> \
 目录。它只影响排序和下一步提示：`rejected` 降低重复，`needs-evidence` 提高补证据优先级，
 不能删除候选，也不能替代 G4/G5。
 
+## 阶段 7 初步实现：专家级评测基准
+
+新增 `research-benchmark-v1`，把“专家能力”拆成可以回归的研究质量指标。gold manifest 不保存
+漏洞 PoC，而只声明 case 的 truth class、期望 claim status、必需证据字段、机制键和可选期望
+严重性；run 记录只包含有界 status、证据字段标记、CVSS 和 research-key 事件。因此评测不会
+把 payload、命令、stdout/stderr 复制进结果，也不会成为漏洞账本。
+
+运行方式：
+
+```bash
+python3 scripts/agent_cli.py benchmark \
+  --manifest benchmarks/research-benchmark-v1.json \
+  --run benchmarks/research-benchmark-sample-run.json \
+  --out state/benchmark-result.json --json
+```
+
+评分器固定输出以下维度：
+
+- 观测覆盖率、期望 status 解析准确率、confirmed precision/recall；
+- `unsafe_confirmation_rate`：negative case 被错误确认的比例；
+- `environment_gap_fidelity`：不可执行/前置缺口是否保留为缺口，而非排除；
+- `repeat_rate` 与 `unjustified_repeat_rate`：同一 research key 的重复，以及没有
+  `new_evidence=true` 的重复；
+- required/present evidence completeness；
+- CVSS 平均绝对误差、1 分以内比例、ordinal error 和严重性夸大率；
+- 多次独立 run 的 decision stability。
+
+所有结果标记 `claim_status=not-a-finding`。评测只约束工程改进方向：负向安全、证据完整度或
+严重性校准下降时，必须回到候选生成、实验计划、调度或结论规则修正，不能用调高阈值掩盖问题。
+
 ## 后续优先级
 
-1. 建立评测基准，用负结果、重复率、证据完整度和严重性校准反向约束 Agent。
-2. 将评测结果反馈到候选生成、实验计划和调度权重，形成可量化的持续改进闭环。
+1. 将 benchmark 结果接入候选生成、实验计划和调度权重，形成可量化的持续改进闭环。
+2. 扩展真实/合成变体集，覆盖更多 Web、协议、云、移动端和 native 研究面，同时保持负结果
+   与环境缺口分离。
 
 每一阶段都必须同时更新实现、技能契约、回归测试和 CHANGELOG；只有测试、artifact schema 和安全边界一起稳定后，才适合提交为一个独立变更。

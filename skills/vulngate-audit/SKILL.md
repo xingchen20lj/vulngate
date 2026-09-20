@@ -658,6 +658,38 @@ Rules:
 - Preserve exclusions and negative evidence; do not delete them because a candidate failed.
 - Run a round-end cleanup check for audit-started processes and listeners. Record cleanup in the round summary.
 
+### Deterministic research benchmark
+
+Use the benchmark after changing candidate generation, scheduling, evidence
+contracts or conclusion/severity rules. The gold manifest and run record are
+separate from the target's finding ledger:
+
+```bash
+python3 scripts/agent_cli.py benchmark --manifest <gold.json> \
+  --run <run.json> --out <benchmark-result.json> --json
+```
+
+The manifest declares each case's `truth` (`vulnerable`, `negative`, or
+`environment-gap`), expected claim status, required evidence fields and, when
+applicable, expected severity. A run supplies only bounded case status,
+evidence-field markers, CVSS data and stable research-key events; raw PoC
+payloads, commands and process output are not benchmark evidence. The result
+keeps `claim_status=not-a-finding` and reports:
+
+- observation coverage and exact claim-resolution accuracy;
+- confirmed precision/recall plus unsafe confirmation rate for negative cases;
+- environment-gap fidelity, so an unavailable runtime cannot look like a clean
+  negative result;
+- repeat and unjustified-repeat rates from repeated research keys, with
+  `new_evidence=true` explicitly distinguishing a justified follow-up;
+- required/present evidence completeness; and
+- CVSS absolute error, within-one-point rate and severity overstatement.
+
+Do not use a benchmark score to promote a real finding or to bypass G4/G5. Use
+low negative-result fidelity, high unjustified-repeat rate, missing evidence,
+or severity overstatement as a reason to revise the planner, scheduler or
+conclusion rules, then rerun the same manifest.
+
 ## 7. Hard gates summary
 
 | Gate | Check | Prevents |
@@ -1306,6 +1338,26 @@ python3 scripts/agent_cli.py ledger --workspace <path> --target <name> --round <
 - 即使没标 `fix-completeness`，只要 surface 含 UAF/overflow/bypass/race/issue/CVE 等修复族信号，仍受该硬规则约束。
 - 负向证据和排除项必须保留，不能因为候选失败就删除。
 - 轮次结束检查并清理本轮启动的进程/监听，并在汇总中记录。
+
+### 确定性研究评测基准
+
+修改候选生成、调度、证据契约或结论/严重性规则后运行评测。gold manifest 与实际运行记录
+独立于目标漏洞账本：
+
+```bash
+python3 scripts/agent_cli.py benchmark --manifest <gold.json> \
+  --run <run.json> --out <benchmark-result.json> --json
+```
+
+manifest 为每个 case 声明 `truth`（`vulnerable`、`negative`、`environment-gap`）、期望 status、
+必需证据字段以及可选的期望严重性。run 只提交有界的 case status、证据字段标记、CVSS 和稳定
+research-key 事件；原始 PoC payload、命令和进程输出不能作为 benchmark 证据。结果保持
+`claim_status=not-a-finding`，并报告：观测覆盖率/结论解析准确率、确认 precision/recall、负向
+结果误确认率、环境缺口保真度、研究键重复率与无新证据重复率、证据完整度，以及 CVSS 误差/一
+分以内比例/严重性夸大率。
+
+评测分数不能升级真实漏洞或绕过 G4/G5。负向保真度低、无新证据重复率高、证据缺失或严重性
+夸大时，应修改计划器、调度器或结论规则，并用同一份 manifest 重跑。
 
 ## 7. 硬闸门摘要
 

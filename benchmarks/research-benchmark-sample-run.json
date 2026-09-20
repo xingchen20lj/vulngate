@@ -1,0 +1,90 @@
+{
+  "schema_version": "research-run-v1",
+  "run_id": "sample-agent-run",
+  "observations": [
+    {
+      "case_id": "authz-tenant-bypass",
+      "status": "confirmed",
+      "research_events": [
+        {"research_key": "rk-authz-tenant-bypass", "round": 1},
+        {"research_key": "rk-authz-tenant-bypass", "round": 2, "new_evidence": true}
+      ],
+      "evidence": {
+        "source_to_sink": true,
+        "runtime_effect": true,
+        "authz_boundary": true,
+        "typed_effect": true,
+        "novelty": {"verdict": "new"},
+        "cvss": {"score": 8.1, "severity": "High"}
+      },
+      "cvss": {"vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N"}
+    },
+    {
+      "case_id": "guarded-parser-default",
+      "status": "excluded",
+      "research_key": "rk-guarded-parser",
+      "round": 1,
+      "evidence": {
+        "source_to_sink": true,
+        "negative_runtime": true,
+        "guard_evidence": true,
+        "novelty": {"verdict": "known"},
+        "cvss": {"score": 0.0, "severity": "None"}
+      }
+    },
+    {
+      "case_id": "capability-only-no-effect",
+      "status": "candidate",
+      "research_key": "rk-capability-only",
+      "round": 1,
+      "execution_state": "executed-no-effect",
+      "evidence": {"source_to_sink": true, "negative_runtime": true}
+    },
+    {
+      "case_id": "missing-jdk-gap",
+      "status": "candidate",
+      "research_key": "rk-missing-jdk",
+      "round": 1,
+      "execution_state": "precondition-unavailable",
+      "evidence": {
+        "environment_gap": true,
+        "precondition": true,
+        "reproduction": {"status": "precondition-unavailable"}
+      }
+    },
+    {
+      "case_id": "small-input-dos",
+      "status": "confirmed",
+      "research_key": "rk-small-input-dos",
+      "round": 1,
+      "evidence": {
+        "source_to_sink": true,
+        "runtime_effect": true,
+        "typed_effect": true,
+        "precondition": true,
+        "cvss": {"score": 9.8, "severity": "Critical"}
+      },
+      "cvss": {"score": 9.8, "severity": "Critical"}
+    },
+    {
+      "case_id": "fixed-sibling-variant",
+      "status": "excluded",
+      "research_key": "rk-fixed-sibling",
+      "round": 1,
+      "evidence": {
+        "source_to_sink": true,
+        "negative_runtime": true,
+        "guard_evidence": true,
+        "fix_variant": true,
+        "cvss": {"score": 0.0, "severity": "None"}
+      }
+    },
+    {
+      "case_id": "novelty-uncertain-vulnerable",
+      "status": "candidate",
+      "research_key": "rk-novelty-uncertain",
+      "round": 1,
+      "evidence": {"source_to_sink": true, "runtime_effect": true}
+    }
+  ]
+}

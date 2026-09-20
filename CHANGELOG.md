@@ -66,6 +66,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   needs-evidence, or scope-corrected feedback in
   `state/<target>/review-feedback.json`; S8 snapshots it and the scheduler
   uses it only to reprioritize follow-up research.
+- Added the deterministic `research-benchmark-v1` evaluator and a safe sample
+  manifest/run. It measures observation coverage, confirmed precision/recall,
+  negative-result safety, environment-gap fidelity, justified versus
+  unjustified research-key repeats, evidence completeness, decision stability,
+  and CVSS/severity calibration; benchmark output remains
+  `claim_status=not-a-finding`.
 
 ### Documentation
 
@@ -83,6 +89,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   quickstart, evolution notes, and audit skill.
 - Documented the replayable human-review feedback contract, review CLI, bounded
   statuses/reason codes, and its separation from G4/G5 conclusions.
+- Documented the benchmark manifest/run contract and the metrics that constrain
+  planner, scheduler and conclusion-rule regressions.
 
 ## [1.1.0] - 2026-09-16
 

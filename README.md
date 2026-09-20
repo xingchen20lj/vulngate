@@ -86,7 +86,7 @@ Current gate identifiers are **G0, G1, G1b, G3, G4, and G5**; G1b is the default
 
 - **Host-native orchestration** — uses the model already configured in Codex; no separate API key is required for the recommended mode.
 - **S1–S8 research lifecycle** — attack surface → candidates → source audit → PoC matrix → novelty → severity → finding document → evidence ledger.
-- **Deterministic helper CLI** — `agent_cli.py` provides source mapping/evidence, matrix execution, novelty checks, CVSS consistency, ledger rendering, dependency checks, probe diagnostics, and staging helpers.
+- **Deterministic helper CLI** — `agent_cli.py` provides source mapping/evidence, matrix execution, novelty checks, CVSS consistency, ledger rendering, dependency checks, research benchmarking, probe diagnostics, and staging helpers.
 - **Version × feature × precondition validation** — PoCs are evaluated across explicit cells rather than a single best-effort run.
 - **Stateful/race experiment contract** — cells can declare bounded step sequences, concurrency, and an availability probe; ordered `STEP`/`STATE` evidence is retained without treating declarations as proof.
 - **Capability-chain runtime contract** — capability candidates carry a bounded `capability_contract` into S4 cells; `CAPABILITY`/`TRANSITION` traces are classified as `no-trace`, `partial`, or `complete`, while typed effects remain a separate evidence requirement.
@@ -95,6 +95,7 @@ Current gate identifiers are **G0, G1, G1b, G3, G4, and G5**; G1b is the default
 - **Bounded service context** — stateful S4 runs may start one workspace-local argv-only service, require a loopback health check, reuse a healthy instance, kill the complete process group, and persist `S4/processes.json`; `runtime-lab.json` includes a credential-free configuration snapshot and stable authz/tenant fixture IDs.
 - **Cross-round research memory** — S8 persists stable mechanism keys, replay/differential states, environment gaps, and next-probe hints in `state/<target>/research-memory.json`; S2 reuses that evidence to damp exact repeats and prioritize actionable differences without treating memory as a finding.
 - **Human review feedback loop** — `agent_cli.py review` records bounded accepted/rejected/needs-evidence/scope-corrected feedback by stable research key; S8 replays it into target memory and S2 uses it only to reprioritize follow-up work, never to replace G4/G5 evidence.
+- **Research-quality benchmark** — `agent_cli.py benchmark` scores deterministic gold cases and run records for observation coverage, negative-result safety, environment-gap fidelity, repeat rate, evidence completeness, decision stability, and severity calibration; results remain `not-a-finding`.
 - **Falsifiable experiment planning** — S2 emits bounded plans with required observations and explicit falsifiers for baseline, authz, state, availability, fix variants, and typed effects; plans remain `not-a-finding`.
 - **Capability-primitive path search** — S1 derives bounded `read` / `write` / `exec` / `ssrf` and credential/evaluation chains from the entry/sink/flow indices, preserves missing primitives, and emits minimal verification sequences; static chains remain `not-a-finding` until data-flow and runtime typed-effect evidence exist.
 - **Authorization-aware matrices** — web/application candidates can include identity × role × tenant × object context.
@@ -127,6 +128,8 @@ python3 scripts/agent_cli.py coverage demo --root /path/to/source \
 python3 scripts/agent_cli.py controls demo --workspace /path/to/audit --show-candidates
 python3 scripts/agent_cli.py differential demo --workspace /path/to/audit --show-candidates
 python3 scripts/agent_cli.py capability demo --workspace /path/to/audit --show-candidates
+python3 scripts/agent_cli.py benchmark --manifest benchmarks/research-benchmark-v1.json \
+  --run benchmarks/research-benchmark-sample-run.json --json
 bash macos/run-audit.sh /Applications/Target.app /path/to/native-audit
 ```
 
