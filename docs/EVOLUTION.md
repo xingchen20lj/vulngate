@@ -27,6 +27,16 @@ helps S3 choose the next probe but cannot satisfy G4/G5 without persisted
 runtime evidence. See [the research roadmap](RESEARCH-ROADMAP.zh-CN.md) for the
 next capability layers.
 
+The capability layer is now wired into the same evidence path. S1 derives
+`capability-graph.json` from the entry/sink/flow indices and persists bounded
+`capability-candidates.json` for explicit primitive equations such as
+`read -> credential-read -> exec`, `ssrf -> internal-effect`, and
+`write -> config-control -> exec`. Each candidate names its observed and
+missing primitives, transition rules, source locations and verification
+sequence. These are static research hypotheses (`not-a-finding`) that require
+manual data-flow review and runtime typed-effect evidence; a missing primitive
+is a next probe, not proof that the chain is absent.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable
@@ -39,7 +49,7 @@ not contain method bodies and cannot by itself establish a vulnerability.
 
 Use an independent `--workspace` for each audit so checkpoints and evidence do
 not enter the installed plugin cache. Missing external tools are reported as
-precondition gaps. Static coverage, control and differential output remains a
+precondition gaps. Static coverage, control, differential and capability output remains a
 lead until the S1-S8 evidence gates are satisfied.
 
 The regression suite covers the analysis indexes, scheduler, installer,

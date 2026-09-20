@@ -35,9 +35,10 @@ class TargetConfig:
     # auditing every configured candidate; a positive value caps the round and
     # lets the scheduler choose which ones, deferring the rest with a reason.
     max_candidates: int = 0
-    # Index-derived candidates (spec §11/§12) enter the round's pool
-    # automatically: an unguarded path and a sibling control differential are
-    # exactly the "high value candidates" the spec says to promote, and they are
+    # Index-derived candidates (spec §11/§12 plus capability paths) enter the
+    # round's pool automatically: an unguarded path, sibling control
+    # differential, and explicit primitive chain are exactly the "high value
+    # candidates" the spec says to promote, and they are
     # derived from persisted indices, not from the model.  Set false to run the
     # pre-PR4 proposal path unchanged -- e.g. to compare a round with and
     # without them.

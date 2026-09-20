@@ -20,7 +20,9 @@ Storage layout follows spec §3::
     ├── uncovered-regions.json   coverage-summary.json
     ├── control-map.json         control-candidates.json        (PR4, spec §11)
     ├── sibling-groups.json      differential-index.json        (PR4, spec §12)
-    └── differential-candidates.json
+    ├── differential-candidates.json
+    ├── capability-graph.json    capability-candidates.json     (research paths)
+    └── inventory-summary.json
 
 Files not yet produced by an implemented phase are omitted rather than written
 empty, so ``coverage-summary.json`` can always state which indices it had.
@@ -38,6 +40,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..tools import search as srch
+from . import capability_graph as capability_analysis
 from . import controls as control_map
 from . import differential as differential_analysis
 from . import models
@@ -684,6 +687,9 @@ class InventoryResult:
     differential: Dict[str, Any] = field(default_factory=dict)
     sibling_groups: List[Dict[str, Any]] = field(default_factory=list)
     differential_candidates: List[Dict[str, Any]] = field(default_factory=list)
+    #: Bounded capability-primitive graph and its S2 research candidates.
+    capability_graph: Dict[str, Any] = field(default_factory=dict)
+    capability_candidates: List[Dict[str, Any]] = field(default_factory=list)
     symbol_read_failures: Dict[str, str] = field(default_factory=dict)
     callgraph_summary: Dict[str, Any] = field(default_factory=dict)
     flow_summary: Dict[str, Any] = field(default_factory=dict)
@@ -756,6 +762,8 @@ class InventoryResult:
             "differential": self.differential.get("summary", {}),
             "sibling_groups": len(self.sibling_groups),
             "differential_candidates": len(self.differential_candidates),
+            "capability_graph": self.capability_graph.get("summary", {}),
+            "capability_candidates": len(self.capability_candidates),
             "records_relinked": self.relinked,
         }
 
@@ -779,6 +787,7 @@ class InventoryResult:
             "flow_summary": self.flow_summary,
             "control_map": self.control_map,
             "differential": self.differential,
+            "capability_graph": self.capability_graph,
             "symbol_read_failures": dict(self.symbol_read_failures),
         }
 
@@ -827,6 +836,8 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
     diff_dict: Dict[str, Any] = {}
     sibling_groups: List[Dict[str, Any]] = []
     diff_candidates: List[Dict[str, Any]] = []
+    capability_dict: Dict[str, Any] = {}
+    capability_candidates: List[Dict[str, Any]] = []
     if with_flows:
         symbol_records, read_failures = extract_symbols(root, production_rels, flt)
         # Replace PR1's ``<file>#<nearest-declaration>`` hint with the real
@@ -858,6 +869,9 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
         sibling_groups = differential_result.group_dicts()
         diff_candidates = differential_analysis.differential_candidates(
             differential_result.findings)
+        capability_dict = capability_analysis.build_capability_graph(
+            entries, sinks, flows, controls)
+        capability_candidates = list(capability_dict.get("candidates") or [])
 
     entry_counts: Dict[str, int] = {}
     for entry in entries:
@@ -893,6 +907,8 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
         control_map=cmap, control_candidates=control_candidates,
         differential=diff_dict, sibling_groups=sibling_groups,
         differential_candidates=diff_candidates,
+        capability_graph=capability_dict,
+        capability_candidates=capability_candidates,
         relinked=relinked,
         non_source_files=universe.non_source_files,
         scanned_files=universe.scanned_files,
@@ -946,6 +962,13 @@ def persist_inventory(store: CoverageStore, result: InventoryResult,
         written[differential_analysis.DIFFERENTIAL_CANDIDATE_INDEX] = str(
             store.write(differential_analysis.DIFFERENTIAL_CANDIDATE_INDEX,
                         result.differential_candidates))
+    if result.capability_graph:
+        written[capability_analysis.CAPABILITY_GRAPH_INDEX] = str(
+            store.write(capability_analysis.CAPABILITY_GRAPH_INDEX,
+                        result.capability_graph))
+        written[capability_analysis.CAPABILITY_CANDIDATE_INDEX] = str(
+            store.write(capability_analysis.CAPABILITY_CANDIDATE_INDEX,
+                        result.capability_candidates))
     written["inventory-summary"] = str(store.write("inventory-summary", {
         "root": result.root, "target": result.target,
         "generated_at": result.generated_at, "elapsed_ms": result.elapsed_ms,
@@ -981,6 +1004,10 @@ def load_inventory(store: CoverageStore) -> Dict[str, Any]:
             differential_analysis.DIFFERENTIAL_INDEX) or {},
         differential_analysis.DIFFERENTIAL_CANDIDATE_INDEX: store.read_records(
             differential_analysis.DIFFERENTIAL_CANDIDATE_INDEX),
+        capability_analysis.CAPABILITY_GRAPH_INDEX: store.read(
+            capability_analysis.CAPABILITY_GRAPH_INDEX) or {},
+        capability_analysis.CAPABILITY_CANDIDATE_INDEX: store.read_records(
+            capability_analysis.CAPABILITY_CANDIDATE_INDEX),
         "inventory-summary": store.read("inventory-summary") or {},
         "call-graph-summary": store.read("call-graph-summary") or {},
         "flow-summary": store.read("flow-summary") or {},

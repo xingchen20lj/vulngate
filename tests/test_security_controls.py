@@ -511,12 +511,14 @@ class PersistenceTests(ControlFixture):
 
     def test_static_candidates_read_control_map_and_differential(self):
         from agent.analysis import differential as DIFF
+        from agent.analysis import capability_graph as CAP
         static = CTL.static_candidates(self.store)
         sources = {c["source"] for c in static}
         self.assertIn("control-map", sources)
-        self.assertTrue(sources <= {"control-map", "differential"})
+        self.assertTrue(sources <= {"control-map", "differential", "capability-graph"})
         self.assertEqual(len(self.candidates()) + len(
-            DIFF.load_differential_candidates(self.store)), len(static))
+            DIFF.load_differential_candidates(self.store)) + len(
+            CAP.load_capability_candidates(self.store)), len(static))
 
     def test_merging_never_displaces_an_existing_id(self):
         existing = [{"candidate_id": "ctl-authz-0001", "surface": "kept"}]
@@ -525,7 +527,7 @@ class PersistenceTests(ControlFixture):
         kept = [c for c in pool if c["candidate_id"] == "ctl-authz-0001"]
         self.assertEqual([existing[0]], kept)
         # Everything else from the store is added, ahead of the given pool.
-        self.assertEqual(len(self.candidates()) - 1, len(added))
+        self.assertEqual(len(CTL.static_candidates(self.store)) - 1, len(added))
         self.assertEqual([c["candidate_id"] for c in pool
                           if c["candidate_id"] in added], added)
         self.assertEqual(pool[-1], existing[0])

@@ -28,11 +28,13 @@ Module map:
 ``controls``    security-control index + control map, Entry->Sink verdicts (§11)
 ``scheduler``   coverage-aware candidate scheduling (§13/§14)
 ``differential`` sibling/differential analysis: where a family disagrees (§12)
+``capability_graph`` bounded capability-primitive composition and research paths
 """
 
 from __future__ import annotations
 
 __all__ = [
+    "capability_graph",
     "callgraph",
     "coverage",
     "controls",

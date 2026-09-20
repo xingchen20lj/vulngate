@@ -167,7 +167,7 @@ Run stages in order unless a hard gate or explicit scope rule ends a candidate.
   python3 "$PLUGIN_ROOT/scripts/agent_cli.py" coverage <target> --workspace <audit-dir> --root <source-root> --rebuild --json
   ```
 
-  Keep `<audit-dir>` outside the plugin cache. In S2, merge all candidates from `control-candidates.json` and `differential-candidates.json` into the host's candidate pool before calling `schedule`; use `selected_ids` for this round and preserve the full pool for later rounds. After writing the S8 ledger, run `coverage` again with the same workspace to refresh review status. The config-driven pipeline performs S1 indexing and S2 merging automatically.
+  Keep `<audit-dir>` outside the plugin cache. In S2, merge all candidates from `control-candidates.json`, `differential-candidates.json`, and `capability-candidates.json` into the host's candidate pool before calling `schedule`; use `selected_ids` for this round and preserve the full pool for later rounds. After writing the S8 ledger, run `coverage` again with the same workspace to refresh review status. The config-driven pipeline performs S1 indexing and S2 merging automatically.
 - **Coverage ledger:** S1 also builds the target-scoped `state/<target>/coverage/` index (source universe, entries, sinks, security controls) and writes the coverage summary. Every production source file is either `indexed` or carries an explicit `skip_reason`; excluded directories are recorded with a file count instead of being dropped silently. Query it at any time:
 
   ```bash
@@ -175,7 +175,7 @@ Run stages in order unless a hard gate or explicit scope rule ends a candidate.
   ```
 
   The audit's stop condition is `HIGH-risk uncovered == 0`, not "no new candidates". A zero denominator renders `n/a`, never `100%`.
-- **Cross-procedural layer:** the same index also carries `symbol-index.json`, `call-graph.json`, `flow-index.json`, `sink-reachability.json`, `control-map.json`, `sibling-groups.json` and `differential-index.json`. Sinks are analysed in both directions — forward from every external entry, and backward from every sink — so a path only the sink scan can see is either a confirmed flow or a recorded `coverage_gap`. Flow paths are `heuristic-callgraph`: they are leads, never proofs, and nothing in this layer may set `runtime-verified`. `FlowRecord.direction` states the path *shape*:
+- **Cross-procedural layer:** the same index also carries `symbol-index.json`, `call-graph.json`, `flow-index.json`, `sink-reachability.json`, `control-map.json`, `sibling-groups.json`, `differential-index.json`, and the bounded `capability-graph.json` / `capability-candidates.json`. Sinks are analysed in both directions — forward from every external entry, and backward from every sink — so a path only the sink scan can see is either a confirmed flow or a recorded `coverage_gap`. Flow paths are `heuristic-callgraph`: they are leads, never proofs, and nothing in this layer may set `runtime-verified`. `FlowRecord.direction` states the path *shape*:
   - `cross-procedural` — at least one call edge (the useful case);
   - `intra-symbol` — entry and sink in the same method; this is the archetypal "handler does the dangerous thing" finding and keeps full priority;
   - `module-scope` — entry and sink both at module level in one file. Reported, but ranked below real call chains, because a file is not a handler.
@@ -188,6 +188,11 @@ Run stages in order unless a hard gate or explicit scope rule ends a candidate.
   python3 scripts/agent_cli.py controls <target> --show-candidates
   python3 scripts/agent_cli.py differential <target> --show-candidates \
     --fix-history state/<target>/round-01/S1/security-fix-history.json
+  ```
+- **Capability-primitive search:** `capability-graph.json` maps observed entry/flow/sink signals to bounded `read` / `write` / `exec` / `ssrf` / credential and evaluation primitives. `capability-candidates.json` composes only explicitly listed equations, records `observed_capabilities` versus `missing_capabilities`, and emits a minimal verification sequence. A complete-looking chain is still `claim_status=not-a-finding`, `requires_manual_dataflow=true`, and `runtime_required=true`; missing primitives are pending research goals, never negative evidence or an RCE claim.
+
+  ```bash
+  python3 scripts/agent_cli.py capability <target> --show-candidates
   ```
 - Gate **G0**: reject dead/unsupported code paths.
 - Gate **G1**: require reachability from untrusted input. If unreachable, retain source evidence for the exclusion.
@@ -276,9 +281,10 @@ What this buys across rounds:
 - the residual sweep (spec §14) recomputes the gaps, so each round's input is
   the *new* gap list rather than the same top-N.
 
-Two index-derived candidate families are **prepended** to the pool before
-scoring: the control map's `ctl-*` candidates (spec §11) and the differential's
-`dif-*` candidates (spec §12), both already persisted by S1. They are
+Three index-derived candidate families are **prepended** to the pool before
+scoring: the control map's `ctl-*` candidates (spec §11), the differential's
+`dif-*` candidates (spec §12), and the capability graph's `cap-*` research
+paths, all already persisted by S1. They are
 deliberately **not capped** — their ids are regenerated identically every round,
 so a truncated prefix would starve every later finding forever; oversize pools
 are absorbed by the quota. Ties go to the candidate with a citable `file:line`
@@ -761,7 +767,7 @@ reports/<target>/round-NN/...
   python3 "$PLUGIN_ROOT/scripts/agent_cli.py" coverage <target> --workspace <audit-dir> --root <source-root> --rebuild --json
   ```
 
-  `<audit-dir>` 必须在插件缓存之外。S2 先把 `control-candidates.json`、`differential-candidates.json` 的完整候选与宿主候选合并，再调用 `schedule`；本轮按 `selected_ids` 执行，完整池保留到后续轮次。S8 账本落盘后使用同一 workspace 再运行 `coverage` 刷新审计状态。配置驱动的管线会自动完成 S1 索引和 S2 合并。
+  `<audit-dir>` 必须在插件缓存之外。S2 先把 `control-candidates.json`、`differential-candidates.json`、`capability-candidates.json` 的完整候选与宿主候选合并，再调用 `schedule`；本轮按 `selected_ids` 执行，完整池保留到后续轮次。S8 账本落盘后使用同一 workspace 再运行 `coverage` 刷新审计状态。配置驱动的管线会自动完成 S1 索引和 S2 合并。
 - **覆盖率账本：** S1 同时构建目标级 `state/<target>/coverage/` 索引（源码全集、入口、sink、安全控制），并写出覆盖率摘要。每个生产源码文件要么 `indexed`，要么带明确 `skip_reason`；被排除的目录会记录文件数，而不是被静默丢弃。随时可查：
 
   ```bash
@@ -769,7 +775,7 @@ reports/<target>/round-NN/...
   ```
 
   审计的停止条件是 `高风险未审计 == 0`，不是“没有新候选”。分母为 0 时渲染 `n/a`，绝不显示 `100%`。
-- **跨过程层：** 同一份索引还包含 `symbol-index.json`、`call-graph.json`、`flow-index.json`、`sink-reachability.json`、`control-map.json`、`sibling-groups.json`、`differential-index.json`。sink 做双向分析——从每个外部入口正向、从每个 sink 反向——只有 sink 扫描能看见的路径会成为有效 flow 或记录在案的 `coverage_gap`。flow 路径置信度是 `heuristic-callgraph`：它是线索，不是证明，本层任何结论都不得置为 `runtime-verified`。`FlowRecord.direction` 表示路径**形态**：
+- **跨过程层：** 同一份索引还包含 `symbol-index.json`、`call-graph.json`、`flow-index.json`、`sink-reachability.json`、`control-map.json`、`sibling-groups.json`、`differential-index.json`，以及有界的 `capability-graph.json` / `capability-candidates.json`。sink 做双向分析——从每个外部入口正向、从每个 sink 反向——只有 sink 扫描能看见的路径会成为有效 flow 或记录在案的 `coverage_gap`。flow 路径置信度是 `heuristic-callgraph`：它是线索，不是证明，本层任何结论都不得置为 `runtime-verified`。`FlowRecord.direction` 表示路径**形态**：
   - `cross-procedural`：至少含一条调用边（有价值的一类）；
   - `intra-symbol`：入口与 sink 在同一个方法内——这正是「handler 直接做危险操作」的典型 finding，保留完整优先级；
   - `module-scope`：入口与 sink 都在同一文件的模块作用域。仍会记录，但排在真实调用链之后，因为文件不是 handler。
@@ -782,6 +788,11 @@ reports/<target>/round-NN/...
   python3 scripts/agent_cli.py controls <target> --show-candidates
   python3 scripts/agent_cli.py differential <target> --show-candidates \
     --fix-history state/<target>/round-01/S1/security-fix-history.json
+  ```
+- **能力原语搜索：** `capability-graph.json` 将入口/flow/sink 的静态信号映射成有界的 `read` / `write` / `exec` / `ssrf` / 凭据 / 求值原语。`capability-candidates.json` 只组合显式方程，分别记录 `observed_capabilities` 与 `missing_capabilities`，并给出最小验证序列。即使链看起来闭合，仍必须保持 `claim_status=not-a-finding`、`requires_manual_dataflow=true`、`runtime_required=true`；缺失原语是待研究目标，不是负证据，更不是 RCE 结论。
+
+  ```bash
+  python3 scripts/agent_cli.py capability <target> --show-candidates
   ```
 - **G0：** 排除死代码/无支撑路径。
 - **G1：** 必须存在不可信输入可达性；不可达时保留源码证据用于排除。
@@ -854,8 +865,8 @@ python3 scripts/agent_cli.py coverage <target> --schedule
 - 延后的候选保留分数与理由，下一轮针对已变化的覆盖重新调度；
 - 残留扫描（spec §14）重算缺口，因此每轮的输入是**新的**缺口列表，而不是固定的 top-N。
 
-两类索引派生的候选会在打分前被**前置**进候选池：控制图的 `ctl-*`（spec §11）
-与差分的 `dif-*`（spec §12），两者都已由 S1 持久化。它们刻意**不设上限**——
+三类索引派生的候选会在打分前被**前置**进候选池：控制图的 `ctl-*`（spec §11）、
+差分的 `dif-*`（spec §12）和能力图的 `cap-*` 研究链，它们都已由 S1 持久化。它们刻意**不设上限**——
 其 id 每轮确定性重建，截断前缀会让后面所有发现永远饿死；超大池由配额机制吸收。
 平分时优先取带有可引用 `file:line` 与具名缺失控制的候选。
 在目标配置里设 `static_candidates: false` 可只调度模型自己提出的候选。

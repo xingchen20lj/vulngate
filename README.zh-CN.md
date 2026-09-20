@@ -90,6 +90,7 @@ Evidence Gates
 - **版本 × Feature × 前置条件验证** —— PoC 以显式 cell 矩阵运行，而不是单次 best-effort 测试。
 - **授权边界矩阵** —— Web/应用类候选可加入身份 × 角色 × 租户 × 对象维度。
 - **可证伪实验规划** —— S2 为基线、授权、有状态、可用性、修复变体和 typed effect 生成带必需观测/证伪条件的有界计划；计划保持 `not-a-finding`，不会冒充漏洞结论。
+- **能力原语与攻击路径图** —— S1 从 entry/sink/flow 索引生成有界 `read` / `write` / `exec` / `ssrf` 等能力链候选，区分已观察与缺失原语，并自动生成最小验证序列；链路始终保持 `not-a-finding`，等待数据流与运行时 typed effect 证据。
 - **逐 cell 运行时前置** —— 声明需要的 JDK/runtime 必须真实可用，否则记录 `precondition-unavailable`，不会静默使用其他运行时替代。
 - **S4 证据收敛** —— 已落盘矩阵证据不会被 Agent/spawn 超时元数据覆盖。
 - **保守 Novelty** —— 公开查询失败会保留为不确定状态，而不会被转化为“未发现公开记录”。
@@ -105,6 +106,7 @@ Evidence Gates
 - 完整生产源码清单，显式记录跳过原因，从审计账本推导覆盖状态。
 - 启发式符号、调用图，以及入口到 sink 的正向/反向路径。
 - 逐路径安全控制缺口和同族 handler 差分；产出候选线索，等待验证。
+- 能力原语图与显式攻击链方程；保留缺失中间能力，不把静态组合直接升级为 RCE。
 - 按证据评分、类别配额调度候选，延期工作保留到后续轮次。
 - macOS `.app`/`.dmg`/`.pkg`、Mach-O 元数据、Electron ASAR/source map 与 JAR 视图。
 
@@ -113,6 +115,7 @@ python3 scripts/agent_cli.py coverage demo --root /path/to/source \
   --workspace /path/to/audit --rebuild --show-uncovered
 python3 scripts/agent_cli.py controls demo --workspace /path/to/audit --show-candidates
 python3 scripts/agent_cli.py differential demo --workspace /path/to/audit --show-candidates
+python3 scripts/agent_cli.py capability demo --workspace /path/to/audit --show-candidates
 bash macos/run-audit.sh /Applications/Target.app /path/to/native-audit
 ```
 
@@ -179,7 +182,7 @@ npm install -g @openai/codex
 
 | 阶段 | 目的 | 代表性输出 | 闸门 |
 |---|---|---|---|
-| S1 | 攻击面、入口、危险调用点、修复历史/变体、项目画像、目标类型规则、复合攻击链候选 | `S1/entry-inventory.json`、`S1/security-fix-history.json`、`S1/patch-variants.json`、`S1/project-profile.json`、`S1/target-rules.json`、`S1/composite-chain-hints.json`、`S1/composite-chain-candidates.json` | G0 死代码、G1 可达性 |
+| S1 | 攻击面、入口、危险调用点、修复历史/变体、项目画像、目标类型规则、复合攻击链、能力原语候选 | `S1/entry-inventory.json`、`S1/security-fix-history.json`、`S1/patch-variants.json`、`S1/project-profile.json`、`S1/target-rules.json`、`S1/composite-chain-candidates.json`、`S1/capability-graph.json`、`S1/capability-candidates.json` | G0 死代码、G1 可达性 |
 | S2 | 候选矩阵与可证伪研究计划：surface × entry × input × mechanism | `S2/candidate-matrix.json`、`S2/experiment-plans.json` | — |
 | S3 | 带 file:line 证据的源码审计、Source→Sink hints、residuals | `S3/audit-notes.json`、`S3/residuals.json` | G1b 默认配置门控 |
 | S4 | PoC 矩阵：版本 × safe mode × 前置条件；可选 authz 与有界状态/并发实验 | `S4/matrix-runs/<c>/cells.json`、`S4/execution-status.json`、`S4/authz-matrix.json` | G4 运行时证据 |

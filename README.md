@@ -90,6 +90,7 @@ Current gate identifiers are **G0, G1, G1b, G3, G4, and G5**; G1b is the default
 - **Version × feature × precondition validation** — PoCs are evaluated across explicit cells rather than a single best-effort run.
 - **Stateful/race experiment contract** — cells can declare bounded step sequences, concurrency, and an availability probe; ordered `STEP`/`STATE` evidence is retained without treating declarations as proof.
 - **Falsifiable experiment planning** — S2 emits bounded plans with required observations and explicit falsifiers for baseline, authz, state, availability, fix variants, and typed effects; plans remain `not-a-finding`.
+- **Capability-primitive path search** — S1 derives bounded `read` / `write` / `exec` / `ssrf` and credential/evaluation chains from the entry/sink/flow indices, preserves missing primitives, and emits minimal verification sequences; static chains remain `not-a-finding` until data-flow and runtime typed-effect evidence exist.
 - **Authorization-aware matrices** — web/application candidates can include identity × role × tenant × object context.
 - **Per-cell runtime requirements** — a required JDK/runtime must actually be available; otherwise the cell is recorded as `precondition-unavailable` instead of silently falling back.
 - **Evidence convergence** — persisted matrix evidence is not overwritten by agent/spawn timeout metadata.
@@ -109,6 +110,8 @@ the new deterministic commands require no additional model API key.
 - Heuristic symbols, call graphs and forward/backward entry-to-sink paths.
 - Per-path control gaps and sibling-handler differentials, with candidates
   retained as leads until verified.
+- Capability-primitive graphs and explicit attack-chain equations that retain
+  missing intermediate capabilities instead of promoting static composition to RCE.
 - Candidate scoring and category quotas that preserve deferred work across rounds.
 - macOS `.app`/`.dmg`/`.pkg`, Mach-O metadata, Electron ASAR/source maps and JAR views.
 
@@ -117,6 +120,7 @@ python3 scripts/agent_cli.py coverage demo --root /path/to/source \
   --workspace /path/to/audit --rebuild --show-uncovered
 python3 scripts/agent_cli.py controls demo --workspace /path/to/audit --show-candidates
 python3 scripts/agent_cli.py differential demo --workspace /path/to/audit --show-candidates
+python3 scripts/agent_cli.py capability demo --workspace /path/to/audit --show-candidates
 bash macos/run-audit.sh /Applications/Target.app /path/to/native-audit
 ```
 
@@ -185,7 +189,7 @@ For an autonomous run using your own compatible LLM API key:
 
 | Stage | Purpose | Representative outputs | Gate |
 |---|---|---|---|
-| S1 | Attack-surface mapping, entry inventory, danger sites, fix history/variants, project profile, target rules, composite-chain candidates | `S1/entry-inventory.json`, `S1/security-fix-history.json`, `S1/patch-variants.json`, `S1/project-profile.json`, `S1/target-rules.json`, `S1/composite-chain-hints.json`, `S1/composite-chain-candidates.json` | G0 dead code, G1 reachability |
+| S1 | Attack-surface mapping, entry inventory, danger sites, fix history/variants, project profile, target rules, composite-chain and capability candidates | `S1/entry-inventory.json`, `S1/security-fix-history.json`, `S1/patch-variants.json`, `S1/project-profile.json`, `S1/target-rules.json`, `S1/composite-chain-candidates.json`, `S1/capability-graph.json`, `S1/capability-candidates.json` | G0 dead code, G1 reachability |
 | S2 | Candidate matrix and falsifiable research plans: surface × entry × input × mechanism | `S2/candidate-matrix.json`, `S2/experiment-plans.json` | — |
 | S3 | Source audit with file:line evidence, source-to-sink hints, residuals | `S3/audit-notes.json`, `S3/residuals.json` | G1b default-config gating |
 | S4 | PoC matrix: version × safe mode × precondition; optional authz and bounded state/concurrency context | `S4/matrix-runs/<c>/cells.json`, `S4/execution-status.json`, `S4/authz-matrix.json` | G4 runtime evidence |

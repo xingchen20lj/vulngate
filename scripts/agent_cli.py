@@ -19,6 +19,8 @@ Usage:
   agent_cli.py coverage <target> [--workspace <dir>] [--rebuild] [--show-uncovered]
                            [--json] [--risk high|medium|low] [--category authz]
                            [--module <prefix>] [--lang zh|en]
+  agent_cli.py capability <target> [--workspace <dir>] [--rebuild]
+                             [--show-candidates] [--json]
   agent_cli.py spawn-probe --workspace <dir> --target <name> --round <N>
                            --status ok|degraded [--reply <agent-reply>]
   agent_cli.py staging-exec --authorized-staging --host <ECS> --user <user> ...
@@ -867,6 +869,67 @@ def cmd_controls(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_capability(args: argparse.Namespace) -> int:
+    """Capability primitives and bounded attack-path hypotheses.
+
+    The graph is deterministic and static.  It reports observed/missing
+    primitives and the next verification sequence; it never promotes a
+    composed path to a vulnerability finding or a runtime impact claim.
+    """
+    from agent.analysis import capability_graph as capability
+
+    try:
+        workspace, store, rebuilt, _ = _ensure_coverage_analysis(
+            args, (capability.CAPABILITY_GRAPH_INDEX,))
+    except FileNotFoundError as exc:
+        _out({"error": "target source root not found", "root": str(exc),
+              "hint": "pass --root <src root> (with --rebuild) or run S1 first"})
+        return 2
+
+    graph = capability.load_capability_graph(store)
+    candidates = capability.load_capability_candidates(store)
+    if args.limit_candidates:
+        candidates = candidates[:args.limit_candidates]
+    summary = graph.get("summary") or {}
+    payload: Dict[str, Any] = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "summary": summary,
+        "candidates": candidates,
+    }
+    if rebuilt is not None:
+        payload["rebuilt"] = rebuilt
+    if args.json:
+        payload["nodes"] = (graph.get("nodes") or [])[:max(0, args.limit)]
+        payload["edges"] = (graph.get("edges") or [])[:max(0, args.limit)]
+        _out(payload)
+        return 0
+
+    label = "能力原语图" if args.lang == "zh" else "Capability primitive graph"
+    print("\n%s" % label)
+    print("─" * 46)
+    print("  nodes %s  edges %s  flows %s  paths %s" % (
+        summary.get("nodes", 0), summary.get("edges", 0),
+        summary.get("flows_considered", 0), summary.get("paths", 0)))
+    print("  observed %s" % (summary.get("observed_capabilities") or {}))
+    print("  complete %s  partial %s  truncated %s" % (
+        summary.get("complete_hypotheses", 0),
+        summary.get("partial_hypotheses", 0),
+        summary.get("truncated", False)))
+    if args.show_candidates:
+        title = "待验证攻击链（不是漏洞结论）" if args.lang == "zh" \
+            else "Verification candidates (not findings)"
+        print("\n%s" % title)
+        for candidate in candidates[:max(0, args.limit)]:
+            missing = ",".join(candidate.get("missing_capabilities") or []) or "none"
+            print("  %-16s %-42s missing=%s" % (
+                candidate.get("candidate_id", ""),
+                candidate.get("chain_equation", ""), missing))
+    if rebuilt is not None:
+        print("\n[index rebuilt from %s]" % rebuilt["root"])
+    return 0
+
+
 def cmd_differential(args: argparse.Namespace) -> int:
     """Sibling / differential analysis (spec §12): where siblings disagree.
 
@@ -1170,6 +1233,14 @@ def build_parser() -> argparse.ArgumentParser:
                           "default: newest state/<target>/round-*/S1/"
                           "security-fix-history.json")
     dfs.set_defaults(fn=cmd_differential)
+
+    cap = sub.add_parser(
+        "capability",
+        help="capability primitives and bounded attack-path hypotheses; "
+             "paths are not findings",
+    )
+    _add_analysis_args(cap)
+    cap.set_defaults(fn=cmd_capability)
 
     sp = sub.add_parser(
         "spawn-probe",

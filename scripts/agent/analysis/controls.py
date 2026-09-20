@@ -798,7 +798,7 @@ def load_control_candidates(store: Any) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def static_candidates(store: Any) -> List[Dict[str, Any]]:
-    """Every index-derived candidate: control map (§11) then differential (§12).
+    """Every index-derived candidate: controls, differential, capability paths.
 
     Both are already persisted by :func:`agent.analysis.inventory.build_inventory`,
     so this is a read -- it never re-derives, and it never consults an LLM.
@@ -815,6 +815,10 @@ def static_candidates(store: Any) -> List[Dict[str, Any]]:
     # control vocabulary), so the dependency may only be resolved at call time.
     from . import differential as differential_analysis
     candidates.extend(differential_analysis.load_differential_candidates(store))
+    # Capability paths are deliberately read-only here.  Inventory owns graph
+    # construction; S2 only merges the persisted, explicitly non-finding leads.
+    from . import capability_graph as capability_analysis
+    candidates.extend(capability_analysis.load_capability_candidates(store))
     return candidates
 
 

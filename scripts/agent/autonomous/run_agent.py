@@ -355,6 +355,47 @@ def _persist_coverage_inventory(root: Path, name: str, dest: Path,
         return {"error": "%s: %s" % (type(exc).__name__, exc)}
 
 
+def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
+    """Refresh the capability graph for older autonomous workspaces once.
+
+    New targets already pass through :func:`_persist_coverage_inventory`, but
+    an existing workspace may predate the capability index.  Rebuild only when
+    that index is absent, and keep the failure as an explicit best-effort note
+    so S2 can still run with the model/configured pool.
+    """
+    from ..analysis import capability_graph as capability
+    from ..analysis import coverage as cov
+    from ..analysis.inventory import (CoverageStore, build_inventory,
+                                      load_inventory, persist_inventory)
+
+    store = CoverageStore(ctx.root, ctx.cfg.name)
+    if store.path(capability.CAPABILITY_GRAPH_INDEX).exists():
+        return {"rebuilt": False, "graph": capability.load_capability_graph(store),
+                "candidates": capability.load_capability_candidates(store)}
+
+    target_root = ctx.root / "targets" / ctx.cfg.name
+    if not target_root.exists():
+        target_root = ctx.root
+    source_dirs = list(ctx.cfg.source_dirs or [])
+    if target_root != ctx.root and source_dirs and not any(
+            (target_root / source_dir).exists() for source_dir in source_dirs):
+        target_root = ctx.root
+    try:
+        result = build_inventory(target_root, source_dirs or None,
+                                 target=ctx.cfg.name,
+                                 target_type=ctx.cfg.target_type)
+        persist_inventory(store, result, target_type=ctx.cfg.target_type)
+        store.write("coverage-summary", cov.compute_coverage(load_inventory(store)))
+        return {"rebuilt": True,
+                "graph": capability.load_capability_graph(store),
+                "candidates": capability.load_capability_candidates(store),
+                "root": str(target_root)}
+    except Exception as exc:  # pragma: no cover - autonomous is best-effort
+        return {"rebuilt": False,
+                "error": "%s: %s" % (type(exc).__name__, exc),
+                "graph": {}, "candidates": []}
+
+
 class AutoCtx:
     def __init__(self, root: Path, cfg: TargetConfig, llm: LLMClient,
                  offline: bool, max_candidates: int, max_rounds: int,
@@ -545,6 +586,7 @@ def static_candidates(ctx: AutoCtx, round_no: Optional[int] = None
     try:
         from ..analysis import controls as ctl
         from ..analysis.inventory import CoverageStore
+        _ensure_capability_inventory(ctx)
         store = CoverageStore(ctx.root, ctx.cfg.name)
         candidates = ctl.static_candidates(store)
     except Exception as exc:  # pragma: no cover - defensive
@@ -1392,6 +1434,14 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
     ctx.write_artifact(round_no, "S1", "composite-chain-hints.json", chain_hints)
     ctx.write_artifact(round_no, "S1", "composite-chain-candidates.json",
                        chain_candidates)
+    capability_state = _ensure_capability_inventory(ctx)
+    ctx.write_artifact(round_no, "S1", "capability-graph.json",
+                       capability_state.get("graph") or {})
+    ctx.write_artifact(round_no, "S1", "capability-candidates.json",
+                       capability_state.get("candidates") or [])
+    if capability_state.get("error"):
+        ctx.write_artifact(round_no, "S1", "capability-graph-error.json", {
+            "error": capability_state["error"]})
 
     # ---- S2: candidates (resumable) -----------------------------------
     s2 = store.load_stage("S2")

@@ -22,6 +22,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   complete candidate pool. Plans carry required observations and explicit
   falsifiers for baseline, authorization, state/race, availability, fix
   variants and typed effects, and are explicitly marked `not-a-finding`.
+- S1 now builds a bounded capability-primitive graph from the persisted
+  entry/sink/flow indices and promotes explicit `read` / `write` / `exec` /
+  `ssrf` / credential/evaluation chain hypotheses into S2. Every path records
+  observed versus missing primitives, provenance, transition rules and a
+  minimal verification sequence; capability paths remain
+  `claim_status=not-a-finding` until manual data-flow and runtime typed-effect
+  evidence exist.
 
 ### Documentation
 
@@ -29,6 +36,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   [`docs/RESEARCH-ROADMAP.zh-CN.md`](docs/RESEARCH-ROADMAP.zh-CN.md), including
   acceptance criteria for capability-graph, runtime-lab, memory and evaluation
   stages.
+- Documented the `capability` CLI report and the additional S1/S2 coverage
+  artifacts in the VulnGate audit skill.
 
 ## [1.1.0] - 2026-09-16
 

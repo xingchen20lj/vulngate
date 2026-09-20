@@ -117,13 +117,15 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
     had them.
     """
     from ..analysis import controls as ctl
+    from ..analysis import capability_graph as capability
     from ..analysis import coverage as cov
     from ..analysis import differential as diff
     from ..analysis.inventory import CoverageStore, build_inventory, persist_inventory
 
     store = CoverageStore(ctx.workspace, ctx.target)
     required = ("source-inventory", "flow-index", "symbol-index",
-                ctl.CONTROL_MAP_INDEX, diff.DIFFERENTIAL_INDEX)
+                ctl.CONTROL_MAP_INDEX, diff.DIFFERENTIAL_INDEX,
+                capability.CAPABILITY_GRAPH_INDEX)
     missing = [name for name in required if not store.path(name).exists()]
     built = False
     if missing:
@@ -140,6 +142,7 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
     flow_summary = store.read("flow-summary") or {}
     control_summary = (store.read(ctl.CONTROL_MAP_INDEX) or {}).get("summary") or {}
     differential_summary = (store.read(diff.DIFFERENTIAL_INDEX) or {}).get("summary") or {}
+    capability_summary = (store.read(capability.CAPABILITY_GRAPH_INDEX) or {}).get("summary") or {}
     if control_summary:
         info["control_map"] = {
             "flows": control_summary.get("flows"),
@@ -155,6 +158,17 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
             "findings": differential_summary.get("findings"),
             "findings_by_kind": differential_summary.get("findings_by_kind"),
             "findings_by_risk": differential_summary.get("findings_by_risk"),
+        }
+    if capability_summary:
+        info["capability_graph"] = {
+            "nodes": capability_summary.get("nodes"),
+            "edges": capability_summary.get("edges"),
+            "flows_considered": capability_summary.get("flows_considered"),
+            "observed_capabilities": capability_summary.get("observed_capabilities"),
+            "paths": capability_summary.get("paths"),
+            "complete_hypotheses": capability_summary.get("complete_hypotheses"),
+            "partial_hypotheses": capability_summary.get("partial_hypotheses"),
+            "truncated": capability_summary.get("truncated"),
         }
     if summary:
         info["call_graph"] = {
@@ -300,6 +314,22 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
     except Exception as exc:  # pragma: no cover - defensive
         coverage_index = {"error": "%s: %s" % (type(exc).__name__, exc)}
     ctx.store.write_artifact("S1", "coverage-summary.json", coverage_index)
+    # Keep the graph and its candidates visible in the round checkpoint as
+    # well as in the target-scoped coverage store.  This makes S1 evidence
+    # auditable without duplicating the graph-building logic.
+    try:
+        from ..analysis import capability_graph as capability
+        from ..analysis.inventory import CoverageStore
+        coverage_store = CoverageStore(ctx.workspace, ctx.target)
+        ctx.store.write_artifact(
+            "S1", "capability-graph.json",
+            capability.load_capability_graph(coverage_store))
+        ctx.store.write_artifact(
+            "S1", "capability-candidates.json",
+            capability.load_capability_candidates(coverage_store))
+    except Exception as exc:  # pragma: no cover - evidence mirror is best-effort
+        ctx.store.write_artifact("S1", "capability-graph-error.json", {
+            "error": "%s: %s" % (type(exc).__name__, exc)})
     return {"jars": jars_info, "entries": entries, "gate_scan_count": len(gate_scan),
             "version_diff": version_diff, "danger_site_count": len(danger_sites),
             "security_fix_count": len(patch_history),
