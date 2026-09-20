@@ -1718,6 +1718,12 @@ def build_schedule(workspace: Path, target: str,
     portfolio = load_research_portfolio(workspace, target)
     threat_model = load_threat_model(workspace, target)
     prior_strategy = load_research_strategy(workspace, target)
+    # Replay calibration is an optional, bounded research-only input.  Keep
+    # the import local so the scheduler's analysis imports do not create a
+    # cycle through the evaluation package during CLI startup.
+    from ..evaluation.replay_calibration import load_replay_calibration
+
+    prior_replay_calibration = load_replay_calibration(workspace, target)
     target_type = str(threat_model.get("target_type") or "")
     strategy = build_research_strategy(
         threat_model=threat_model,
@@ -1732,7 +1738,8 @@ def build_schedule(workspace: Path, target: str,
     review_feedback = load_review_feedback(workspace, target)
     if strategy:
         strategy, _research_guidance = apply_research_guidance(
-            strategy, portfolio, review_feedback, round_no)
+            strategy, portfolio, review_feedback, round_no,
+            replay_calibration=prior_replay_calibration)
         write_research_guidance(workspace, target, _research_guidance)
     write_research_strategy(workspace, target, strategy)
     ctx = ScheduleContext.from_store(

@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- S8/S2 now produce `research-replay-calibration-v1` from bounded real-project
+  round history. `agent_cli.py replay-calibrate` measures replacement hit rate,
+  unproductive repeats, environment recovery, fixture-budget truncation, and
+  comparison gaps; only a validated sample can change the replacement
+  zero-gain threshold between one and two rounds. The artifact is
+  `not-a-finding` and cannot affect candidate status, CVSS, G4, or G5.
+
 - S2/S4 now carry `comparison-orchestration-v1` for bounded cross-version and
   fix-completeness research. Configured version pairs are compared on the same
   fixture/lane, read-only patch parent/fixed references remain explicit

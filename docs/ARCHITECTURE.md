@@ -67,6 +67,15 @@ sibling paths explicitly unexecuted when no operator-supplied artifact exists.
 A patch reference is never treated as a runtime result; a missing old or fixed
 runtime is an environment gap rather than evidence that the fix works.
 
+S8 also builds `research-replay-calibration-v1` from the target's bounded
+round snapshots. It measures whether replacement actions produced new
+information, whether environment gaps recovered, and whether fixture budgets
+or comparison arms left coverage incomplete. With at least three matched
+replays, the result may select only a one- or two-round zero-gain threshold for
+future guidance; insufficient history keeps the default. The calibration
+artifact contains no raw payloads, commands, output, credentials, or finding
+evidence, and changes S2/S8 research scheduling only.
+
 ## Two operating modes
 
 | Mode | Reasoning | Setup | Typical use |

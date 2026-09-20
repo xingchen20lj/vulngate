@@ -56,6 +56,11 @@ S4 runtime lab 会在配置的 fixture 预算内把规范化计划展开为
 变化、仅签名漂移、相同观测或 inconclusive；如果没有操作者提供的构建产物，源码 revision 和同族路径会明确
 保持未执行。补丁引用不是运行时结果；旧版本或修复版本缺失时是环境缺口，而不是“修复有效”的证据。
 
+S8 还会从目标的有界轮次快照生成 `research-replay-calibration-v1`。它测量替换动作是否带来新信息、环境
+缺口是否恢复，以及 fixture 预算或 comparison arm 是否造成覆盖不完整。只有至少三条匹配回放时，结果才可
+将后续 guidance 的零增益阈值在一轮与两轮之间选择；样本不足时保持默认值。校准产物不包含原始 payload、命令、
+输出、凭据或漏洞证据，只影响 S2/S8 的研究调度。
+
 S1 中包含授权边界和危险 Sink 的启发式 Source→Sink 路径会写入
 `composite-chain-candidates.json`，并在 S2 进入与模型候选、控制图候选、同族差分候选相同的调度池。它们始终保留
 `heuristic-nearby` / `requires_manual_dataflow=true`，只能作为审计和 PoC

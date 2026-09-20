@@ -36,8 +36,9 @@
 | 19 | 研究面专用变体与三车道实验计划 | 已实现（bounded surface variant matrix） | `surface-variant-plan-v1`、`S2/experiment-plans.json`、`S2/candidate-matrix.json`、策略 guidance 中的 `surface_variant_plan` | Web/协议/云/移动/native 按各自状态机、身份边界、生命周期或方法体验证选择变体；每个变体同时保留正向、负向/安全等价、环境缺口车道；计划不等于执行，不改变 G4/G5 |
 | 20 | 研究面 fixture 与状态机执行上下文 | 已实现（bounded S4 lane expansion） | `surface-variant-fixture-v1`、`VULNGATE_VARIANT_*`、`S4/runtime-lab.json` lane context | 在 fixture 预算内把每个选中变体展开为三车道 runner cell，向 PoC 提供固定状态步骤和脱敏 lane 元数据；显式记录预算截断；车道仍不是观测，不改变 G4/G5/CVSS |
 | 21 | 跨版本与修复变体自动对照编排 | 已实现（bounded comparison orchestration） | `comparison-orchestration-v1`、S2 comparison contract、S4 `comparison` summaries | 将配置版本对、只读 patch parent/fixed 引用和同族变体提示绑定到同一 fixture/lane；区分 bucket 变化、签名漂移、环境缺口和未执行 arm；差异仍不是漏洞结论 |
+| 22 | 真实项目回放校准与替换阈值 | 已实现（bounded replay calibration） | `research-replay-calibration-v1`、`state/<target>/coverage/research-replay-calibration.json`、`S8/research-replay-calibration.json`、`replay-calibrate` CLI | 只从有界 guidance/feedback/runtime-lab 快照计算替换命中率、环境恢复、fixture 截断和 comparison gap；样本不足保持默认，样本充分时阈值最多为 1/2 轮；不改变候选、CVSS、G4/G5 |
 
-## 当前阶段：可证伪实验规划
+## 已实现基础：可证伪实验规划
 
 规划器从候选的可观察信号生成有界计划：
 
@@ -383,10 +384,24 @@ S2→S4→S8 的单向契约：
 - comparison summary、candidate status 和 S4 merge 都只保存有界身份与状态，不改变 candidate conclusion、
   CVSS、G4 或 G5；S8 会把这些对照状态以白名单形式并入跨轮研究记忆，供下一轮继续补证。
 
+## 阶段 22 初步实现：真实项目回放校准
+
+阶段 18 的 guidance 已经能指出“应该换实验”，但固定阈值可能在不同项目上过早替换，或让无信息重复
+持续占用 fixture 预算。阶段 22 增加 `research-replay-calibration-v1`，只使用已经落盘的有界快照：
+
+- 从每轮 `S8/research-guidance.json`、`S8/research-strategy-feedback.json` 和 `S4/runtime-lab.json`
+  提取匹配的 guidance/feedback 对，不复制原始 payload、命令、stdout/stderr、凭据或漏洞结论；
+- 统计替换建议的实际命中率、无信息重复率、环境缺口恢复率、fixture 预算截断率和 comparison gap 率，
+  并保留每轮的有限 outcome 分类，方便审计“建议是否真的改变了信息”；
+- `agent_cli.py replay-calibrate <target> --workspace <dir> --json` 可以独立重建目标级校准产物；S8 在写入本轮
+  guidance/feedback 后更新 `state/<target>/coverage/` 与 `S8/` 快照，下一轮 S2/S8 复用上一轮已验证的策略；
+- 只有至少三条已匹配回放、且替换命中率低并伴随高无信息重复时，才把零增益阈值从 1 调整到 2；fixture
+  截断或 comparison gap 只生成恢复/预算告警，不会把计划缺口当成负向证据；所有产物继续保持 `not-a-finding`。
+
 ## 后续优先级
 
-1. 用真实项目回放校准各类 guidance 的阈值和替换命中率，尤其检查 fixture 预算截断与 comparison gap 的覆盖解释，避免“换实验”本身变成无证据的循环。
-2. 在操作者提供受控历史构建产物后，补充 source-revision arm 的执行适配器，同时保持 checkout、审批和资源边界。
-3. 用更多细粒度 fixture/state-machine 回放样例校准五类研究面的状态步骤覆盖，保留 runner 的回环、审批和资源上限。
+1. 在操作者提供受控历史构建产物后，补充 source-revision arm 的执行适配器，同时保持 checkout、审批和资源边界。
+2. 用更多细粒度 fixture/state-machine 回放样例校准五类研究面的状态步骤覆盖，保留 runner 的回环、审批和资源上限。
+3. 继续积累跨项目回放样本，分别校准 environment recovery、comparison gap 和 fixture budget 的告警边界，避免把样本偏差固化为调度规则。
 
 每一阶段都必须同时更新实现、技能契约、回归测试和 CHANGELOG；只有测试、artifact schema 和安全边界一起稳定后，才适合提交为一个独立变更。

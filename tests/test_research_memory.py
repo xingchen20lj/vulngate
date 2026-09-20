@@ -487,6 +487,8 @@ class ResearchMemoryTests(unittest.TestCase):
                                    / "research-strategy-feedback.json")
         round_guidance = (self.root / "state" / "target" / "round-01" / "S8"
                           / "research-guidance.json")
+        round_calibration = (self.root / "state" / "target" / "round-01" / "S8"
+                             / "research-replay-calibration.json")
         target_portfolio = self.root / "state" / "target" / "research-portfolio.json"
         target_strategy = (self.root / "state" / "target" / "coverage"
                            / "research-strategy.json")
@@ -498,6 +500,7 @@ class ResearchMemoryTests(unittest.TestCase):
         self.assertTrue(round_portfolio.exists())
         self.assertTrue(round_strategy_feedback.exists())
         self.assertTrue(round_guidance.exists())
+        self.assertTrue(round_calibration.exists())
         self.assertTrue(target_portfolio.exists())
         self.assertTrue(target_strategy.exists())
         self.assertTrue(target_guidance.exists())
@@ -505,6 +508,8 @@ class ResearchMemoryTests(unittest.TestCase):
                          result["research_memory"]["artifact"])
         self.assertEqual("state/target/research-portfolio.json",
                          result["research_portfolio"]["artifact"])
+        self.assertEqual("state/target/coverage/research-replay-calibration.json",
+                         result["research_replay_calibration"]["artifact"])
         self.assertEqual("state/target/coverage/research-strategy.json",
                          result["research_strategy"]["artifact"])
         self.assertEqual("research-strategy-feedback-v1",
@@ -512,6 +517,9 @@ class ResearchMemoryTests(unittest.TestCase):
                              encoding="utf-8"))["schema_version"])
         self.assertEqual("research-strategy-guidance-v1",
                          json.loads(round_guidance.read_text(
+                             encoding="utf-8"))["schema_version"])
+        self.assertEqual("research-replay-calibration-v1",
+                         json.loads(round_calibration.read_text(
                              encoding="utf-8"))["schema_version"])
         portfolio = json.loads(target_portfolio.read_text(encoding="utf-8"))
         self.assertEqual("research-portfolio-v1", portfolio["schema_version"])

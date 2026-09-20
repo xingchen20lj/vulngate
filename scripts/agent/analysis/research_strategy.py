@@ -49,6 +49,8 @@ MAX_OBSERVATION_CANDIDATES = 8
 MAX_GUIDANCE_REASON_CODES = 6
 MAX_GUIDANCE_VARIANT_GAPS = 8
 MAX_GUIDANCE_SOURCES = 4
+MAX_ZERO_GAIN_STREAK = 8
+DEFAULT_REPLACEMENT_ZERO_GAIN_ROUNDS = 1
 
 STRATEGY_KINDS = frozenset({
     "path-closure",
@@ -401,6 +403,10 @@ def _normalize_observation(value: Any) -> Dict[str, Any]:
     information_gain = _int(value.get("information_gain"), 0, 0, 5)
     cumulative_gain = _int(value.get("cumulative_information_gain"),
                             information_gain, 0, 32)
+    zero_gain_streak = _int(
+        value.get("zero_gain_streak"),
+        1 if information_gain == 0 else 0,
+        0, MAX_ZERO_GAIN_STREAK)
     digest = _text(value.get("evidence_digest"), 40).lower()
     if digest and not re.fullmatch(r"sg-[0-9a-f]{24}", digest):
         digest = ""
@@ -418,6 +424,7 @@ def _normalize_observation(value: Any) -> Dict[str, Any]:
         "falsifier_codes": falsifiers,
         "information_gain": information_gain,
         "cumulative_information_gain": cumulative_gain,
+        "zero_gain_streak": zero_gain_streak,
         "evidence_digest": digest,
         "claim_status": STRATEGY_CLAIM_STATUS,
     }
@@ -448,6 +455,9 @@ def _normalize_guidance(value: Any) -> Dict[str, Any]:
         {"accepted", "rejected", "needs-evidence", "scope-corrected"}, "")
     observation_status = _code(
         value.get("observation_status"), STRATEGY_OBSERVATION_STATUSES, "")
+    replacement_rounds = _int(
+        value.get("replacement_zero_gain_rounds"),
+        DEFAULT_REPLACEMENT_ZERO_GAIN_ROUNDS, 1, 2)
     surface_variant_plan = normalize_surface_variant_plan(
         value.get("surface_variant_plan"))
     return {
@@ -461,6 +471,7 @@ def _normalize_guidance(value: Any) -> Dict[str, Any]:
         "missing_observations": missing,
         "review_status": review_status,
         "observation_status": observation_status,
+        "replacement_zero_gain_rounds": replacement_rounds,
         "last_round": _int(value.get("last_round"), 0, 0, 1000000),
         "surface_variant_plan": surface_variant_plan,
         "claim_status": STRATEGY_CLAIM_STATUS,
@@ -566,7 +577,9 @@ def _missing_guidance_action(missing: Sequence[str]) -> tuple:
 
 def _item_guidance(item: Mapping[str, Any], portfolio: Mapping[str, Any],
                    reviews: Mapping[str, Mapping[str, Any]],
-                   round_no: int) -> Dict[str, Any]:
+                   round_no: int,
+                   replacement_zero_gain_rounds: int =
+                   DEFAULT_REPLACEMENT_ZERO_GAIN_ROUNDS) -> Dict[str, Any]:
     """Fuse observation, review, and variant metadata into one next action."""
     observation = item.get("observation")
     observation = observation if isinstance(observation, Mapping) else {}
@@ -581,6 +594,13 @@ def _item_guidance(item: Mapping[str, Any], portfolio: Mapping[str, Any],
     except (TypeError, ValueError):
         information_gain = 0
     information_gain = max(0, min(5, information_gain))
+    zero_gain_streak = _int(
+        observation.get("zero_gain_streak"),
+        1 if information_gain == 0 else 0,
+        0, MAX_ZERO_GAIN_STREAK)
+    replacement_zero_gain_rounds = _int(
+        replacement_zero_gain_rounds,
+        DEFAULT_REPLACEMENT_ZERO_GAIN_ROUNDS, 1, 2)
     review = reviews.get(_text(item.get("research_key"), 80), {})
     review_status = _text(review.get("status"), 32).lower()
     variant = _variant_guidance_rows(item, portfolio)
@@ -644,6 +664,7 @@ def _item_guidance(item: Mapping[str, Any], portfolio: Mapping[str, Any],
 
     replacement = bool(
         information_gain == 0 and
+        zero_gain_streak >= replacement_zero_gain_rounds and
         current_status not in {"unobserved", "environment-gap"} and
         action != "repair-environment")
     if replacement:
@@ -661,6 +682,7 @@ def _item_guidance(item: Mapping[str, Any], portfolio: Mapping[str, Any],
         "next_action": action,
         "priority_delta": priority_delta,
         "replacement_recommended": replacement,
+        "replacement_zero_gain_rounds": replacement_zero_gain_rounds,
         "reason_codes": reasons[:MAX_GUIDANCE_REASON_CODES],
         "sources": sources[:MAX_GUIDANCE_SOURCES],
         "variant_gaps": variant_gaps[:MAX_GUIDANCE_VARIANT_GAPS],
@@ -858,6 +880,12 @@ def _item_observation(item: Mapping[str, Any], matches: Sequence[Mapping[str, An
     information_gain = min(5, len(new_signals) + len(new_states))
     if previous and information_gain == 0 and current_status != previous.get("current_status"):
         information_gain = 1
+    previous_zero_gain_streak = _int(
+        previous.get("zero_gain_streak"), 0, 0, MAX_ZERO_GAIN_STREAK)
+    zero_gain_streak = (
+        min(MAX_ZERO_GAIN_STREAK, previous_zero_gain_streak + 1)
+        if information_gain == 0 else 0
+    )
     matched_ids = set(previous.get("matched_candidate_ids") or [])
     matched_ids.update(_text(summary.get("candidate_id"), 120)
                        for summary in matches if summary.get("candidate_id"))
@@ -888,6 +916,7 @@ def _item_observation(item: Mapping[str, Any], matches: Sequence[Mapping[str, An
         "cumulative_information_gain": min(
             32, _int(previous.get("cumulative_information_gain"), 0, 0, 32)
             + information_gain),
+        "zero_gain_streak": zero_gain_streak,
         "evidence_digest": digest,
         "claim_status": STRATEGY_CLAIM_STATUS,
     }
@@ -999,6 +1028,7 @@ def apply_research_guidance(
         research_portfolio: Optional[Mapping[str, Any]] = None,
         review_feedback: Optional[Mapping[str, Any]] = None,
         round_no: int = 0,
+        replay_calibration: Optional[Mapping[str, Any]] = None,
         ) -> tuple:
     """Attach a bounded next-action layer to a research strategy.
 
@@ -1009,6 +1039,21 @@ def apply_research_guidance(
     """
     normalized = normalize_research_strategy(strategy)
     round_value = _int(round_no, 0, 0, 1000000)
+    replacement_zero_gain_rounds = DEFAULT_REPLACEMENT_ZERO_GAIN_ROUNDS
+    if isinstance(replay_calibration, Mapping) and \
+            replay_calibration.get("schema_version") == \
+            "research-replay-calibration-v1" and \
+            replay_calibration.get("status") == "calibrated":
+        calibration_metrics = replay_calibration.get("metrics")
+        if not isinstance(calibration_metrics, Mapping):
+            calibration_metrics = {}
+        policy = replay_calibration.get("policy")
+        replayable = _int(
+            calibration_metrics.get("replayed_guidance_items"), 0, 0, 1000000)
+        if replayable >= 3 and isinstance(policy, Mapping):
+            replacement_zero_gain_rounds = _int(
+                policy.get("replacement_zero_gain_rounds"),
+                DEFAULT_REPLACEMENT_ZERO_GAIN_ROUNDS, 1, 2)
     empty = {
         "schema_version": STRATEGY_GUIDANCE_SCHEMA_VERSION,
         "strategy_schema_version": STRATEGY_SCHEMA_VERSION,
@@ -1020,6 +1065,7 @@ def apply_research_guidance(
             "environment_repairs": 0,
             "review_followups": 0,
             "variant_gaps": 0,
+            "replacement_zero_gain_rounds": replacement_zero_gain_rounds,
             "action_counts": {},
             "claim_status": STRATEGY_CLAIM_STATUS,
         },
@@ -1037,7 +1083,9 @@ def apply_research_guidance(
     review_count = 0
     variant_gap_count = 0
     for item in normalized.get("items") or []:
-        guidance = _item_guidance(item, portfolio, reviews, round_value)
+        guidance = _item_guidance(
+            item, portfolio, reviews, round_value,
+            replacement_zero_gain_rounds=replacement_zero_gain_rounds)
         item["guidance"] = guidance
         action = guidance.get("next_action", "continue-path-closure")
         action_counts[action] += 1
@@ -1055,6 +1103,8 @@ def apply_research_guidance(
             "priority_delta": guidance.get("priority_delta", 0),
             "replacement_recommended": bool(
                 guidance.get("replacement_recommended")),
+            "replacement_zero_gain_rounds": guidance.get(
+                "replacement_zero_gain_rounds", replacement_zero_gain_rounds),
             "reason_codes": list(guidance.get("reason_codes") or [])[
                 :MAX_GUIDANCE_REASON_CODES],
             "sources": list(guidance.get("sources") or [])[
@@ -1091,6 +1141,7 @@ def apply_research_guidance(
             "environment_repairs": environment_count,
             "review_followups": review_count,
             "variant_gaps": variant_gap_count,
+            "replacement_zero_gain_rounds": replacement_zero_gain_rounds,
             "action_counts": dict(sorted(action_counts.items())),
             "claim_status": STRATEGY_CLAIM_STATUS,
         },
@@ -1700,6 +1751,8 @@ def normalize_research_guidance(raw: Any) -> Dict[str, Any]:
             "missing_observations": row.get("missing_observations"),
             "review_status": row.get("review_status"),
             "observation_status": row.get("observation_status"),
+            "replacement_zero_gain_rounds": row.get(
+                "replacement_zero_gain_rounds"),
             "last_round": row.get("last_round"),
             "surface_variant_plan": row.get("surface_variant_plan"),
         })
@@ -1738,6 +1791,9 @@ def normalize_research_guidance(raw: Any) -> Dict[str, Any]:
                                       MAX_STRATEGY_ITEMS),
             "variant_gaps": _int(summary.get("variant_gaps"), 0, 0,
                                   MAX_STRATEGY_ITEMS),
+            "replacement_zero_gain_rounds": _int(
+                summary.get("replacement_zero_gain_rounds"),
+                DEFAULT_REPLACEMENT_ZERO_GAIN_ROUNDS, 1, 2),
             "action_counts": actions,
             "claim_status": STRATEGY_CLAIM_STATUS,
         },

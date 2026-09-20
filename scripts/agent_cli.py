@@ -18,6 +18,7 @@ Usage:
   agent_cli.py deps --target <dir> [--out <report.md>] [--offline] [--cache <dir>]
   agent_cli.py benchmark --manifest <gold.json> [--run <run.json>] [--out <result.json>]
                            [--feedback-out <feedback.json>] [--json]
+  agent_cli.py replay-calibrate <target> --workspace <dir> [--out <result.json>] [--json]
   agent_cli.py review <target> --workspace <dir> (--research-key <rk>|--candidate-id <id>)
                            --status <accepted|rejected|needs-evidence|scope-corrected>
                            [--reason-code <code>] [--note <text>] [--evidence-ref <ref>]
@@ -597,6 +598,47 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
             print("  written_to: %s" % Path(args.out).resolve())
         if args.feedback_out:
             print("  feedback_written_to: %s" % Path(args.feedback_out).resolve())
+    return 0
+
+
+def cmd_replay_calibrate(args: argparse.Namespace) -> int:
+    """Calibrate guidance from bounded real-project round replays."""
+    from agent.evaluation.replay_calibration import (
+        build_replay_calibration, write_replay_calibration,
+    )
+
+    workspace = Path(args.workspace).resolve()
+    calibration = build_replay_calibration(workspace, args.target)
+    target_path = write_replay_calibration(
+        workspace, args.target, calibration)
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "artifact": str(target_path.relative_to(workspace)),
+        "calibration": calibration,
+        "claim_status": "not-a-finding",
+    }
+    if args.out:
+        out_path = Path(args.out)
+        if not out_path.is_absolute():
+            out_path = workspace / out_path
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(calibration, indent=2,
+                                       ensure_ascii=False), encoding="utf-8")
+        payload["written_to"] = str(out_path.resolve())
+    if args.json:
+        _out(payload)
+    else:
+        metrics = calibration.get("metrics", {})
+        print("replay calibration: %s" % payload["artifact"])
+        print("  status=%s rounds=%s replayed=%s replacement_hit_rate=%s claim_status=%s"
+              % (calibration.get("status", "no-data"),
+                 metrics.get("round_count", 0),
+                 metrics.get("replayed_guidance_items", 0),
+                 metrics.get("replacement_hit_rate"),
+                 calibration.get("claim_status", "not-a-finding")))
+        if args.out:
+            print("  written_to: %s" % payload["written_to"])
     return 0
 
 
@@ -1496,6 +1538,19 @@ def build_parser() -> argparse.ArgumentParser:
     bm.add_argument("--json", action="store_true",
                     help="machine-readable output")
     bm.set_defaults(fn=cmd_benchmark)
+
+    rc = sub.add_parser(
+        "replay-calibrate",
+        help="calibrate research guidance from bounded real-project round replays",
+    )
+    rc.add_argument("target", help="target name (state/<target>/...)")
+    rc.add_argument("--workspace", required=True,
+                    help="workspace root containing state/<target>/")
+    rc.add_argument("--out", default=None,
+                    help="optional extra copy of the calibration artifact")
+    rc.add_argument("--json", action="store_true",
+                    help="machine-readable output")
+    rc.set_defaults(fn=cmd_replay_calibrate)
 
     rv = sub.add_parser(
         "review",

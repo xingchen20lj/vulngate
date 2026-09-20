@@ -228,6 +228,25 @@ arms remain explicitly build-required and sibling arms remain pending until
 their lane executes. This makes patch-diff reasoning actionable without
 pretending that a commit or an unavailable historical build is evidence.
 
+S8 now adds `research-replay-calibration-v1` for the next feedback loop. It
+reads only bounded round snapshots of guidance, strategy feedback, and the
+runtime lab, then measures replacement hit rate, unproductive repeats,
+environment recovery, fixture-budget truncation, and comparison gaps. The
+standalone command is:
+
+```bash
+python3 scripts/agent_cli.py replay-calibrate <target> \
+  --workspace <audit-dir> --json
+```
+
+The target artifact is
+`state/<target>/coverage/research-replay-calibration.json`; S8 also mirrors a
+round snapshot under `S8/`. A calibrated result is accepted only with at least
+three matched replay items and can change the zero-information replacement
+threshold from one to two consecutive rounds. Insufficient history retains the
+default. The calibration is research scheduling metadata only, marked
+`not-a-finding`, and cannot alter candidate state, CVSS, G4, or G5.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

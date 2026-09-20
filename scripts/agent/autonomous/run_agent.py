@@ -1907,6 +1907,12 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         if cid:
             memory_summaries.setdefault(cid, item.get("evidence", {}))
             memory_conclusions.setdefault(cid, item.get("conclusion", ""))
+    from ..evaluation.replay_calibration import (
+        build_replay_calibration, load_replay_calibration,
+        write_replay_calibration,
+    )
+    prior_replay_calibration = load_replay_calibration(
+        ctx.root, ctx.cfg.name)
     memory_delta = build_round_memory(
         candidates, memory_summaries, memory_conclusions, runtime_lab, round_no,
         target_type=ctx.cfg.target_type)
@@ -1936,7 +1942,8 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         strategy, strategy_feedback = apply_strategy_observations(
             strategy, candidates, memory_summaries, round_no)
         strategy, research_guidance = apply_research_guidance(
-            strategy, portfolio, review_feedback, round_no)
+            strategy, portfolio, review_feedback, round_no,
+            replay_calibration=prior_replay_calibration)
         if strategy:
             strategy_file = write_research_strategy(
                 ctx.root, ctx.cfg.name, strategy)
@@ -1948,6 +1955,11 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                 strategy_feedback)
             ctx.write_artifact(
                 round_no, "S8", "research-guidance.json", research_guidance)
+    replay_calibration = build_replay_calibration(ctx.root, ctx.cfg.name)
+    replay_calibration_file = write_replay_calibration(
+        ctx.root, ctx.cfg.name, replay_calibration)
+    ctx.write_artifact(round_no, "S8", "research-replay-calibration.json",
+                       replay_calibration)
     ctx.write_artifact(round_no, "S8", "research-memory.json", memory_delta)
     ctx.write_artifact(round_no, "S8", "research-memory-summary.json", memory["summary"])
     ctx.write_artifact(round_no, "S8", "review-feedback.json", review_feedback)
@@ -1973,6 +1985,17 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         "unresolved_mechanisms": portfolio.get("summary", {}).get(
             "unresolved_mechanisms", 0),
         "next_probe_count": len(portfolio.get("next_probes") or []),
+        "claim_status": "not-a-finding",
+    }
+    research_replay_calibration_info = {
+        "artifact": str(replay_calibration_file.relative_to(ctx.root.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-replay-calibration.json"
+                          % (ctx.cfg.name, round_no),
+        "status": replay_calibration.get("status", "no-data"),
+        "replayed_guidance_items": replay_calibration.get(
+            "metrics", {}).get("replayed_guidance_items", 0),
+        "replacement_hit_rate": replay_calibration.get(
+            "metrics", {}).get("replacement_hit_rate"),
         "claim_status": "not-a-finding",
     }
     research_strategy_info = {
@@ -2029,6 +2052,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             "research_memory": research_memory_info,
             "review_feedback": review_feedback_info,
             "research_portfolio": research_portfolio_info,
+            "research_replay_calibration": research_replay_calibration_info,
             "research_strategy": research_strategy_info,
         }
         by_candidate_memory = {
@@ -2051,12 +2075,15 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                                 "research_memory": research_memory_info,
                                 "review_feedback": review_feedback_info,
                                 "research_portfolio": research_portfolio_info,
+                                "research_replay_calibration":
+                                research_replay_calibration_info,
                                 "research_strategy": research_strategy_info})
     print("[round-%02d] done: 确认=%d 排除=%d" % (round_no, len(rows), len(excluded)))
     return {"next_candidates": _propose_next(ctx, candidates, rows),
             "research_memory": research_memory_info,
             "review_feedback": review_feedback_info,
             "research_portfolio": research_portfolio_info,
+            "research_replay_calibration": research_replay_calibration_info,
             "research_strategy": research_strategy_info}
 
 

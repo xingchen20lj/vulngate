@@ -1196,6 +1196,12 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
     # separate from the finding ledger: a stable replay or a version
     # difference is useful feedback, but neither is a vulnerability verdict.
     runtime_lab = ctx.store.read_artifact("S4", "runtime-lab.json") or {}
+    from ..evaluation.replay_calibration import (
+        build_replay_calibration, load_replay_calibration,
+        write_replay_calibration,
+    )
+    prior_replay_calibration = load_replay_calibration(
+        ctx.workspace, ctx.target)
     memory_delta = build_round_memory(
         ctx.config.candidates, summaries,
         {r["candidate_id"]: r.get("conclusion", "") for r in rows},
@@ -1219,7 +1225,8 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
         strategy, strategy_feedback = apply_strategy_observations(
             strategy, ctx.config.candidates, summaries, ctx.round_no)
         strategy, research_guidance = apply_research_guidance(
-            strategy, portfolio, review_feedback, ctx.round_no)
+            strategy, portfolio, review_feedback, ctx.round_no,
+            replay_calibration=prior_replay_calibration)
         if strategy:
             strategy_file = write_research_strategy(
                 ctx.workspace, ctx.target, strategy)
@@ -1230,6 +1237,12 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
                 "S8", "research-strategy-feedback.json", strategy_feedback)
             ctx.store.write_artifact(
                 "S8", "research-guidance.json", research_guidance)
+    replay_calibration = build_replay_calibration(
+        ctx.workspace, ctx.target)
+    replay_calibration_file = write_replay_calibration(
+        ctx.workspace, ctx.target, replay_calibration)
+    ctx.store.write_artifact(
+        "S8", "research-replay-calibration.json", replay_calibration)
     ctx.store.write_artifact("S8", "research-memory.json", memory_delta)
     ctx.store.write_artifact("S8", "research-memory-summary.json", memory["summary"])
     ctx.store.write_artifact("S8", "review-feedback.json", review_feedback)
@@ -1292,12 +1305,26 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
                 "summary", {}).get("replacement_recommendations", 0),
             "claim_status": "not-a-finding",
         }
+    summary["research_replay_calibration"] = {
+        "artifact": str(replay_calibration_file.relative_to(
+            ctx.workspace.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-replay-calibration.json"
+                          % (ctx.target, ctx.round_no),
+        "status": replay_calibration.get("status", "no-data"),
+        "replayed_guidance_items": replay_calibration.get(
+            "metrics", {}).get("replayed_guidance_items", 0),
+        "replacement_hit_rate": replay_calibration.get(
+            "metrics", {}).get("replacement_hit_rate"),
+        "claim_status": "not-a-finding",
+    }
     out_dir = write_round_artifacts(ctx.workspace, ctx.target, ctx.round_no, rows, excluded,
                                     summary, lang=ctx.config.output_lang)
     return {"ledger_dir": str(out_dir.relative_to(ctx.workspace)), "rows": len(rows),
             "excluded": len(excluded), "metrics": metrics,
             "research_memory": summary["research_memory"],
             "research_portfolio": summary["research_portfolio"],
+            "research_replay_calibration": summary[
+                "research_replay_calibration"],
             "research_strategy": summary.get("research_strategy", {
                 "claim_status": "not-a-finding"})}
 
