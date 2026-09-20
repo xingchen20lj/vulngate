@@ -54,15 +54,19 @@ from ..memory.research import (
     STATE_REVIEW_REJECTED,
     STATE_REVIEW_SCOPE_CORRECTED,
     load_research_memory,
+    load_review_feedback,
     memory_match,
     memory_prompt_rows,
     research_key,
 )
 from ..memory.portfolio import load_research_portfolio
 from .research_strategy import (
+    STRATEGY_GUIDANCE_ACTIONS,
+    apply_research_guidance,
     build_research_strategy,
     load_research_strategy,
     normalize_research_strategy,
+    write_research_guidance,
     write_research_strategy,
 )
 from .threat_model import load_threat_model
@@ -731,6 +735,22 @@ def _research_strategy_guidance(candidate: Dict[str, Any],
         return {}
     _strength, priority, _strategy_id, item = sorted(
         matches, key=lambda value: (-value[0], -value[1], value[2]))[0]
+    raw_guidance = item.get("guidance") or {}
+    raw_action = str(raw_guidance.get(
+        "next_action") or "continue-path-closure")
+    guidance = {
+        "next_action": (raw_action if raw_action in STRATEGY_GUIDANCE_ACTIONS
+                         else "continue-path-closure"),
+        "priority_delta": min(3, _safe_weight(
+            raw_guidance.get("priority_delta") or 0)),
+        "replacement_recommended": bool(
+            raw_guidance.get("replacement_recommended")),
+        "reason_codes": list(raw_guidance.get("reason_codes") or [])[:6],
+        "sources": list(raw_guidance.get("sources") or [])[:4],
+        "variant_gaps": list(raw_guidance.get("variant_gaps") or [])[:8],
+        "review_status": str(raw_guidance.get("review_status") or "")[:32],
+        "claim_status": "not-a-finding",
+    }
     return {
         "match_kind": item.get("_match_kind", "path"),
         "strategy_id": str(item.get("strategy_id") or ""),
@@ -750,6 +770,7 @@ def _research_strategy_guidance(candidate: Dict[str, Any],
                     "missing_observations") or [])[:8],
             "claim_status": "not-a-finding",
         },
+        "guidance": guidance,
         "claim_status": "not-a-finding",
     }
 
@@ -1409,6 +1430,7 @@ def score_candidate(candidate: Dict[str, Any], ctx: ScheduleContext,
         candidate, ctx.research_strategy, link)
     if strategy_guidance:
         observation = strategy_guidance.get("observation") or {}
+        action_guidance = strategy_guidance.get("guidance") or {}
         status = str(observation.get("status") or "unobserved")
         try:
             information_gain = int(observation.get("information_gain") or 0)
@@ -1421,6 +1443,15 @@ def score_candidate(candidate: Dict[str, Any], ctx: ScheduleContext,
         strategy_delta = 0.0 if status in {
             "complete", "falsifier-observed"} and information_gain == 0 \
             else RESEARCH_STRATEGY_BOOST
+        if action_guidance.get("next_action") in {
+                "hold-for-new-evidence", "reframe-scope"}:
+            # Keep the candidate eligible, but do not reward repeating a
+            # review-rejected or zero-yield experiment.
+            strategy_delta = 0.0
+        else:
+            strategy_delta += min(
+                2.25, 0.75 * min(3, _safe_weight(
+                    action_guidance.get("priority_delta") or 0)))
         before = total
         total = min(scale, total + strategy_delta)
         strategy_guidance["applied_delta"] = round(total - before, 4)
@@ -1675,6 +1706,11 @@ def build_schedule(workspace: Path, target: str,
         round_no=round_no,
         prior_strategy=prior_strategy,
     )
+    review_feedback = load_review_feedback(workspace, target)
+    if strategy:
+        strategy, _research_guidance = apply_research_guidance(
+            strategy, portfolio, review_feedback, round_no)
+        write_research_guidance(workspace, target, _research_guidance)
     write_research_strategy(workspace, target, strategy)
     ctx = ScheduleContext.from_store(
         store, weights, research_memory=memory.get("entries") or [],
@@ -2105,9 +2141,11 @@ def prompt_coverage_block(ctx: ScheduleContext, plan: Optional[SchedulePlan] = N
         }, ensure_ascii=False))
         for item in strategy.get("items", []):
             observation = item.get("observation") or {}
+            guidance = item.get("guidance") or {}
             lines.append("  [priority=%s] %s kind=%s state=%s "
                          "path=%s residual=%s objective=%s observe=%s "
                          "falsify=%s observation=%s gain=%s missing=%s "
+                         "next_action=%s replace=%s action_reasons=%s "
                          "claim_status=%s" % (
                              item.get("priority", 0),
                              item.get("strategy_id"), item.get("kind"),
@@ -2120,6 +2158,10 @@ def prompt_coverage_block(ctx: ScheduleContext, plan: Optional[SchedulePlan] = N
                              observation.get("information_gain", 0),
                              ";".join(observation.get(
                                  "missing_observations") or []) or "-",
+                             guidance.get("next_action", "continue-path-closure"),
+                             "yes" if guidance.get(
+                                 "replacement_recommended") else "no",
+                             ";".join(guidance.get("reason_codes") or []) or "-",
                              item.get("claim_status", "not-a-finding")))
 
     lines.append("## 评测反馈 / Benchmark Feedback")

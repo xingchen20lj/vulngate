@@ -185,6 +185,19 @@ entry/sink, candidate or research-key matches a small explainable nudge. The
 strategy is a research agenda, never a source/runtime conclusion or a G4/G5
 substitute.
 
+The next-action layer now produces a bounded `research-strategy-guidance-v1`
+snapshot. It joins the strategy item's real S4 observation status, the latest
+human review state, and explicit portfolio variant coverage. It maps those
+signals to a finite action such as `repair-environment`,
+`add-negative-control`, `trace-capability-transition`, `add-typed-effect`,
+`replay-residual-variant`, `replay-new-variant`, or `hold-for-new-evidence`.
+When a replay yields no new information, the layer can recommend replacing the
+experiment class rather than rewarding the same static match again. The target
+artifact is `state/<target>/coverage/research-guidance.json` and the round
+snapshot is `S8/research-guidance.json`; all fields are bounded metadata with
+`claim_status=not-a-finding`, and none can alter a candidate verdict, CVSS,
+G4, or G5.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

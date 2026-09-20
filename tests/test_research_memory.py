@@ -442,16 +442,22 @@ class ResearchMemoryTests(unittest.TestCase):
                            / "research-portfolio.json")
         round_strategy_feedback = (self.root / "state" / "target" / "round-01" / "S8"
                                    / "research-strategy-feedback.json")
+        round_guidance = (self.root / "state" / "target" / "round-01" / "S8"
+                          / "research-guidance.json")
         target_portfolio = self.root / "state" / "target" / "research-portfolio.json"
         target_strategy = (self.root / "state" / "target" / "coverage"
                            / "research-strategy.json")
+        target_guidance = (self.root / "state" / "target" / "coverage"
+                           / "research-guidance.json")
         self.assertTrue(target_memory.exists())
         self.assertTrue(round_delta.exists())
         self.assertTrue(round_feedback.exists())
         self.assertTrue(round_portfolio.exists())
         self.assertTrue(round_strategy_feedback.exists())
+        self.assertTrue(round_guidance.exists())
         self.assertTrue(target_portfolio.exists())
         self.assertTrue(target_strategy.exists())
+        self.assertTrue(target_guidance.exists())
         self.assertEqual("state/target/research-memory.json",
                          result["research_memory"]["artifact"])
         self.assertEqual("state/target/research-portfolio.json",
@@ -460,6 +466,9 @@ class ResearchMemoryTests(unittest.TestCase):
                          result["research_strategy"]["artifact"])
         self.assertEqual("research-strategy-feedback-v1",
                          json.loads(round_strategy_feedback.read_text(
+                             encoding="utf-8"))["schema_version"])
+        self.assertEqual("research-strategy-guidance-v1",
+                         json.loads(round_guidance.read_text(
                              encoding="utf-8"))["schema_version"])
         portfolio = json.loads(target_portfolio.read_text(encoding="utf-8"))
         self.assertEqual("research-portfolio-v1", portfolio["schema_version"])

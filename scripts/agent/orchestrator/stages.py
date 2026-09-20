@@ -17,7 +17,9 @@ from ..memory.research import (build_residual_closure_report,
 from ..memory.portfolio import (build_research_portfolio,
                                 write_research_portfolio)
 from ..analysis.research_strategy import (apply_strategy_observations,
+                                           apply_research_guidance,
                                            load_research_strategy,
+                                           write_research_guidance,
                                            write_research_strategy)
 from ..memory.state import CheckpointStore
 from ..analysis.languages import ALL_SUFFIXES
@@ -1199,16 +1201,24 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
     if not strategy:
         strategy = ctx.store.read_artifact("S2", "research-strategy.json") or {}
     strategy_feedback = {}
+    research_guidance = {}
     strategy_file = None
+    guidance_file = None
     if strategy:
         strategy, strategy_feedback = apply_strategy_observations(
             strategy, ctx.config.candidates, summaries, ctx.round_no)
+        strategy, research_guidance = apply_research_guidance(
+            strategy, portfolio, review_feedback, ctx.round_no)
         if strategy:
             strategy_file = write_research_strategy(
                 ctx.workspace, ctx.target, strategy)
+            guidance_file = write_research_guidance(
+                ctx.workspace, ctx.target, research_guidance)
             ctx.store.write_artifact("S8", "research-strategy.json", strategy)
             ctx.store.write_artifact(
                 "S8", "research-strategy-feedback.json", strategy_feedback)
+            ctx.store.write_artifact(
+                "S8", "research-guidance.json", research_guidance)
     ctx.store.write_artifact("S8", "research-memory.json", memory_delta)
     ctx.store.write_artifact("S8", "research-memory-summary.json", memory["summary"])
     ctx.store.write_artifact("S8", "review-feedback.json", review_feedback)
@@ -1256,10 +1266,19 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
                               % (ctx.target, ctx.round_no),
             "feedback_artifact": "state/%s/round-%02d/S8/research-strategy-feedback.json"
                                 % (ctx.target, ctx.round_no),
+            "guidance_artifact": (str(guidance_file.relative_to(
+                ctx.workspace.resolve())) if guidance_file else
+                "state/%s/coverage/research-guidance.json" % ctx.target),
+            "guidance_round_artifact": "state/%s/round-%02d/S8/research-guidance.json"
+                                      % (ctx.target, ctx.round_no),
             "observed_items": strategy.get("summary", {}).get(
                 "observed_items", 0),
             "information_gain": strategy_feedback.get("summary", {}).get(
                 "information_gain", 0),
+            "next_actions": research_guidance.get("summary", {}).get(
+                "action_counts", {}),
+            "replacement_recommendations": research_guidance.get(
+                "summary", {}).get("replacement_recommendations", 0),
             "claim_status": "not-a-finding",
         }
     out_dir = write_round_artifacts(ctx.workspace, ctx.target, ctx.round_no, rows, excluded,

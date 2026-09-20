@@ -32,6 +32,7 @@
 | 15 | 跨产物证据驱动研究策略 | 已实现（bounded research strategy synthesis） | `research-strategy-v1`、`state/<target>/coverage/research-strategy.json`、`S2/research-strategy.json`、策略 CLI/调度证据 | 威胁路径、coverage gap、residual、跨轮状态和 benchmark 上下文汇聚为带 required observations/falsifiers 的有界议程；策略不能替代 G4/G5 |
 | 16 | Residual falsifier 闭合 | 已实现（contract-bound S4 closure） | `S2/experiment-plans.json` residual contracts、`S4/residual-closure.json`、`research-memory-v1` 的 `residual-falsified` | 只有声明过的 residual contract、匹配 ID、显式 allowlisted falsifier、成功执行且无副作用的 cell 才能闭合；环境失败、门控和实际 effect 保持 pending，且不改变 G4/G5 |
 | 17 | 策略项真实观测回写与信息增益 | 已实现（bounded S4 strategy feedback） | `research-strategy-feedback-v1`、`S8/research-strategy.json`、`S8/research-strategy-feedback.json`、下一轮策略提示/调度证据 | 只用真实 S4 summary 的有界信号更新匹配策略项；记录缺失观测、最新/历史状态和本轮信息增益；重复且无新信号时取消策略加分，不改变候选、CVSS 或 G4/G5 |
+| 18 | 跨轮研究行动与实验替换建议 | 已实现（bounded strategy action guidance） | `research-strategy-guidance-v1`、`state/<target>/coverage/research-guidance.json`、`S8/research-guidance.json`、策略项 `next_action` | 将 S4 观测、人工复核和显式变体覆盖汇合为有限动作；环境缺口优先修复，负向/能力/typed effect 缺口转成定向补证，零信息重复建议换实验；只影响研究调度，不改变候选、CVSS 或 G4/G5 |
 
 ## 当前阶段：可证伪实验规划
 
@@ -336,10 +337,22 @@ S2→S4→S8 的单向契约：
 - 所有回写字段继续是 `claim_status=not-a-finding`，只改变研究优先级和下一步提示，不改变
   candidate status、finding ledger、CVSS、G4 或 G5。环境缺口仍然是缺口，而不是负向证据。
 
+## 阶段 18 初步实现：跨轮研究行动与实验替换建议
+
+阶段 17 已经知道“本轮观察到了什么”和“信息增益是多少”，但顶级研究员还会把这些结果与
+人工复核、项目级变体覆盖和残余任务合并，决定下一轮到底应该修环境、补哪一种控制证据，还是
+彻底换一个实验变体。阶段 18 增加 `research-strategy-guidance-v1`：
+
+- 对每条策略项只输出固定枚举的 `next_action`、有限 `priority_delta`、原因码、来源类别和变体缺口；不复制 reviewer note、payload、命令、stdout/stderr 或自由文本结论；
+- `environment-gap` 只能导向 `repair-environment`；S3 residual 导向 `replay-residual-variant`；缺少负向基线、capability transition、typed effect 或 source/dataflow 观测时分别导向定向补证动作；
+- `needs-evidence`、`rejected` 和 `scope-corrected` 复核会变成 `review-followup` 或 `reframe-scope`，并与 `variant-coverage` 一起记录来源，避免盲目重复同一条已被否定或范围已修正的路径；
+- 当当前状态已经执行但连续轮次 `information_gain=0` 时，输出 `replacement_recommended`；已完整或已观察 falsifier 的重复项进入 `hold-for-new-evidence`，只取消研究加分，不删除候选；
+- 目标级和轮次级 guidance 都保持 `claim_status=not-a-finding`。它只是下一步实验编排，不能替代 source review、S4 typed effect、G4/G5 或 CVSS。
+
 ## 后续优先级
 
-1. 将策略项与真实项目的多轮历史、人工复核和变体覆盖率做更细粒度关联，校准 guidance 阈值。
-2. 将新增 signal taxonomy 与协议状态机、云身份边界、移动端生命周期和 native 方法体验证的合成变体对齐，并为每类维持正向、负向和环境缺口对照。
-3. 在不扩大 claim 权限的前提下，增加跨轮“信息增益不足”的自动实验替换建议。
+1. 将 `next_action` 与协议状态机、云身份边界、移动端生命周期和 native 方法体验证的合成变体对齐，并为每类维持正向、负向和环境缺口对照。
+2. 用真实项目回放校准各类 guidance 的阈值和替换命中率，避免“换实验”本身变成无证据的循环。
+3. 在不扩大 claim 权限的前提下，把行动建议接入更细粒度的实验模板/fixture 生成器。
 
 每一阶段都必须同时更新实现、技能契约、回归测试和 CHANGELOG；只有测试、artifact schema 和安全边界一起稳定后，才适合提交为一个独立变更。

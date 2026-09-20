@@ -19,12 +19,16 @@ from agent.analysis.threat_model import build_threat_model  # noqa: E402
 from agent.analysis.research_strategy import (  # noqa: E402
     STRATEGY_CLAIM_STATUS,
     STRATEGY_FEEDBACK_SCHEMA_VERSION,
+    STRATEGY_GUIDANCE_SCHEMA_VERSION,
     STRATEGY_SCHEMA_VERSION,
+    apply_research_guidance,
     apply_strategy_observations,
     build_research_strategy,
+    load_research_guidance,
     load_research_strategy,
     normalize_research_strategy,
     strategy_path,
+    write_research_guidance,
     write_research_strategy,
 )
 import agent_cli  # noqa: E402
@@ -248,6 +252,129 @@ class ResearchStrategyTests(unittest.TestCase):
         self.assertEqual(STRATEGY_CLAIM_STATUS,
                          updated["claim_status"])
 
+    def test_guidance_unifies_review_observation_and_variant_gap(self):
+        strategy = build_research_strategy(
+            research_portfolio={
+                "schema_version": "research-portfolio-v1",
+                "next_probes": [{
+                    "research_key": "rk-guidance",
+                    "candidate_id": "C-guidance",
+                    "state": "actionable-difference",
+                    "priority": 4,
+                    "research_surface": "web",
+                    "target_type": "web-app",
+                    "variant": ["alternate-codec"],
+                }],
+                "variant_coverage": [{
+                    "variant": "alternate-codec",
+                    "status": "gap",
+                    "unresolved_entries": 1,
+                }],
+            },
+            target="demo", target_type="web-app")
+        item = strategy["items"][0]
+        item["observation"] = {
+            "status": "partial", "current_status": "partial",
+            "information_gain": 0,
+            "missing_observations": ["typed-effect-or-safe-equivalent"],
+        }
+        updated, guidance = apply_research_guidance(
+            strategy,
+            strategy.get("research_portfolio") or {
+                "schema_version": "research-portfolio-v1",
+                "variant_coverage": [{
+                    "variant": "alternate-codec", "status": "gap",
+                }],
+            },
+            {"entries": [{
+                "research_key": "rk-guidance",
+                "status": "needs-evidence",
+                "round": 3,
+                "feedback_id": "rf-3",
+                "reviewer_note": "must not persist",
+            }]},
+            round_no=4)
+        item = updated["items"][0]
+        self.assertEqual("review-followup", item["guidance"]["next_action"])
+        self.assertTrue(item["guidance"]["replacement_recommended"])
+        self.assertEqual(["alternate-codec"],
+                         item["guidance"]["variant_gaps"])
+        self.assertIn("human-review", item["guidance"]["sources"])
+        self.assertIn("variant-coverage", item["guidance"]["sources"])
+        self.assertEqual(STRATEGY_GUIDANCE_SCHEMA_VERSION,
+                         guidance["schema_version"])
+        self.assertGreaterEqual(
+            guidance["summary"]["replacement_recommendations"], 1)
+        encoded = json.dumps((updated, guidance), ensure_ascii=False)
+        self.assertNotIn("must not persist", encoded)
+        self.assertEqual(STRATEGY_CLAIM_STATUS, guidance["claim_status"])
+
+    def test_guidance_recommends_environment_repair_and_replaces_zero_gain(self):
+        strategy = build_research_strategy(
+            research_portfolio={
+                "schema_version": "research-portfolio-v1",
+                "next_probes": [{
+                    "research_key": "rk-gap",
+                    "candidate_id": "C-gap",
+                    "state": "environment-gap",
+                    "priority": 5,
+                    "research_surface": "web",
+                    "target_type": "web-app",
+                }],
+            },
+            target="demo", target_type="web-app")
+        strategy["items"][0]["observation"] = {
+            "status": "environment-gap", "current_status": "environment-gap",
+            "information_gain": 0,
+            "missing_observations": ["runtime-availability"],
+        }
+        updated, guidance = apply_research_guidance(
+            strategy,
+            {"schema_version": "research-portfolio-v1"}, {}, round_no=5)
+        self.assertEqual("repair-environment",
+                         updated["items"][0]["guidance"]["next_action"])
+        self.assertEqual(3, updated["items"][0]["guidance"]["priority_delta"])
+        self.assertFalse(updated["items"][0]["guidance"][
+            "replacement_recommended"])
+        self.assertEqual(1, guidance["summary"]["environment_repairs"])
+
+        complete = build_research_strategy(
+            self._threat_model(), target="demo", target_type="web-app")
+        complete["items"][0]["observation"] = {
+            "status": "complete", "current_status": "complete",
+            "information_gain": 0, "missing_observations": [],
+        }
+        complete, guidance = apply_research_guidance(
+            complete, {"schema_version": "research-portfolio-v1"}, {}, 6)
+        completed_item = complete["items"][0]
+        self.assertEqual("hold-for-new-evidence",
+                         completed_item["guidance"]["next_action"])
+        self.assertTrue(completed_item["guidance"][
+            "replacement_recommended"])
+        self.assertEqual(0, completed_item["guidance"]["priority_delta"])
+
+    def test_guidance_round_trip_is_bounded(self):
+        strategy = build_research_strategy(
+            self._threat_model(), target="demo", target_type="web-app")
+        _strategy, guidance = apply_research_guidance(strategy, {}, {}, 2)
+        forged = dict(guidance)
+        forged["secret_payload"] = "do-not-persist"
+        forged["items"] = list(guidance["items"]) + [{
+            "strategy_id": "rs-01234567890123456789",
+            "next_action": "execute-raw-command",
+            "reviewer_note": "do-not-persist",
+            "claim_status": "confirmed",
+        }]
+        path = write_research_guidance(self.root, "demo", forged)
+        loaded = load_research_guidance(self.root, "demo")
+        self.assertTrue(path.exists())
+        encoded = json.dumps(loaded, ensure_ascii=False)
+        self.assertNotIn("do-not-persist", encoded)
+        self.assertNotIn("execute-raw-command", encoded)
+        self.assertNotIn('"claim_status": "confirmed"', encoded)
+        self.assertEqual(STRATEGY_GUIDANCE_SCHEMA_VERSION,
+                         loaded["schema_version"])
+
     def test_strategy_round_trip_is_bounded_and_forces_research_status(self):
         strategy = build_research_strategy(
             self._threat_model(), target="demo", target_type="web-app", round_no=2)
@@ -273,6 +400,8 @@ class ResearchStrategyTests(unittest.TestCase):
         model = self._threat_model()
         strategy = build_research_strategy(model, target="demo",
                                             target_type="web-app", round_no=1)
+        strategy, _guidance = apply_research_guidance(
+            strategy, {"schema_version": "research-portfolio-v1"}, {}, 1)
         candidate = {
             "candidate_id": "C1", "surface": "authorization path",
             "entry": "handle", "input_shape": "request",
@@ -297,6 +426,10 @@ class ResearchStrategyTests(unittest.TestCase):
         self.assertEqual("flow", score.evidence["research_strategy"]["match_kind"])
         self.assertEqual(STRATEGY_CLAIM_STATUS,
                          score.evidence["research_strategy"]["claim_status"])
+        self.assertIn("guidance", score.evidence["research_strategy"])
+        self.assertEqual(STRATEGY_CLAIM_STATUS,
+                         score.evidence["research_strategy"]["guidance"][
+                             "claim_status"])
         prompt = prompt_coverage_block(context)
         self.assertIn("研究策略 / Research Strategy", prompt)
         self.assertIn("capability-closure", prompt)

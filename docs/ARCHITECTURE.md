@@ -37,6 +37,12 @@ It defines:
 - the safety model (loopback-only, approval logging, no pre-fix disclosure);
 - the precondition-tier → CVSS mapping.
 
+S8 also emits a bounded `research-strategy-guidance-v1` view. It joins only
+strategy observation metadata, the latest review status, and explicit variant
+coverage, then maps them to finite next-action classes. Guidance can adjust
+research scheduling or recommend replacing a zero-yield experiment, but it is
+never evidence, a finding verdict, a CVSS input, or a G4/G5 override.
+
 ## Two operating modes
 
 | Mode | Reasoning | Setup | Typical use |

@@ -36,6 +36,10 @@ VulnGate 是一个围绕确定性研究框架的轻量原生插件。设计原�
 - 安全模型（仅回环、审批日志、修复前不披露）；
 - 前置分级 → CVSS 映射。
 
+S8 还会生成有界的 `research-strategy-guidance-v1` 视图，只汇合策略观测元数据、最新人工复核状态
+和显式变体覆盖率，并映射为有限的下一步动作类别。它可以调整研究调度或建议替换零信息增益的实验，
+但绝不是证据、漏洞结论、CVSS 输入，也不能覆盖 G4/G5。
+
 S1 中包含授权边界和危险 Sink 的启发式 Source→Sink 路径会写入
 `composite-chain-candidates.json`，并在 S2 进入与模型候选、控制图候选、同族差分候选相同的调度池。它们始终保留
 `heuristic-nearby` / `requires_manual_dataflow=true`，只能作为审计和 PoC

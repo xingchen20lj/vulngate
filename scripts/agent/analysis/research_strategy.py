@@ -34,6 +34,8 @@ STRATEGY_SCHEMA_VERSION = "research-strategy-v1"
 STRATEGY_FILENAME = "research-strategy.json"
 STRATEGY_CLAIM_STATUS = "not-a-finding"
 STRATEGY_FEEDBACK_SCHEMA_VERSION = "research-strategy-feedback-v1"
+STRATEGY_GUIDANCE_SCHEMA_VERSION = "research-strategy-guidance-v1"
+STRATEGY_GUIDANCE_FILENAME = "research-guidance.json"
 
 MAX_STRATEGY_ITEMS = 48
 MAX_REASON_CODES = 6
@@ -42,6 +44,9 @@ MAX_TEXT = 160
 MAX_OBSERVATION_SIGNALS = 16
 MAX_OBSERVATION_STATES = 8
 MAX_OBSERVATION_CANDIDATES = 8
+MAX_GUIDANCE_REASON_CODES = 6
+MAX_GUIDANCE_VARIANT_GAPS = 8
+MAX_GUIDANCE_SOURCES = 4
 
 STRATEGY_KINDS = frozenset({
     "path-closure",
@@ -68,6 +73,43 @@ STRATEGY_OBSERVATION_STATUSES = frozenset({
     "partial",
     "complete",
     "environment-gap",
+    "falsifier-observed",
+})
+STRATEGY_GUIDANCE_ACTIONS = frozenset({
+    "repair-environment",
+    "replay-residual-variant",
+    "review-followup",
+    "reframe-scope",
+    "add-negative-control",
+    "trace-capability-transition",
+    "review-source-dataflow",
+    "add-typed-effect",
+    "replay-new-variant",
+    "continue-path-closure",
+    "hold-for-new-evidence",
+})
+STRATEGY_GUIDANCE_SOURCES = frozenset({
+    "strategy-observation",
+    "human-review",
+    "variant-coverage",
+    "project-portfolio",
+})
+STRATEGY_GUIDANCE_REASON_CODES = frozenset({
+    "environment-gap",
+    "pending-residual",
+    "review-needs-evidence",
+    "review-accepted",
+    "review-rejected",
+    "review-scope-corrected",
+    "missing-negative-baseline",
+    "missing-typed-effect",
+    "missing-capability-transition",
+    "missing-source-observation",
+    "variant-gap",
+    "zero-information-gain",
+    "unobserved",
+    "partial-observation",
+    "complete-observation",
     "falsifier-observed",
 })
 STRATEGY_REASON_CODES = frozenset({
@@ -379,6 +421,248 @@ def _normalize_observation(value: Any) -> Dict[str, Any]:
     }
 
 
+def _normalize_guidance(value: Any) -> Dict[str, Any]:
+    """Normalize one bounded next-action recommendation.
+
+    Guidance is deliberately narrower than the strategy itself.  It may tell
+    the scheduler which *class* of experiment should replace a low-yield
+    repeat, but it cannot carry reviewer prose, payloads, commands, runtime
+    output, or a finding verdict.
+    """
+    if not isinstance(value, Mapping):
+        return {}
+    action = _code(value.get("next_action"), STRATEGY_GUIDANCE_ACTIONS,
+                   "continue-path-closure")
+    reasons = [item for item in _bounded(
+        value.get("reason_codes"), MAX_GUIDANCE_REASON_CODES, 64)
+               if item in STRATEGY_GUIDANCE_REASON_CODES]
+    sources = [item for item in _bounded(
+        value.get("sources"), MAX_GUIDANCE_SOURCES, 64)
+               if item in STRATEGY_GUIDANCE_SOURCES]
+    gaps = _bounded(value.get("variant_gaps"), MAX_GUIDANCE_VARIANT_GAPS, 100)
+    missing = _bounded(value.get("missing_observations"), 8, 96)
+    review_status = _code(
+        value.get("review_status"),
+        {"accepted", "rejected", "needs-evidence", "scope-corrected"}, "")
+    observation_status = _code(
+        value.get("observation_status"), STRATEGY_OBSERVATION_STATUSES, "")
+    return {
+        "next_action": action,
+        "priority_delta": _int(value.get("priority_delta"), 0, 0, 3),
+        "replacement_recommended": bool(
+            value.get("replacement_recommended")),
+        "reason_codes": reasons,
+        "sources": sources,
+        "variant_gaps": gaps,
+        "missing_observations": missing,
+        "review_status": review_status,
+        "observation_status": observation_status,
+        "last_round": _int(value.get("last_round"), 0, 0, 1000000),
+        "claim_status": STRATEGY_CLAIM_STATUS,
+    }
+
+
+def _review_guidance_index(value: Any) -> Dict[str, Dict[str, Any]]:
+    """Return only the latest safe review state for each research key."""
+    latest: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(value, Mapping):
+        return latest
+    statuses = {"accepted", "rejected", "needs-evidence", "scope-corrected"}
+    for raw in value.get("entries") or []:
+        if not isinstance(raw, Mapping):
+            continue
+        key = _text(raw.get("research_key"), 80)
+        status = _text(raw.get("status"), 32).lower()
+        if not key or status not in statuses:
+            continue
+        item = {
+            "status": status,
+            "round": _int(raw.get("round"), 0, 0, 1000000),
+            "feedback_id": _text(raw.get("feedback_id"), 80),
+        }
+        previous = latest.get(key)
+        if previous is None or (
+                item["round"], item["feedback_id"]
+        ) >= (
+                previous["round"], previous.get("feedback_id", "")
+        ):
+            latest[key] = item
+    return latest
+
+
+def _variant_guidance_rows(item: Mapping[str, Any],
+                           portfolio: Mapping[str, Any]
+                           ) -> Dict[str, Any]:
+    """Match explicit item variants to portfolio coverage without inference."""
+    variants = {
+        _text(value, 100).lower()
+        for value in item.get("variant") or []
+        if _text(value, 100)
+    }
+    research_key_value = _text(item.get("research_key"), 80)
+    residual_id = _text(item.get("residual_id"), 80)
+    for probe in portfolio.get("next_probes") or []:
+        if not isinstance(probe, Mapping):
+            continue
+        if ((research_key_value and _text(probe.get("research_key"), 80)
+             == research_key_value) or
+                (residual_id and _text(probe.get("residual_id"), 80)
+                 == residual_id)):
+            variants.update(
+                _text(value, 100).lower()
+                for value in probe.get("variant") or []
+                if _text(value, 100))
+    if not variants:
+        return {"values": [], "gaps": [], "statuses": {}}
+    rows = {
+        _text(row.get("variant"), 100).lower(): row
+        for row in portfolio.get("variant_coverage") or []
+        if isinstance(row, Mapping) and _text(row.get("variant"), 100)
+    }
+    statuses: Dict[str, str] = {}
+    gaps: List[str] = []
+    for variant in sorted(variants):
+        row = rows.get(variant)
+        status = _text(row.get("status"), 32).lower() if row else "unobserved"
+        statuses[variant] = status
+        if status not in {"stable-observed", "observed"}:
+            gaps.append(variant)
+    return {
+        "values": sorted(variants)[:MAX_GUIDANCE_VARIANT_GAPS],
+        "gaps": gaps[:MAX_GUIDANCE_VARIANT_GAPS],
+        "statuses": statuses,
+    }
+
+
+def _missing_guidance_action(missing: Sequence[str]) -> tuple:
+    """Map missing observation labels to a bounded experiment class."""
+    labels = set(missing)
+    negative = {
+        "negative-unauthorized-baseline", "negative-baseline",
+        "negative-unreachable-control", "explicit-negative-observation",
+        "negative-or-safe-observation",
+    }
+    capability = {"capability-transition"}
+    typed = {"typed-effect-or-safe-equivalent"}
+    source = {
+        "default-config-exposure", "typed-source-sink-flow",
+        "dynamic-dispatch-or-registration", "entry-or-sink-mapping",
+    }
+    if labels & negative:
+        return "add-negative-control", "missing-negative-baseline"
+    if labels & capability:
+        return "trace-capability-transition", "missing-capability-transition"
+    if labels & typed:
+        return "add-typed-effect", "missing-typed-effect"
+    if labels & source:
+        return "review-source-dataflow", "missing-source-observation"
+    return "continue-path-closure", "partial-observation"
+
+
+def _item_guidance(item: Mapping[str, Any], portfolio: Mapping[str, Any],
+                   reviews: Mapping[str, Mapping[str, Any]],
+                   round_no: int) -> Dict[str, Any]:
+    """Fuse observation, review, and variant metadata into one next action."""
+    observation = item.get("observation")
+    observation = observation if isinstance(observation, Mapping) else {}
+    status = _code(observation.get("status"), STRATEGY_OBSERVATION_STATUSES,
+                   "unobserved")
+    current_status = _code(
+        observation.get("current_status"), STRATEGY_OBSERVATION_STATUSES,
+        status)
+    missing = _bounded(observation.get("missing_observations"), 8, 96)
+    try:
+        information_gain = int(observation.get("information_gain") or 0)
+    except (TypeError, ValueError):
+        information_gain = 0
+    information_gain = max(0, min(5, information_gain))
+    review = reviews.get(_text(item.get("research_key"), 80), {})
+    review_status = _text(review.get("status"), 32).lower()
+    variant = _variant_guidance_rows(item, portfolio)
+    variant_gaps = list(variant.get("gaps") or [])
+    reasons: List[str] = []
+    sources: List[str] = []
+
+    def add_reason(value: str) -> None:
+        if value in STRATEGY_GUIDANCE_REASON_CODES and value not in reasons:
+            reasons.append(value)
+
+    def add_source(value: str) -> None:
+        if value in STRATEGY_GUIDANCE_SOURCES and value not in sources:
+            sources.append(value)
+
+    action = "continue-path-closure"
+    priority_delta = 0
+
+    if status == "environment-gap" or item.get("kind") == "environment-recovery":
+        action = "repair-environment"
+        priority_delta = 3
+        add_reason("environment-gap")
+        add_source("strategy-observation")
+    elif item.get("kind") == "residual-closure" or item.get("residual_id"):
+        action = "replay-residual-variant"
+        priority_delta = 2
+        add_reason("pending-residual")
+        add_source("project-portfolio")
+    elif review_status == "needs-evidence":
+        action = "review-followup"
+        priority_delta = 3
+        add_reason("review-needs-evidence")
+        add_source("human-review")
+    elif review_status in {"rejected", "scope-corrected"}:
+        action = "reframe-scope"
+        add_reason("review-%s" % review_status)
+        add_source("human-review")
+    elif variant_gaps:
+        action = "replay-new-variant"
+        priority_delta = 2
+        add_reason("variant-gap")
+        add_source("variant-coverage")
+    elif missing:
+        action, reason = _missing_guidance_action(missing)
+        priority_delta = 2 if status in {"partial", "execution-only"} else 1
+        add_reason(reason)
+        add_source("strategy-observation")
+    elif status in {"complete", "falsifier-observed"} and information_gain == 0:
+        action = "hold-for-new-evidence"
+        add_reason("complete-observation" if status == "complete"
+                   else "falsifier-observed")
+        add_source("strategy-observation")
+    elif status == "unobserved":
+        add_reason("unobserved")
+        add_source("strategy-observation")
+        priority_delta = 1
+    else:
+        add_reason("partial-observation")
+        add_source("strategy-observation")
+        priority_delta = 1
+
+    replacement = bool(
+        information_gain == 0 and
+        current_status not in {"unobserved", "environment-gap"} and
+        action != "repair-environment")
+    if replacement:
+        add_reason("zero-information-gain")
+    if review_status:
+        add_source("human-review")
+    if variant_gaps and "variant-coverage" not in sources:
+        add_source("variant-coverage")
+
+    return {
+        "next_action": action,
+        "priority_delta": priority_delta,
+        "replacement_recommended": replacement,
+        "reason_codes": reasons[:MAX_GUIDANCE_REASON_CODES],
+        "sources": sources[:MAX_GUIDANCE_SOURCES],
+        "variant_gaps": variant_gaps[:MAX_GUIDANCE_VARIANT_GAPS],
+        "missing_observations": missing[:8],
+        "review_status": review_status,
+        "observation_status": status,
+        "last_round": _int(round_no, 0, 0, 1000000),
+        "claim_status": STRATEGY_CLAIM_STATUS,
+    }
+
+
 def _required_observations(signals: Iterable[str], required: Any
                            ) -> List[str]:
     """Return required labels still missing from the bounded signal set."""
@@ -603,14 +887,18 @@ def _carry_strategy_observations(items: List[Dict[str, Any]],
                                  prior_strategy: Any) -> None:
     prior = normalize_research_strategy(prior_strategy or {})
     by_id = {
-        str(item.get("strategy_id")): item.get("observation")
+        str(item.get("strategy_id")): item
         for item in prior.get("items") or []
-        if isinstance(item, Mapping) and item.get("observation")
+        if isinstance(item, Mapping)
     }
     for item in items:
-        observation = _normalize_observation(by_id.get(item.get("strategy_id")))
+        previous = by_id.get(item.get("strategy_id"), {})
+        observation = _normalize_observation(previous.get("observation"))
         if observation:
             item["observation"] = observation
+        guidance = _normalize_guidance(previous.get("guidance"))
+        if guidance:
+            item["guidance"] = guidance
 
 
 def apply_strategy_observations(
@@ -694,6 +982,110 @@ def apply_strategy_observations(
         "claim_status": STRATEGY_CLAIM_STATUS,
     }
     return normalized, feedback
+
+
+def apply_research_guidance(
+        strategy: Mapping[str, Any],
+        research_portfolio: Optional[Mapping[str, Any]] = None,
+        review_feedback: Optional[Mapping[str, Any]] = None,
+        round_no: int = 0,
+        ) -> tuple:
+    """Attach a bounded next-action layer to a research strategy.
+
+    This joins three *research* signals only: S4-derived strategy
+    observations, the project portfolio's explicit variant coverage, and the
+    latest human review state.  The returned artifact is scheduling guidance,
+    never a finding or a replacement for G4/G5 evidence.
+    """
+    normalized = normalize_research_strategy(strategy)
+    round_value = _int(round_no, 0, 0, 1000000)
+    empty = {
+        "schema_version": STRATEGY_GUIDANCE_SCHEMA_VERSION,
+        "strategy_schema_version": STRATEGY_SCHEMA_VERSION,
+        "round": round_value,
+        "summary": {
+            "item_count": 0,
+            "actionable_items": 0,
+            "replacement_recommendations": 0,
+            "environment_repairs": 0,
+            "review_followups": 0,
+            "variant_gaps": 0,
+            "action_counts": {},
+            "claim_status": STRATEGY_CLAIM_STATUS,
+        },
+        "items": [],
+        "claim_status": STRATEGY_CLAIM_STATUS,
+    }
+    if not normalized:
+        return {}, empty
+    portfolio = normalize_research_portfolio(dict(research_portfolio or {}))
+    reviews = _review_guidance_index(review_feedback or {})
+    guidance_items = []
+    action_counts = Counter()
+    replacement_count = 0
+    environment_count = 0
+    review_count = 0
+    variant_gap_count = 0
+    for item in normalized.get("items") or []:
+        guidance = _item_guidance(item, portfolio, reviews, round_value)
+        item["guidance"] = guidance
+        action = guidance.get("next_action", "continue-path-closure")
+        action_counts[action] += 1
+        replacement_count += int(bool(guidance.get(
+            "replacement_recommended")))
+        environment_count += int(action == "repair-environment")
+        review_count += int(action in {"review-followup", "reframe-scope"})
+        variant_gap_count += int(bool(guidance.get("variant_gaps")))
+        guidance_items.append({
+            "strategy_id": item.get("strategy_id", ""),
+            "research_key": item.get("research_key", ""),
+            "candidate_id": item.get("candidate_id", ""),
+            "residual_id": item.get("residual_id", ""),
+            "next_action": action,
+            "priority_delta": guidance.get("priority_delta", 0),
+            "replacement_recommended": bool(
+                guidance.get("replacement_recommended")),
+            "reason_codes": list(guidance.get("reason_codes") or [])[
+                :MAX_GUIDANCE_REASON_CODES],
+            "sources": list(guidance.get("sources") or [])[
+                :MAX_GUIDANCE_SOURCES],
+            "variant_gaps": list(guidance.get("variant_gaps") or [])[
+                :MAX_GUIDANCE_VARIANT_GAPS],
+            "missing_observations": list(
+                guidance.get("missing_observations") or [])[:8],
+            "review_status": guidance.get("review_status", ""),
+            "observation_status": guidance.get("observation_status", ""),
+            "last_round": guidance.get("last_round", round_value),
+            "claim_status": STRATEGY_CLAIM_STATUS,
+        })
+    normalized["summary"] = _summary(
+        normalized.get("items") or [],
+        _int((normalized.get("summary") or {}).get("path_count"), 0,
+             0, 1000000),
+        _int((normalized.get("summary") or {}).get("unresolved_count"), 0,
+             0, 1000000),
+    )
+    guidance = {
+        "schema_version": STRATEGY_GUIDANCE_SCHEMA_VERSION,
+        "strategy_schema_version": STRATEGY_SCHEMA_VERSION,
+        "round": round_value,
+        "summary": {
+            "item_count": len(guidance_items),
+            "actionable_items": sum(
+                1 for item in guidance_items
+                if item.get("priority_delta", 0) or item.get(
+                    "replacement_recommended")),
+            "replacement_recommendations": replacement_count,
+            "environment_repairs": environment_count,
+            "review_followups": review_count,
+            "variant_gaps": variant_gap_count,
+            "action_counts": dict(sorted(action_counts.items())),
+            "claim_status": STRATEGY_CLAIM_STATUS,
+        },
+        "items": guidance_items[:MAX_STRATEGY_ITEMS],
+        "claim_status": STRATEGY_CLAIM_STATUS,
+    }
+    return normalized, guidance
 
 
 def _surface(target_type: Any) -> str:
@@ -1164,6 +1556,9 @@ def _normalize_item(raw: Mapping[str, Any]) -> Dict[str, Any]:
     observation = _normalize_observation(raw.get("observation"))
     if observation:
         out["observation"] = observation
+    guidance = _normalize_guidance(raw.get("guidance"))
+    if guidance:
+        out["guidance"] = guidance
     if out["residual_id"] and not re.fullmatch(
             r"rr-[0-9a-f]{20}", out["residual_id"]):
         out["residual_id"] = ""
@@ -1236,6 +1631,76 @@ def normalize_research_strategy(raw: Any) -> Dict[str, Any]:
     }
 
 
+def normalize_research_guidance(raw: Any) -> Dict[str, Any]:
+    """Strip untrusted fields from a standalone guidance snapshot."""
+    if not isinstance(raw, Mapping) or raw.get(
+            "schema_version") != STRATEGY_GUIDANCE_SCHEMA_VERSION:
+        return {}
+    items = []
+    seen = set()
+    for row in raw.get("items") or []:
+        if not isinstance(row, Mapping):
+            continue
+        strategy_id = _text(row.get("strategy_id"), 80)
+        if not _STRATEGY_ID.fullmatch(strategy_id) or strategy_id in seen:
+            continue
+        seen.add(strategy_id)
+        guidance = _normalize_guidance({
+            "next_action": row.get("next_action"),
+            "priority_delta": row.get("priority_delta"),
+            "replacement_recommended": row.get(
+                "replacement_recommended"),
+            "reason_codes": row.get("reason_codes"),
+            "sources": row.get("sources"),
+            "variant_gaps": row.get("variant_gaps"),
+            "missing_observations": row.get("missing_observations"),
+            "review_status": row.get("review_status"),
+            "observation_status": row.get("observation_status"),
+            "last_round": row.get("last_round"),
+        })
+        items.append({
+            "strategy_id": strategy_id,
+            "research_key": _text(row.get("research_key"), 80),
+            "candidate_id": _text(row.get("candidate_id"), 120),
+            "residual_id": _text(row.get("residual_id"), 80),
+            **guidance,
+        })
+        if len(items) >= MAX_STRATEGY_ITEMS:
+            break
+    items.sort(key=lambda row: str(row.get("strategy_id", "")))
+    summary = raw.get("summary") if isinstance(raw.get("summary"), Mapping) else {}
+    actions = {
+        _code(name, STRATEGY_GUIDANCE_ACTIONS, "continue-path-closure"):
+        _int(count, 0, 0, MAX_STRATEGY_ITEMS)
+        for name, count in sorted(
+            (summary.get("action_counts") or {}).items(),
+            key=lambda item: str(item[0]))
+    }
+    return {
+        "schema_version": STRATEGY_GUIDANCE_SCHEMA_VERSION,
+        "strategy_schema_version": STRATEGY_SCHEMA_VERSION,
+        "round": _int(raw.get("round"), 0, 0, 1000000),
+        "summary": {
+            "item_count": len(items),
+            "actionable_items": _int(summary.get("actionable_items"), 0,
+                                      0, MAX_STRATEGY_ITEMS),
+            "replacement_recommendations": _int(
+                summary.get("replacement_recommendations"), 0, 0,
+                MAX_STRATEGY_ITEMS),
+            "environment_repairs": _int(summary.get("environment_repairs"),
+                                         0, 0, MAX_STRATEGY_ITEMS),
+            "review_followups": _int(summary.get("review_followups"), 0, 0,
+                                      MAX_STRATEGY_ITEMS),
+            "variant_gaps": _int(summary.get("variant_gaps"), 0, 0,
+                                  MAX_STRATEGY_ITEMS),
+            "action_counts": actions,
+            "claim_status": STRATEGY_CLAIM_STATUS,
+        },
+        "items": items,
+        "claim_status": STRATEGY_CLAIM_STATUS,
+    }
+
+
 def strategy_path(workspace: Path, target: str) -> Path:
     return Path(workspace).resolve() / "state" / str(target) / "coverage" / STRATEGY_FILENAME
 
@@ -1258,6 +1723,45 @@ def load_research_strategy(workspace: Path, target: str) -> Dict[str, Any]:
         return {}
     try:
         return normalize_research_strategy(
+            json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {}
+
+
+def guidance_path(workspace: Path, target: str) -> Path:
+    return (Path(workspace).resolve() / "state" / str(target) /
+            "coverage" / STRATEGY_GUIDANCE_FILENAME)
+
+
+def write_research_guidance(workspace: Path, target: str,
+                            guidance: Mapping[str, Any]) -> Path:
+    path = guidance_path(workspace, target)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = normalize_research_guidance(guidance) or {
+        "schema_version": STRATEGY_GUIDANCE_SCHEMA_VERSION,
+        "strategy_schema_version": STRATEGY_SCHEMA_VERSION,
+        "round": 0,
+        "summary": {
+            "item_count": 0, "actionable_items": 0,
+            "replacement_recommendations": 0, "environment_repairs": 0,
+            "review_followups": 0, "variant_gaps": 0,
+            "action_counts": {}, "claim_status": STRATEGY_CLAIM_STATUS,
+        },
+        "items": [], "claim_status": STRATEGY_CLAIM_STATUS,
+    }
+    tmp = path.with_name(".%s.tmp.%d" % (path.name, os.getpid()))
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
+                   encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
+def load_research_guidance(workspace: Path, target: str) -> Dict[str, Any]:
+    path = guidance_path(workspace, target)
+    if not path.exists():
+        return {}
+    try:
+        return normalize_research_guidance(
             json.loads(path.read_text(encoding="utf-8")))
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return {}

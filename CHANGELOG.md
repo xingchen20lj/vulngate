@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- S8/S2 now produce `research-strategy-guidance-v1`: a bounded next-action layer
+  that joins real strategy observations, latest human review status, and
+  explicit portfolio variant gaps. It can recommend environment repair,
+  negative-control/capability/typed-effect follow-up, residual or new-variant
+  replay, scope reframing, or replacing a zero-information experiment. The
+  guidance is persisted at `state/<target>/coverage/research-guidance.json` and
+  `S8/research-guidance.json`, and only adjusts research scheduling; it never
+  changes candidate status, CVSS, G4/G5, or the `not-a-finding` boundary.
+
 - S8 now feeds bounded real S4 observations back into matching research-strategy items. The new `research-strategy-feedback-v1` snapshot records current/history observation status, missing required signals, explicit falsifier observations, and per-round information gain without copying runtime output; complete items with zero new signal no longer receive a strategy scheduling nudge.
 
 - S3 residuals now carry a bounded S2->S4 closure contract. The matrix parser

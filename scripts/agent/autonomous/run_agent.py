@@ -45,7 +45,9 @@ from ..memory.research import (build_residual_closure_report,
 from ..memory.portfolio import (build_research_portfolio,
                                 write_research_portfolio)
 from ..analysis.research_strategy import (apply_strategy_observations,
+                                           apply_research_guidance,
                                            load_research_strategy,
+                                           write_research_guidance,
                                            write_research_strategy)
 from ..orchestrator.config import TargetConfig
 from ..orchestrator.gates import g3_novelty
@@ -1900,17 +1902,25 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         except (OSError, ValueError, TypeError):
             strategy = {}
     strategy_feedback = {}
+    research_guidance = {}
     strategy_file = None
+    guidance_file = None
     if strategy:
         strategy, strategy_feedback = apply_strategy_observations(
             strategy, candidates, memory_summaries, round_no)
+        strategy, research_guidance = apply_research_guidance(
+            strategy, portfolio, review_feedback, round_no)
         if strategy:
             strategy_file = write_research_strategy(
                 ctx.root, ctx.cfg.name, strategy)
+            guidance_file = write_research_guidance(
+                ctx.root, ctx.cfg.name, research_guidance)
             ctx.write_artifact(round_no, "S8", "research-strategy.json", strategy)
             ctx.write_artifact(
                 round_no, "S8", "research-strategy-feedback.json",
                 strategy_feedback)
+            ctx.write_artifact(
+                round_no, "S8", "research-guidance.json", research_guidance)
     ctx.write_artifact(round_no, "S8", "research-memory.json", memory_delta)
     ctx.write_artifact(round_no, "S8", "research-memory-summary.json", memory["summary"])
     ctx.write_artifact(round_no, "S8", "review-feedback.json", review_feedback)
@@ -1948,10 +1958,19 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                               % (ctx.cfg.name, round_no),
             "feedback_artifact": "state/%s/round-%02d/S8/research-strategy-feedback.json"
                                 % (ctx.cfg.name, round_no),
+            "guidance_artifact": (str(guidance_file.relative_to(
+                ctx.root.resolve())) if guidance_file else
+                "state/%s/coverage/research-guidance.json" % ctx.cfg.name),
+            "guidance_round_artifact": "state/%s/round-%02d/S8/research-guidance.json"
+                                      % (ctx.cfg.name, round_no),
             "observed_items": strategy.get("summary", {}).get(
                 "observed_items", 0),
             "information_gain": strategy_feedback.get("summary", {}).get(
                 "information_gain", 0),
+            "next_actions": research_guidance.get("summary", {}).get(
+                "action_counts", {}),
+            "replacement_recommendations": research_guidance.get(
+                "summary", {}).get("replacement_recommendations", 0),
             "claim_status": "not-a-finding",
         }
     s8 = store.load_stage("S8")
