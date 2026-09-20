@@ -28,6 +28,7 @@
 | 11 | 纵向评测退化检测 | 已实现（bounded trend comparison） | `research-benchmark-trend-v1`、`--baseline`、趋势反馈 | 跨轮只比较固定聚合指标；全局/研究面退化进入有界 guidance；不复制 case、运行时输出或结论 |
 | 12 | 项目级研究组合与变体覆盖 | 已实现（bounded research portfolio） | `research-portfolio-v1`、`state/<target>/research-portfolio.json`、S8 组合视图 | 能按研究面/攻击类别/变体/前置条件汇总已观测状态，输出有界 next probes；不把组合统计升级为漏洞结论 |
 | 13 | 攻击路径威胁模型与信任边界 | 已实现（bounded attacker-path model） | `threat-model-v1`、`state/<target>/coverage/threat-model.json`、`S1/threat-model.json`、威胁模型 CLI/调度 prompt | 入口、边界、flow、sink、控制姿态、未解析区域和能力链保持可追溯；所有路径仍是 `not-a-finding` |
+| 14 | S3 residual 跨轮闭环 | 已实现（bounded residual continuity） | `research-memory-v1` residual metadata、`pending-residual` portfolio probes、调度 prompt | residual 不因主 replay 稳定而消失；只保留受控分类、位置、摘要哈希和计划存在性；不复制原始 probe，也不升级为漏洞结论 |
 
 ## 当前阶段：可证伪实验规划
 
@@ -270,6 +271,16 @@ S1 现在把已有 entry/sink/flow、控制图和能力图做成有界的
 - 目标级保存到 `state/<target>/coverage/threat-model.json`，轮次镜像保存到 `S1/threat-model.json`；调度 prompt 和 `agent_cli.py threat-model` 使用同一份 bounded 视图。
 
 该模型只表达研究假设，所有记录强制 `claim_status=not-a-finding`，不携带源码原文、payload、命令、stdout/stderr、凭据、CVSS 或 G4/G5 证据。路由暴露、真实数据流、控制顺序、能力 transition 和 typed effect 仍必须由 S3/S4 独立验证。
+
+## 阶段 14 初步实现：S3 residual 跨轮闭环
+
+S3 的 `residuals.json` 代表“尚未正式立项、但不能丢掉的研究怀疑点”。此前它主要停留在单轮 S3/S4 队列；现在 S8 会把 residual 以有界元数据合并进目标级 research memory：
+
+- 只保留受控的 `kind` / `reason_code`、有界 `file:line` 位置、probe 摘要哈希和 `has_probe_plan`，不复制 residual 原文、命令、payload 或 stdout/stderr；
+- 即使同一机制的主 replay 是 `stable-reproducer`，相关变体仍会在 portfolio 中标为 unresolved，并生成 `state=pending-residual` 的有界 `next_probe`；
+- S2 只把该条目当作下一步研究调度提示，所有 memory、portfolio 和 prompt 记录保持 `claim_status=not-a-finding`，S4 仍必须用明确 falsifier 关闭 residual。
+
+这样可以把顶级研究员常用的“残余怀疑点清单”变成可恢复、可回放、可验证的项目级状态，同时不放宽 G4/G5。
 
 ## 后续优先级
 

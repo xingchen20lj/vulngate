@@ -142,6 +142,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Documented the attacker-path threat model, its target/round artifacts, CLI,
   trust-boundary assumptions, unresolved-region handling, and strict
   separation from vulnerability, CVSS, and G4/G5 conclusions.
+- S3 residuals now persist across S8 as bounded research metadata. Research
+  memory retains only controlled kind/reason codes, bounded locations, probe
+  digests and plan presence; the project portfolio emits `pending-residual`
+  next probes even when the primary replay is stable. The residual loop stays
+  `claim_status=not-a-finding` and never copies raw probe text.
 
 ## [1.1.0] - 2026-09-16
 

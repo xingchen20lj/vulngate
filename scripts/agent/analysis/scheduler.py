@@ -1904,10 +1904,20 @@ def prompt_coverage_block(ctx: ScheduleContext, plan: Optional[SchedulePlan] = N
             review, row.get("reason_code") or "-") if review else "")
         variants = "; ".join(row.get("fix_variants") or [])
         variant_text = (" fix_variants=%s" % variants) if variants else ""
-        lines.append("  %s [%s, round=%s]%s next=%s claim_status=%s" % (
+        residuals = "; ".join(
+            "%s/%s/%s" % (
+                item.get("residual_id") or "-",
+                item.get("kind") or "unclassified",
+                "plan" if item.get("has_probe_plan") else "no-plan",
+            )
+            for item in row.get("pending_residuals") or []
+            if isinstance(item, dict)
+        ) or "-"
+        lines.append("  %s [%s, round=%s]%s next=%s residuals=%s "
+                     "claim_status=%s" % (
             row.get("candidate_id") or row.get("research_key"),
             row.get("state"), row.get("round", 0), review_text + variant_text, hints,
-            row.get("claim_status", "not-a-finding")))
+            residuals, row.get("claim_status", "not-a-finding")))
 
     lines.append("## 项目级研究组合 / Project Research Portfolio")
     if not ctx.research_portfolio:

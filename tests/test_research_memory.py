@@ -18,6 +18,7 @@ from agent.analysis import scheduler as SCH  # noqa: E402
 from agent.memory.research import (  # noqa: E402
     STATE_ACTIONABLE_DIFFERENCE,
     STATE_ENVIRONMENT_GAP,
+    STATE_PENDING_RESIDUAL,
     STATE_REVIEW_NEEDS_EVIDENCE,
     STATE_REVIEW_REJECTED,
     STATE_STABLE_REPRODUCER,
@@ -109,6 +110,34 @@ class ResearchMemoryTests(unittest.TestCase):
         self.assertEqual(["alternate-codec", "boundary-variant"],
                          entry["fix_variants"])
         self.assertEqual("deadbeef1234", entry["patch_commit"])
+
+    def test_s3_residuals_are_bounded_pending_and_redacted(self):
+        c = candidate(
+            residuals=[{
+                "kind": "variant",
+                "reason": "secret=do-not-copy",
+                "probe_plan": "curl --data @payload secret=do-not-copy",
+                "code_location": [{"file": "src/Parser.java", "line": 44}],
+            }])
+        delta = build_round_memory([c], {"C1": {}}, {"C1": "候选"},
+                                   lab_for("C1"), 1)
+        entry = delta["entries"][0]
+        residual = entry["residuals"][0]
+        self.assertEqual(1, entry["pending_residual_count"])
+        self.assertEqual(STATE_PENDING_RESIDUAL, residual["state"])
+        self.assertEqual("variant", residual["kind"])
+        self.assertEqual("unclassified", residual["reason_code"])
+        self.assertTrue(residual["has_probe_plan"])
+        self.assertTrue(residual["probe_digest"])
+        self.assertEqual(["src/Parser.java:44"], residual["code_locations"])
+        self.assertEqual("not-a-finding", residual["claim_status"])
+        encoded = json.dumps(delta, ensure_ascii=False)
+        self.assertNotIn("do-not-copy", encoded)
+        self.assertNotIn("curl", encoded)
+
+        merged = merge_research_memory({}, delta)
+        self.assertEqual(1, merged["summary"]["residual_count"])
+        self.assertEqual(merged, merge_research_memory(merged, delta))
 
     def test_runtime_states_keep_difference_and_environment_gap_distinct(self):
         c = candidate()
@@ -229,6 +258,21 @@ class ResearchMemoryTests(unittest.TestCase):
                          after.evidence["research_memory"]["latest_state"])
         self.assertEqual("not-a-finding",
                          after.evidence["research_memory"]["claim_status"])
+
+    def test_scheduler_prompt_exposes_bounded_residual_metadata(self):
+        c = candidate(residuals=[{
+            "kind": "control-gap",
+            "reason_code": "missing-effect",
+            "probe_plan": "raw probe must not be copied",
+        }])
+        delta = build_round_memory([c], {"C1": {}}, {"C1": "候选"},
+                                   lab_for("C1"), 1)
+        prompt = SCH.prompt_coverage_block(SCH.ScheduleContext(
+            research_memory=delta["entries"]))
+        self.assertIn("residuals=", prompt)
+        self.assertIn("control-gap", prompt)
+        self.assertIn("/plan", prompt)
+        self.assertNotIn("raw probe must not be copied", prompt)
 
     def test_human_review_is_idempotent_and_overlays_memory(self):
         c = candidate()

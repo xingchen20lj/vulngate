@@ -34,6 +34,7 @@ from agent.memory.portfolio import (  # noqa: E402
     write_research_portfolio,
 )
 from agent.memory.research import (  # noqa: E402
+    STATE_PENDING_RESIDUAL,
     build_round_memory,
     merge_research_memory,
     research_key,
@@ -195,6 +196,39 @@ class ResearchPortfolioTests(unittest.TestCase):
         self.assertNotIn("raw payload", encoded)
         self.assertNotIn('"claim_status": "confirmed"', encoded)
         self.assertEqual("not-a-finding", normalized["claim_status"])
+
+    def test_residual_probe_survives_stable_replay_and_normalization(self):
+        residual_candidate = candidate(
+            "RES-1", research_surface="web", target_type="web-app",
+            surface="web parser variant", attack_class="parser",
+            variant="alternate-codec", precondition_class="single-feature",
+            residuals=[{
+                "kind": "variant",
+                "reason_code": "unverified",
+                "probe_plan": "secret raw probe should not persist",
+            }])
+        memory = merge_research_memory(
+            {}, build_round_memory([residual_candidate], {"RES-1": {}}, {},
+                                   lab_for("RES-1"), 4))
+        portfolio = build_research_portfolio(memory)
+        self.assertEqual(1, portfolio["summary"]["pending_residuals"])
+        self.assertEqual(1, portfolio["summary"]["unresolved_mechanisms"])
+        probe = next(item for item in portfolio["next_probes"]
+                     if item.get("state") == STATE_PENDING_RESIDUAL)
+        self.assertTrue(probe["residual_id"])
+        self.assertEqual("variant", probe["residual_kind"])
+        self.assertEqual("unverified", probe["residual_reason_code"])
+        self.assertEqual("s3-residual", probe["reason_code"])
+        self.assertEqual("not-a-finding", probe["claim_status"])
+        self.assertIn("执行已声明的有界 residual probe",
+                      json.dumps(portfolio, ensure_ascii=False))
+        self.assertNotIn("secret raw probe", json.dumps(portfolio, ensure_ascii=False))
+
+        normalized = normalize_research_portfolio(portfolio)
+        normalized_probe = next(item for item in normalized["next_probes"]
+                                if item.get("state") == STATE_PENDING_RESIDUAL)
+        self.assertEqual(probe["residual_id"], normalized_probe["residual_id"])
+        self.assertEqual("not-a-finding", normalized_probe["claim_status"])
 
     def test_same_mechanism_keeps_multiple_variant_labels_after_merge(self):
         first = candidate(

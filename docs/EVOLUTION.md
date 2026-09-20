@@ -167,6 +167,14 @@ research hypotheses with `claim_status=not-a-finding`; route exposure, data
 flow, control ordering, transitions, and typed effects still require S3/S4
 evidence.
 
+S3 residuals now survive the S8 boundary as bounded research metadata. The
+memory layer keeps only controlled residual kind/reason codes, source-location
+digests, a probe digest and whether a probe plan exists; it never copies the
+raw residual explanation or probe. The project portfolio turns each residual
+into a `pending-residual` next probe, and marks the related variant unresolved
+even when the primary replay is stable. This preserves the expert habit of
+closing every residual with a falsifiable probe without weakening G4/G5.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

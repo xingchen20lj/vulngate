@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -47,6 +48,8 @@ MAX_REVIEW_REFS = 8
 MAX_REVIEW_NOTE = 240
 MAX_CONTEXT_VERSIONS = 16
 MAX_CONTEXT_AUTHZ = 16
+MAX_RESIDUALS_PER_ENTRY = 8
+MAX_RESIDUAL_KIND = 48
 
 STATE_STABLE_REPRODUCER = "stable-reproducer"
 STATE_ACTIONABLE_DIFFERENCE = "actionable-difference"
@@ -59,6 +62,7 @@ STATE_REVIEW_ACCEPTED = "review-accepted"
 STATE_REVIEW_REJECTED = "review-rejected"
 STATE_REVIEW_NEEDS_EVIDENCE = "review-needs-evidence"
 STATE_REVIEW_SCOPE_CORRECTED = "review-scope-corrected"
+STATE_PENDING_RESIDUAL = "pending-residual"
 
 REVIEW_STATUS_ACCEPTED = "accepted"
 REVIEW_STATUS_REJECTED = "rejected"
@@ -87,6 +91,21 @@ _GAP_STATUSES = frozenset({
     "harness-error", "inconclusive", "disabled",
 })
 _DIFFERENCE_PREFIXES = ("difference-observed", "difference-with-inconclusive")
+
+# S3 residuals are deliberately reduced to a small vocabulary.  A residual's
+# free-form reason or probe plan may contain payloads, commands, or source
+# prose, so durable memory keeps only a category, a digest, and a boolean that
+# says whether an executable plan was supplied.
+_RESIDUAL_KINDS = frozenset({
+    "fix-completeness", "variant", "control-gap", "authz", "validation",
+    "typed-effect", "capability-chain", "environment-gap", "source-sink",
+    "differential", "state", "race", "availability", "parser", "default",
+})
+_RESIDUAL_REASONS = frozenset({
+    "unverified", "missing-effect", "missing-transition", "fix-gap",
+    "control-gap", "environment-gap", "inconclusive", "requires-runtime",
+    "needs-source-review", "pending", "unclassified",
+})
 
 
 def _text(value: Any, limit: int = MAX_TEXT) -> str:
@@ -230,6 +249,7 @@ def _candidate_meta(candidate: Dict[str, Any], key: str) -> Dict[str, Any]:
     fix_variants = _bounded_strings(
         candidate.get("patch_variants") or candidate.get("fix_variants"),
         8, 160)
+    residuals = _residual_meta(candidate, key)
     return {
         "candidate_id": _text(candidate.get("candidate_id"), 120),
         "surface": _text(candidate.get("surface"), MAX_SURFACE),
@@ -249,6 +269,107 @@ def _candidate_meta(candidate: Dict[str, Any], key: str) -> Dict[str, Any]:
         "fix_variants": fix_variants,
         "patch_commit": _text(candidate.get("patch_commit"), 80),
         "research_key": key,
+        "residuals": residuals,
+        "pending_residual_count": len(residuals),
+    }
+
+
+def _safe_residual_code(value: Any, allowed: Iterable[str]) -> str:
+    """Map arbitrary S3 text to one of a small, non-sensitive code set."""
+    text = _text(value, MAX_RESIDUAL_KIND).lower()
+    text = re.sub(r"[^a-z0-9_-]+", "-", text).strip("-")
+    return text if text in allowed else "unclassified"
+
+
+def _residual_locations(residual: Dict[str, Any],
+                        candidate: Dict[str, Any]) -> List[str]:
+    raw = (residual.get("code_location") or residual.get("code_locations")
+           or residual.get("location") or [])
+    if not isinstance(raw, (list, tuple)):
+        raw = [raw]
+    locations = [_location(item) for item in raw]
+    # A residual without its own location is still tied to the candidate's
+    # bounded source locations; this preserves traceability without copying
+    # the residual's free-form explanation.
+    if not locations:
+        fallback = (candidate.get("code_location") or
+                    candidate.get("code_locations") or [])
+        if not isinstance(fallback, (list, tuple)):
+            fallback = [fallback]
+        locations = [_location(item) for item in fallback]
+    return _bounded_strings(locations, MAX_LOCATIONS, 180)
+
+
+def _residual_meta(candidate: Dict[str, Any], key: str) -> List[Dict[str, Any]]:
+    raw_rows = candidate.get("residuals")
+    if not isinstance(raw_rows, (list, tuple)):
+        return []
+    rows: List[Dict[str, Any]] = []
+    seen = set()
+    for residual in raw_rows:
+        if not isinstance(residual, dict):
+            continue
+        kind = _safe_residual_code(
+            residual.get("kind") or residual.get("category")
+            or residual.get("type"), _RESIDUAL_KINDS)
+        reason = _safe_residual_code(
+            residual.get("reason_code") or residual.get("status")
+            or residual.get("reason"), _RESIDUAL_REASONS)
+        locations = _residual_locations(residual, candidate)
+        probe = (residual.get("probe_plan") or residual.get("next_probe")
+                 or residual.get("probe") or "")
+        probe_digest = _digest(_text(probe, 4000))[:24] if probe else ""
+        residual_id = "rr-" + _digest({
+            "research_key": key,
+            "kind": kind,
+            "reason_code": reason,
+            "locations": locations,
+            "probe_digest": probe_digest,
+        })[:20]
+        if residual_id in seen:
+            continue
+        seen.add(residual_id)
+        rows.append({
+            "residual_id": residual_id,
+            "kind": kind,
+            "reason_code": reason,
+            "code_locations": locations,
+            "has_probe_plan": bool(probe),
+            "probe_digest": probe_digest,
+            "state": STATE_PENDING_RESIDUAL,
+            "claim_status": MEMORY_CLAIM_STATUS,
+        })
+        if len(rows) >= MAX_RESIDUALS_PER_ENTRY:
+            break
+    rows.sort(key=lambda item: str(item.get("residual_id", "")))
+    return rows
+
+
+def _normalize_residual(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    kind = _safe_residual_code(value.get("kind"), _RESIDUAL_KINDS)
+    reason = _safe_residual_code(value.get("reason_code"), _RESIDUAL_REASONS)
+    residual_id = _text(value.get("residual_id"), 80)
+    if not re.fullmatch(r"rr-[0-9a-f]{20}", residual_id):
+        return {}
+    raw_locations = value.get("code_locations") or []
+    if not isinstance(raw_locations, (list, tuple)):
+        raw_locations = [raw_locations]
+    locations = _bounded_strings(
+        (_location(item) for item in raw_locations), MAX_LOCATIONS, 180)
+    probe_digest = _text(value.get("probe_digest"), 40).lower()
+    if probe_digest and not re.fullmatch(r"[0-9a-f]{1,40}", probe_digest):
+        probe_digest = ""
+    return {
+        "residual_id": residual_id,
+        "kind": kind,
+        "reason_code": reason,
+        "code_locations": locations,
+        "has_probe_plan": bool(value.get("has_probe_plan")),
+        "probe_digest": probe_digest,
+        "state": STATE_PENDING_RESIDUAL,
+        "claim_status": MEMORY_CLAIM_STATUS,
     }
 
 
@@ -596,6 +717,8 @@ def build_round_memory(candidates: Sequence[Dict[str, Any]],
         "summary": {
             "candidate_count": len(entries),
             "event_count": sum(len(e.get("events", [])) for e in entries),
+            "residual_count": sum(len(e.get("residuals") or [])
+                                   for e in entries),
             "states": dict(sorted((str(k), int(v)) for k, v in states.items()
                                    if k)),
         },
@@ -608,7 +731,8 @@ def _empty_memory() -> Dict[str, Any]:
         "schema_version": MEMORY_SCHEMA_VERSION,
         "round": 0,
         "entries": [],
-        "summary": {"candidate_count": 0, "event_count": 0, "states": {}},
+        "summary": {"candidate_count": 0, "event_count": 0,
+                    "residual_count": 0, "states": {}},
         "claim_status": MEMORY_CLAIM_STATUS,
     }
 
@@ -1060,6 +1184,18 @@ def _normalize_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     normalized["precondition_classes"] = _bounded_strings(
         entry.get("precondition_classes") or [normalized["precondition_class"]],
         8, 60)
+    residuals = []
+    seen_residuals = set()
+    for raw_residual in entry.get("residuals") or []:
+        residual = _normalize_residual(raw_residual)
+        residual_id = residual.get("residual_id")
+        if not residual_id or residual_id in seen_residuals:
+            continue
+        seen_residuals.add(residual_id)
+        residuals.append(residual)
+    residuals.sort(key=lambda item: str(item.get("residual_id", "")))
+    normalized["residuals"] = residuals[-MAX_RESIDUALS_PER_ENTRY:]
+    normalized["pending_residual_count"] = len(normalized["residuals"])
     events = []
     seen = set()
     for event in entry.get("events") or []:
@@ -1094,6 +1230,8 @@ def _memory_summary(entries: Sequence[Dict[str, Any]], round_no: int) -> Dict[st
     return {
         "candidate_count": len(entries),
         "event_count": sum(len(entry.get("events", [])) for entry in entries),
+        "residual_count": sum(len(entry.get("residuals") or [])
+                               for entry in entries),
         "states": dict(sorted((str(k), int(v)) for k, v in states.items())),
         "last_round": int(round_no),
     }
@@ -1148,6 +1286,21 @@ def merge_research_memory(existing: Optional[Dict[str, Any]],
                     source.get("fix_variants"), 8, 160)
             if source.get("patch_commit"):
                 target["patch_commit"] = _text(source.get("patch_commit"), 80)
+            residuals = list(target.get("residuals") or [])
+            seen_residuals = {
+                str(item.get("residual_id")) for item in residuals
+                if isinstance(item, dict) and item.get("residual_id")
+            }
+            for raw_residual in source.get("residuals") or []:
+                residual = _normalize_residual(raw_residual)
+                residual_id = residual.get("residual_id")
+                if not residual_id or residual_id in seen_residuals:
+                    continue
+                residuals.append(residual)
+                seen_residuals.add(residual_id)
+            residuals.sort(key=lambda item: str(item.get("residual_id", "")))
+            target["residuals"] = residuals[-MAX_RESIDUALS_PER_ENTRY:]
+            target["pending_residual_count"] = len(target["residuals"])
             target["decision"] = _text(source.get("decision", target.get("decision", "")), 100)
             events = target.setdefault("events", [])
             seen = {str(event.get("event_id")) for event in events}
@@ -1236,6 +1389,14 @@ def memory_prompt_rows(entries: Iterable[Dict[str, Any]],
                 latest.get("next_probe_hints"), 2, 220),
             "review_status": _text(latest_evidence.get("review_status"), 40),
             "reason_code": _text(latest_evidence.get("reason_code"), 60),
+            "pending_residuals": [{
+                "residual_id": _text(item.get("residual_id"), 80),
+                "kind": _text(item.get("kind"), MAX_RESIDUAL_KIND),
+                "reason_code": _text(item.get("reason_code"), MAX_RESIDUAL_KIND),
+                "has_probe_plan": bool(item.get("has_probe_plan")),
+                "claim_status": MEMORY_CLAIM_STATUS,
+            } for item in (entry.get("residuals") or [])
+                if isinstance(item, dict)][:4],
             "claim_status": MEMORY_CLAIM_STATUS,
         })
     rows.sort(key=lambda row: (-int(row.get("round", 0) or 0),

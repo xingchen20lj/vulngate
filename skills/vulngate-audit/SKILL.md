@@ -504,6 +504,14 @@ identify cross-surface or variant gaps. It must remain
 arguments, payloads, commands, stdout/stderr, credentials, CVSS, or G4/G5
 evidence; a portfolio gap is a research priority, never proof of absence.
 
+S3 residuals are carried across the same boundary as pending research debt.
+Memory stores only controlled kind/reason codes, bounded source locations, a
+probe digest, and whether a bounded probe plan exists. The portfolio emits one
+`state=pending-residual` probe per residual and marks its variant unresolved,
+even when the latest primary replay is stable. It must never copy the raw
+residual explanation or probe text; S4 still needs an explicit falsifier to
+close the residual, and every row remains `claim_status=not-a-finding`.
+
 Inspect the bounded view without opening the full memory file:
 
 ```bash
@@ -1262,6 +1270,12 @@ S8 还会写出目标级 `state/<target>/research-portfolio.json` 与轮次快�
 复核和 benchmark 趋势，并生成确定性的 `next_probes`。下一轮 S2 可以利用它定位跨研究面/变体缺口，
 但组合视图仍必须保持 `claim_status=not-a-finding`；不得写入 reviewer note、原始参数、payload、命令、
 stdout/stderr、凭据、CVSS 或 G4/G5 证据，缺口也绝不是不存在的证明。
+
+S3 residual 会作为同一边界下的待偿研究债务跨轮保存。记忆层只保留受控的
+kind/reason code、有界源码位置、probe 摘要哈希和是否存在有界 probe plan；组合视图为每条
+residual 生成一个 `state=pending-residual` 的 next probe，并把对应变体标为 unresolved，即使主
+replay 已经稳定。不能复制 residual 原文或 probe 文本；S4 仍必须用明确 falsifier 关闭 residual，
+每条记录继续保持 `claim_status=not-a-finding`。
 
 查看有界组合视图：
 

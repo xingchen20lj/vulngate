@@ -28,6 +28,7 @@ from .research import (
     STATE_DECISION_RECORDED,
     STATE_ENVIRONMENT_GAP,
     STATE_INCONCLUSIVE,
+    STATE_PENDING_RESIDUAL,
     STATE_REVIEW_ACCEPTED,
     STATE_REVIEW_NEEDS_EVIDENCE,
     STATE_REVIEW_REJECTED,
@@ -70,12 +71,14 @@ KNOWN_STATES = frozenset({
     STATE_DECISION_RECORDED, STATE_REVIEW_ACCEPTED,
     STATE_REVIEW_REJECTED, STATE_REVIEW_NEEDS_EVIDENCE,
     STATE_REVIEW_SCOPE_CORRECTED,
+    STATE_PENDING_RESIDUAL,
 })
 STABLE_STATES = frozenset({STATE_STABLE_REPRODUCER, STATE_STABLE_OBSERVATION})
 UNRESOLVED_STATES = frozenset({
     STATE_ENVIRONMENT_GAP, STATE_UNSTABLE_REPLAY,
     STATE_INCONCLUSIVE, STATE_REVIEW_NEEDS_EVIDENCE,
     STATE_DECISION_RECORDED,
+    STATE_PENDING_RESIDUAL,
 })
 FOLLOWUP_STATES = frozenset({
     STATE_ACTIONABLE_DIFFERENCE, STATE_REVIEW_ACCEPTED,
@@ -210,6 +213,7 @@ def _empty_portfolio() -> Dict[str, Any]:
             "stable_mechanisms": 0,
             "actionable_differences": 0,
             "reviewed_mechanisms": 0,
+            "pending_residuals": 0,
             "states": {},
             "review_statuses": {},
         },
@@ -297,6 +301,7 @@ def build_research_portfolio(
     stable_count = 0
     unresolved_count = 0
     difference_count = 0
+    pending_residual_count = 0
 
     for entry in entries:
         key = _text(entry.get("research_key"), MAX_KEY)
@@ -320,6 +325,12 @@ def build_research_portfolio(
             unresolved_count += 1
         if state == STATE_ACTIONABLE_DIFFERENCE:
             difference_count += 1
+        residuals = [item for item in entry.get("residuals") or []
+                     if isinstance(item, dict) and item.get("residual_id")]
+        pending_residual_count += len(residuals)
+        if residuals and state not in UNRESOLVED_STATES:
+            # A stable primary replay does not close an S3 residual variant.
+            unresolved_count += 1
 
         for dimension in DIMENSIONS:
             for value in _dimension_values(entry, dimension):
@@ -330,7 +341,7 @@ def build_research_portfolio(
                     event_state = _known_state(event.get("state"))
                     if event_state:
                         bucket["state_counts"][event_state] += 1
-                if state in UNRESOLVED_STATES:
+                if state in UNRESOLVED_STATES or residuals:
                     bucket["unresolved_keys"].add(key)
                 if state in STABLE_STATES:
                     bucket["stable_keys"].add(key)
@@ -354,6 +365,9 @@ def build_research_portfolio(
             next_candidates.append({
                 "research_key": key,
                 "candidate_id": _text(entry.get("candidate_id"), 120),
+                "residual_id": "",
+                "residual_kind": "",
+                "residual_reason_code": "",
                 "research_surface": _dimension_values(
                     entry, "research_surface")[0],
                 "target_type": _dimension_values(entry, "target_type")[0],
@@ -367,6 +381,41 @@ def build_research_portfolio(
                 "review_status": review_status,
                 "reason_code": _text(review.get("reason_code"), 60).lower(),
                 "next_probe_hints": hints[:MAX_HINTS],
+                "claim_status": PORTFOLIO_CLAIM_STATUS,
+            })
+
+        # S3 residuals are owed research even when the latest runtime replay
+        # was stable.  Keep one bounded probe per residual so a later round
+        # cannot mistake "the primary case replayed" for "all variants closed".
+        for residual in residuals:
+            residual_id = _text(residual.get("residual_id"), 80)
+            residual_kind = _text(residual.get("kind"), 48).lower()
+            has_plan = bool(residual.get("has_probe_plan"))
+            hint = ("执行已声明的有界 residual probe，并记录明确 falsifier"
+                    if has_plan else
+                    "为 residual 补充有界 probe_plan 与明确 falsifier")
+            next_candidates.append({
+                "research_key": key,
+                "candidate_id": _text(entry.get("candidate_id"), 120),
+                "residual_id": residual_id,
+                "residual_kind": residual_kind,
+                "residual_reason_code": _text(
+                    residual.get("reason_code"), 48).lower(),
+                "research_surface": _dimension_values(
+                    entry, "research_surface")[0],
+                "target_type": _dimension_values(entry, "target_type")[0],
+                "attack_class": _dimension_values(entry, "attack_class")[0],
+                "variant": _dimension_values(entry, "variant")[:4],
+                "precondition_class": _dimension_values(
+                    entry, "precondition_class")[0],
+                "state": STATE_PENDING_RESIDUAL,
+                "round": _safe_int(entry.get("round"), 0),
+                "priority": 4,
+                "review_status": review_status,
+                "reason_code": "s3-residual",
+                "next_probe_hints": [
+                    "S3 residual=%s：%s" % (residual_kind or "unclassified", hint)
+                ],
                 "claim_status": PORTFOLIO_CLAIM_STATUS,
             })
 
@@ -407,6 +456,7 @@ def build_research_portfolio(
         -int(item.get("priority", 0) or 0),
         -int(item.get("round", 0) or 0),
         str(item.get("research_key", "")),
+        str(item.get("residual_id", "")),
     ))
     benchmark = _benchmark_view(benchmark_feedback)
     return {
@@ -420,6 +470,7 @@ def build_research_portfolio(
             "actionable_differences": difference_count,
             "reviewed_mechanisms": sum(1 for key in reviews if any(
                 _text(entry.get("research_key"), MAX_KEY) == key for entry in entries)),
+            "pending_residuals": pending_residual_count,
             "states": dict(sorted(states.items())),
             "latest_states": dict(sorted(latest_states.items())),
             "review_statuses": dict(sorted(review_statuses.items())),
@@ -444,6 +495,7 @@ def normalize_research_portfolio(raw: Any) -> Dict[str, Any]:
     for key in (
         "mechanism_count", "event_count", "unresolved_mechanisms",
         "stable_mechanisms", "actionable_differences", "reviewed_mechanisms",
+        "pending_residuals",
     ):
         result["summary"][key] = _safe_int(summary.get(key), 0, 0, 1000000)
     for key in ("states", "latest_states", "review_statuses"):
@@ -502,6 +554,10 @@ def normalize_research_portfolio(raw: Any) -> Dict[str, Any]:
         probe = {
             "research_key": _text(raw_probe.get("research_key"), MAX_KEY),
             "candidate_id": _text(raw_probe.get("candidate_id"), 120),
+            "residual_id": _text(raw_probe.get("residual_id"), 80),
+            "residual_kind": _text(raw_probe.get("residual_kind"), 48).lower(),
+            "residual_reason_code": _text(
+                raw_probe.get("residual_reason_code"), 48).lower(),
             "research_surface": _text(raw_probe.get("research_surface"), 32),
             "target_type": _text(raw_probe.get("target_type"), 60),
             "attack_class": _text(raw_probe.get("attack_class"), 80),
