@@ -92,6 +92,7 @@ Evidence Gates
 - **可证伪实验规划** —— S2 为基线、授权、有状态、可用性、修复变体和 typed effect 生成带必需观测/证伪条件的有界计划；计划保持 `not-a-finding`，不会冒充漏洞结论。
 - **能力原语与攻击路径图** —— S1 从 entry/sink/flow 索引生成有界 `read` / `write` / `exec` / `ssrf` 等能力链候选，区分已观察与缺失原语，并自动生成最小验证序列；链路始终保持 `not-a-finding`，等待数据流与运行时 typed effect 证据。
 - **能力链运行时契约** —— 能力候选会把有界 `capability_contract` 传入 S4 cell；`CAPABILITY`/`TRANSITION` 轨迹会被分类为 `no-trace`、`partial` 或 `complete`，终点 typed effect 仍单独要求真实证据。
+- **运行时研究实验室** —— 定向 fuzz 输入会固化为 corpus fixture 和缩减 reproducer；有界重放与版本 × SafeMode 对照会保留稳定性、差分、签名漂移和前置缺口证据，但不会直接升级为漏洞结论。
 - **逐 cell 运行时前置** —— 声明需要的 JDK/runtime 必须真实可用，否则记录 `precondition-unavailable`，不会静默使用其他运行时替代。
 - **S4 证据收敛** —— 已落盘矩阵证据不会被 Agent/spawn 超时元数据覆盖。
 - **保守 Novelty** —— 公开查询失败会保留为不确定状态，而不会被转化为“未发现公开记录”。

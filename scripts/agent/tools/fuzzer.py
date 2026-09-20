@@ -15,7 +15,8 @@ Every input is derived from a seed via splitmix64, so the same
 {seed, budget, template set} reproduces exactly the same corpus. Results are
 classified into buckets (ok / reject / oom / soe / crash / hang / other),
 deduplicated by (entry, bucket, signature), greedily minimized (ddmin-lite),
-and emitted as pipeline candidates that flow through the normal S4-S8 gates.
+then recorded as fixed fixtures with bounded replay and version-differential
+evidence before they flow through the normal S4-S8 gates.
 
 The engine is target-agnostic: byte-level templates are format-level, and
 the only target-specific piece is a probe source configured per target
@@ -37,6 +38,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from ..orchestrator.config import TargetConfig
 from ..sandbox.approval import ApprovalGate
 from .build import JavaMatrixRunner, MatrixCell, POCSpec
+from .runtime_lab import (MAX_CELLS, build_fixture_manifest, context_digest,
+                           fixture_from_input, normalize_fixture,
+                           summarize_replay, summarize_version_differential)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -518,6 +522,14 @@ def run_discovery(workspace: Path, cfg: TargetConfig, round_no: int,
                 sig = signature(obs)
                 key = (inp.entry, bucket, sig)
                 if key not in triggers:
+                    original_fixture = fixture_from_input(
+                        inp, seed=seed, primary_version=primary,
+                        safe_mode=safe)
+                    original_fixture = normalize_fixture({
+                        **original_fixture,
+                        "expected_bucket": bucket,
+                        "expected_signature": sig,
+                    })
                     triggers[key] = {
                         "group": inp.group,
                         "entry": inp.entry,
@@ -532,6 +544,7 @@ def run_discovery(workspace: Path, cfg: TargetConfig, round_no: int,
                         "jvm": jvm,
                         "duration_ms": result["duration_ms"],
                         "timed_out": result["timed_out"],
+                        "fixture": original_fixture,
                     }
     report = {
         "engine": "directed-fuzz-2.1",
@@ -606,13 +619,28 @@ def minimize_trigger(workspace: Path, cfg: TargetConfig, round_no: int,
             granularity //= 2
         else:
             granularity = max(1, len(work) // 2)
-    return {
+    minimized = {
         "hex": to_hex(bytes(work)),
         "len": len(work),
         "orig_len": len(orig),
         "attempts": attempts,
         "max_attempts": max_attempts,
     }
+    fixture = normalize_fixture({
+        "entry": trigger.get("entry", ""),
+        "group": trigger.get("group", ""),
+        "payload_hex": minimized["hex"],
+        "expected_bucket": trigger.get("bucket", ""),
+        "expected_signature": trigger.get("signature", ""),
+        "primary_version": (trigger.get("cell") or {}).get("version", ""),
+        "safe_mode": (trigger.get("cell") or {}).get("safe", False),
+        "original_fixture_id": (trigger.get("fixture") or {}).get(
+            "fixture_id", ""),
+        "source": "minimized-reproducer",
+    })
+    minimized["fixture_id"] = fixture.get("fixture_id", "")
+    minimized["fixture_digest"] = fixture.get("digest", "")
+    return minimized
 
 
 def runner_versions(cfg: TargetConfig, workspace: Path, version: str) -> List[Path]:
@@ -637,6 +665,16 @@ def emit_candidates(triggers: Dict[Tuple[str, str, str], Dict[str, Any]],
         vector = ("AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
                   if tier == "0" else "AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:L")
         refs = [dict(r) for r in (known_upstream or {}).get(t["bucket"], [])]
+        reproducer = normalize_fixture({
+            "entry": t["entry"], "group": t.get("group", ""),
+            "payload_hex": hex_str, "expected_bucket": t["bucket"],
+            "expected_signature": t["signature"],
+            "primary_version": t["cell"].get("version", ""),
+            "safe_mode": t["cell"].get("safe", False),
+            "original_fixture_id": (t.get("fixture") or {}).get(
+                "fixture_id", ""),
+            "source": "minimized-reproducer",
+        })
         cands.append({
             "candidate_id": cid,
             "surface": surface,
@@ -669,10 +707,198 @@ def emit_candidates(triggers: Dict[Tuple[str, str, str], Dict[str, Any]],
                 "jvm": jvm,
                 "primary_cell": t["cell"],
                 "minimized": min_info,
+                "fixture_id": reproducer.get("fixture_id", ""),
+                "original_fixture_id": reproducer.get("original_fixture_id", ""),
+                "reproducer": reproducer,
                 "report_ref": "state/<target>/round-NN/FUZZ/fuzz-report.json",
             },
         })
     return cands
+
+
+def _lab_record(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Reduce one matrix result to non-secret replay/differential evidence."""
+    stdout = str(row.get("stdout", ""))
+    probe = parse_probe_output(stdout)
+    if row.get("precondition_status") == "precondition-unavailable":
+        bucket = "precondition-unavailable"
+    elif row.get("compile_error") or row.get("harness_error"):
+        bucket = "harness-error"
+    elif row.get("timed_out"):
+        bucket = "hang"
+    elif row.get("returncode") not in (None, 0) and not probe.get("ERROR"):
+        bucket = "run-failed"
+    else:
+        bucket = classify(probe, bool(row.get("timed_out")))
+    return {
+        "version": str(row.get("version", ""))[:80],
+        "safe_mode": bool(row.get("safe_mode", False)),
+        "bucket": bucket,
+        "signature": signature(probe)[:240],
+        "returncode": row.get("returncode"),
+        "timed_out": bool(row.get("timed_out", False)),
+        "precondition_status": str(row.get("precondition_status", ""))[:80],
+        "harness_error": str(row.get("harness_error", ""))[:240],
+        "compile_error": str(row.get("compile_error", ""))[:240],
+    }
+
+
+def _run_lab_matrix(runner: JavaMatrixRunner, candidate_id: str,
+                    cells: List[MatrixCell], jars_by_version: Dict[str, List[Path]],
+                    jvm: Dict[str, str], safe_mode_jvm_prop: str,
+                    lab_kind: str,
+                    fixture_id_value: str) -> List[Dict[str, Any]]:
+    spec = POCSpec(
+        candidate_id=candidate_id,
+        class_name="FuzzProbe",
+        src="FuzzProbe.java",
+        cells=cells,
+        safe_mode_jvm_prop=safe_mode_jvm_prop,
+        module_opts=[],
+        module_run_opts=[],
+        jvm_default=dict(jvm),
+        entry="runtime-lab",
+        input_shape="fixed-fixture",
+        logic="bounded replay/differential evidence",
+    )
+    raw = runner.run_manifest([spec], jars_by_version).get(candidate_id, [])
+    records = []
+    for row in raw:
+        item = _lab_record(row)
+        item["fixture_id"] = fixture_id_value
+        item["lab_kind"] = lab_kind
+        records.append(item)
+    return records
+
+
+def run_runtime_lab(workspace: Path, cfg: TargetConfig, round_no: int,
+                    triggers: Dict[Tuple[str, str, str], Dict[str, Any]],
+                    minimized: Dict[str, Dict[str, Any]],
+                    jvm: Dict[str, str], timeout_ms: int,
+                    approval: Optional[ApprovalGate] = None) -> Dict[str, Any]:
+    """Replay bounded reproducers and compare all configured versions.
+
+    The lab is intentionally capped.  It produces evidence for the next S4
+    decision, but never changes the candidate's claim status.
+    """
+    fz = getattr(cfg, "fuzzer", None) or {}
+    if fz.get("runtime_lab", True) is False:
+        return {"schema_version": "runtime-lab-v1", "status": "disabled",
+                "fixtures": [], "claim_status": "not-a-finding"}
+    try:
+        max_fixtures = max(1, min(int(fz.get("runtime_lab_max_fixtures", 8)), 16))
+    except (TypeError, ValueError):
+        max_fixtures = 8
+    try:
+        replay_runs = max(1, min(int(fz.get("runtime_lab_replay_runs", 3)), 5))
+    except (TypeError, ValueError):
+        replay_runs = 3
+    jars_by_version = cfg.resolve_jars(workspace)
+    versions = sorted(jars_by_version)
+    ordered = sorted(
+        (t for t in triggers.values() if t.get("bucket") in
+         ("oom", "soe", "hang", "crash")),
+        key=lambda t: (SEVERITY_ORDER.get(t.get("bucket", ""), 9),
+                       str(t.get("entry", "")), str(t.get("signature", ""))))
+    ordered = ordered[:max_fixtures]
+    if not versions:
+        return {
+            "schema_version": "runtime-lab-v1", "status": "precondition-unavailable",
+            "reason": "no configured jar versions", "fixtures": [],
+            "claim_status": "not-a-finding",
+        }
+    runner = JavaMatrixRunner(workspace, cfg.name, round_no,
+                              approval=approval or ApprovalGate())
+    timeout_seconds = max(5, int(timeout_ms) // 1000)
+    rows: List[Dict[str, Any]] = []
+    for trigger in ordered:
+        min_info = minimized.get(
+            str(trigger.get("signature", "")) + str(trigger.get("entry", "")), {})
+        payload_hex = str(min_info.get("hex") or trigger.get("hex") or "")
+        fixture = normalize_fixture({
+            "entry": trigger.get("entry", ""),
+            "group": trigger.get("group", ""),
+            "payload_hex": payload_hex,
+            "expected_bucket": trigger.get("bucket", ""),
+            "expected_signature": trigger.get("signature", ""),
+            "primary_version": (trigger.get("cell") or {}).get("version", ""),
+            "safe_mode": (trigger.get("cell") or {}).get("safe", False),
+            "original_fixture_id": (trigger.get("fixture") or {}).get(
+                "fixture_id", ""),
+            "source": "runtime-lab-reproducer",
+        })
+        if not fixture:
+            continue
+        fixture_id_value = fixture["fixture_id"]
+        entry = fixture["entry"]
+        timeout = timeout_seconds
+        primary = fixture.get("primary_version", "") or versions[-1]
+        if primary not in jars_by_version:
+            primary = versions[-1]
+        replay_cell = MatrixCell(
+            version=primary,
+            safe_mode=bool(fixture.get("safe_mode", False)),
+            precondition="none", args=["--entry", entry, "--hex", payload_hex],
+            jvm=dict(jvm), timeout=timeout)
+        replay_cells = [
+            MatrixCell(version=replay_cell.version, safe_mode=replay_cell.safe_mode,
+                       precondition="none", args=list(replay_cell.args),
+                       jvm=dict(jvm), timeout=timeout)
+            for _ in range(replay_runs)
+        ]
+        differential_cells = [
+            MatrixCell(version=version, safe_mode=safe, precondition="none",
+                       args=["--entry", entry, "--hex", payload_hex],
+                       jvm=dict(jvm), timeout=timeout)
+            for version in versions for safe in (False, True)
+        ]
+        try:
+            replay_records = _run_lab_matrix(
+                runner, "LAB-REPLAY-%s" % fixture_id_value, replay_cells,
+                jars_by_version, jvm, cfg.safe_mode_jvm_prop,
+                "replay", fixture_id_value)
+            differential_records = _run_lab_matrix(
+                runner, "LAB-DIFF-%s" % fixture_id_value, differential_cells,
+                jars_by_version, jvm, cfg.safe_mode_jvm_prop,
+                "differential", fixture_id_value)
+        except Exception as exc:  # preserve the lab failure as typed evidence
+            failure = {
+                "version": replay_cell.version, "safe_mode": replay_cell.safe_mode,
+                "bucket": "harness-error", "signature": "",
+                "harness_error": "%s: %s" % (type(exc).__name__, str(exc)[:200]),
+            }
+            replay_records = [dict(failure, fixture_id=fixture_id_value,
+                                   lab_kind="replay")]
+            differential_records = [dict(failure, fixture_id=fixture_id_value,
+                                         lab_kind="differential")]
+        replay = summarize_replay(replay_records)
+        differential = summarize_version_differential(
+            differential_records, primary)
+        representative = replay.get("representative", {})
+        expected_match = bool(
+            replay.get("status") == "stable"
+            and representative.get("outcome") == trigger.get("bucket")
+            and representative.get("signature") == trigger.get("signature"))
+        rows.append({
+            "fixture": fixture,
+            "expected": {"bucket": trigger.get("bucket", ""),
+                          "signature": str(trigger.get("signature", ""))[:240]},
+            "replay": replay,
+            "reproduces_expected": expected_match,
+            "replay_records": replay_records[:16],
+            "differential": differential,
+            "differential_records": differential_records[:MAX_CELLS],
+            "claim_status": "not-a-finding",
+        })
+    return {
+        "schema_version": "runtime-lab-v1",
+        "status": "completed",
+        "replay_runs": replay_runs,
+        "version_count": len(versions),
+        "fixture_count": len(rows),
+        "fixtures": rows,
+        "claim_status": "not-a-finding",
+    }
 
 
 # ---- pipeline-facing orchestration --------------------------------------
@@ -694,10 +920,14 @@ def run_fuzz_for_pipeline(workspace: Path, cfg: TargetConfig, round_no: int,
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     cand_file = fuzz_dir / "fuzz-candidates.json"
 
-    if not force and cand_file.exists():
+    corpus_file = fuzz_dir / "fuzz-corpus.json"
+    lab_file = fuzz_dir / "runtime-lab.json"
+    if not force and cand_file.exists() and corpus_file.exists() and lab_file.exists():
         cands = json.loads(cand_file.read_text(encoding="utf-8"))
-        print("[fuzz] existing candidates loaded: %d" % len(cands))
+        print("[fuzz] existing candidates and runtime-lab artifacts loaded: %d" % len(cands))
         return cands
+    if not force and cand_file.exists():
+        print("[fuzz] existing candidates lack runtime-lab artifacts; re-running discovery")
 
     approval = ApprovalGate(
         log_path=workspace / "state" / cfg.name
@@ -718,9 +948,68 @@ def run_fuzz_for_pipeline(workspace: Path, cfg: TargetConfig, round_no: int,
             min_info = minimize_trigger(workspace, cfg, round_no, t,
                                         max_attempts=120, approval=approval)
             minimized[key] = min_info
+    try:
+        corpus_limit = int(fz.get("runtime_lab_corpus_limit", 256) or 256)
+    except (TypeError, ValueError):
+        corpus_limit = 256
+    corpus = build_fixture_manifest(
+        disc.get("inputs", []), seed,
+        generator=report.get("engine", "directed-fuzz-2.1"),
+        primary_version=report.get("matrix", {}).get("primary_version", ""),
+        limit=corpus_limit,
+        budget=budget,
+        template_digest=context_digest({
+            "groups": fz.get("groups") or {},
+            "jsonb_entries": fz.get("jsonb_entries") or [],
+            "json_entries": fz.get("json_entries") or [],
+        }))
+    (fuzz_dir / "fuzz-corpus.json").write_text(
+        json.dumps(corpus, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        runtime_lab = run_runtime_lab(
+            workspace, cfg, round_no, triggers, minimized, jvm, timeout_ms,
+            approval=approval)
+    except Exception as exc:  # keep discovery usable while classifying the gap
+        runtime_lab = {
+            "schema_version": "runtime-lab-v1", "status": "run-failed",
+            "reason": "%s: %s" % (type(exc).__name__, str(exc)[:240]),
+            "fixtures": [], "claim_status": "not-a-finding",
+        }
+    lab_ref = "state/%s/round-%02d/FUZZ/runtime-lab.json" % (
+        cfg.name, round_no)
+    (fuzz_dir / "runtime-lab.json").write_text(
+        json.dumps(runtime_lab, indent=2, ensure_ascii=False), encoding="utf-8")
     cands = emit_candidates(triggers, minimized, jvm, probe_rel,
                             known_upstream=fz.get("known_upstream", {}))
+    lab_by_fixture = {
+        str(item.get("fixture", {}).get("fixture_id")): item
+        for item in runtime_lab.get("fixtures", [])
+        if isinstance(item, dict) and isinstance(item.get("fixture"), dict)
+    }
+    for candidate in cands:
+        spec = candidate.get("fuzz_spec") or {}
+        lab_item = lab_by_fixture.get(str(spec.get("fixture_id", "")))
+        if lab_item:
+            spec["runtime_lab"] = {
+                "artifact_ref": lab_ref,
+                "replay_status": (lab_item.get("replay") or {}).get("status"),
+                "reproduces_expected": bool(
+                    lab_item.get("reproduces_expected")),
+                "differential_status": (lab_item.get("differential") or {}).get(
+                    "status"),
+                "claim_status": "not-a-finding",
+            }
+            candidate["fuzz_spec"] = spec
     report["minimized_count"] = len(minimized)
+    report["corpus_ref"] = "state/%s/round-%02d/FUZZ/fuzz-corpus.json" % (
+        cfg.name, round_no)
+    report["runtime_lab"] = {
+        "artifact_ref": lab_ref,
+        "status": runtime_lab.get("status"),
+        "fixture_count": runtime_lab.get("fixture_count", 0),
+        "replay_runs": runtime_lab.get("replay_runs", 0),
+        "claim_status": "not-a-finding",
+    }
     report["duration_sec"] = round(time.monotonic() - t0, 1)
     (fuzz_dir / "fuzz-report.json").write_text(
         json.dumps({"report": report,
@@ -757,6 +1046,11 @@ def _write_report_md(fuzz_dir: Path, report: Dict[str, Any],
         "| entry | bucket | error | frames | len | hex |",
         "|---|---|---|---|---|---|",
     ]
+    lab = report.get("runtime_lab") or {}
+    if lab:
+        lines.insert(4, "- runtime lab=%s，replay=%s，fixture_count=%s" % (
+            lab.get("status", "unknown"), lab.get("replay_runs", 0),
+            lab.get("fixture_count", 0)))
     for t in sorted(triggers.values(), key=lambda x: (x["entry"], x["bucket"])):
         frames = " / ".join(t.get("frames", [])[:2])
         lines.append("| %s | %s | %s | %s | %d | `%s` |" % (

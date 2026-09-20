@@ -376,6 +376,20 @@ evidence, and keeps `EFFECT_KIND`/`EFFECT` as a separate typed-effect check.
 Even `complete` is cell-level research evidence with `claim_status=not-a-finding`,
 not a vulnerability conclusion.
 
+#### Runtime research lab and fixed fuzz fixtures
+
+When directed fuzzing is enabled, persist the generated corpus as
+`FUZZ/fuzz-corpus.json`. Each fixture has a stable id and content digest; a
+minimized reproducer retains its relationship to the original fixture. The
+bounded lab replays selected reproducers in the existing isolated Java matrix
+and writes `FUZZ/runtime-lab.json`. Repeated replay is classified as
+`stable`, `unstable`, `run-failed`, `precondition-unavailable`, or
+`gate-blocked`; version × SafeMode comparison separately records bucket
+changes, signature-only variation, and inconclusive cells. These artifacts are
+research evidence with `claim_status=not-a-finding`, not an automatic G4/G5
+promotion. The lab must preserve a precondition or harness gap rather than
+turning it into a negative result.
+
 Keep every cell, including harness failures and negative observations.
 
 #### Typed execution states
@@ -960,6 +974,16 @@ sequence（步骤标识，最多 16 个）× concurrency（1..64）× availabili
 分为 `no-trace`、`partial`、`complete`，分别保留缺失原语/transition 证据，
 并把 `EFFECT_KIND` / `EFFECT` 作为独立的 typed effect 条件；即使状态为
 `complete`，仍然只是 `claim_status=not-a-finding` 的 cell 级研究证据。
+
+#### 运行时研究实验室与固定 fuzz fixture
+
+启用定向 fuzz 时，必须把生成语料写入 `FUZZ/fuzz-corpus.json`。每个 fixture
+都有稳定的 id 和内容 digest；缩减 reproducer 必须保留它与原始 fixture 的关系。
+有界 runtime lab 复用现有隔离 Java 矩阵并写入 `FUZZ/runtime-lab.json`：重复重放
+分类为 `stable`、`unstable`、`run-failed`、`precondition-unavailable` 或
+`gate-blocked`；版本 × SafeMode 对照单独记录 bucket 变化、仅签名漂移和不可比较的
+cell。所有产物都是 `claim_status=not-a-finding` 的研究证据，不得自动升级 G4/G5；
+前置条件或 harness 缺口必须保留为缺口，不能转成负面结论。
 
 所有 cell 都保留，包括 harness error 和负向观测。
 

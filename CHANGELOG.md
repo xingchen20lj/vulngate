@@ -36,6 +36,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `no-trace`/`partial`/`complete` and keeps typed effects separate from
   intermediate capability observations. A complete trace remains
   `claim_status=not-a-finding`.
+- The directed fuzz path now persists a deterministic `fuzz-corpus.json`,
+  stable fixture ids/content digests, and minimized reproducer metadata. A
+  bounded runtime lab replays selected reproducers and compares every
+  configured version × SafeMode cell, separating stable reproduction, bucket
+  changes, signature-only drift, and precondition/harness gaps in
+  `runtime-lab.json`; the lab remains `not-a-finding` evidence.
 
 ### Documentation
 

@@ -46,6 +46,15 @@ or `complete` capability evidence while keeping `EFFECT_KIND` / `EFFECT` as a
 separate typed-effect requirement. Even a complete cell trace remains a
 `not-a-finding` research result until the ordinary G1/G4/G5 gates are met.
 
+The directed fuzz path now also has a bounded runtime lab. Generated inputs
+are persisted as deterministic fixtures in `FUZZ/fuzz-corpus.json`; minimized
+reproducers retain their original fixture relationship, stable identity, and
+content digest. Selected reproducers are replayed in the existing isolated
+Java matrix and compared across configured versions and SafeMode states.
+`FUZZ/runtime-lab.json` distinguishes stable replay, unstable replay, bucket
+changes, signature-only drift, and precondition/harness gaps. These records are
+research evidence only and remain `claim_status=not-a-finding`.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

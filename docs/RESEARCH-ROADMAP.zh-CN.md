@@ -19,7 +19,7 @@
 | 2 | 复合攻击链和状态/竞态实验契约 | 已完成 | `chain-*`、`sequence`、`STEP/STATE`、可用性证据 | 声明并发不等于 A:H；每一步可追踪 |
 | 3 | 可证伪实验规划器 | 本阶段已实现 | `S2/experiment-plans.json`、S3 计划上下文 | 每个候选有必需观测和 falsifier，且 `not-a-finding` |
 | 4 | 能力原语与攻击路径图 | 已实现（含 S4 运行时契约） | `capability-graph.json`、`capability-candidates.json`、`capability_contract`、`CAPABILITY/TRANSITION` 证据 | 低危原语只有在链路、transition 和终点 typed effect 均有观测时才允许继续评估 |
-| 5 | 运行时研究实验室与差分验证 | 后续 | 固定 fixture、版本差分、受控 fuzz、缩减后的 reproducer | 每个复现器能在隔离环境稳定重跑，失败原因可分类 |
+| 5 | 运行时研究实验室与差分验证 | 初步实现（定向 fuzz 路径） | `fuzz-corpus.json`、`runtime-lab.json`、版本/安全模式差分、缩减 reproducer | 固定输入可重复重放；差分、签名漂移与前置失败分开记录 |
 | 6 | 研究记忆与反馈学习 | 后续 | candidate/finding/negative-result 记忆、重复检测、跨轮 next probe | 不重复跑已证伪路径；新轮次能利用旧证据 |
 | 7 | 专家级评测基准 | 后续 | 真实/合成案例集、变体集、误报/漏报指标 | 用证据质量、覆盖率、校准度衡量，而不是只看候选数量 |
 
@@ -62,10 +62,29 @@ transition 证据和 typed effect 状态。`complete` 只表示该 cell 的声�
 不是漏洞结论；所有能力链证据保持 `claim_status=not-a-finding`，环境失败和未观测不能
 被解释为能力不存在。
 
+## 阶段 5 初步实现：固定 fixture、重放与版本差分
+
+现有定向 fuzz 不再只输出一批候选：每个生成输入会进入有界的
+`FUZZ/fuzz-corpus.json`，由 `entry + group + payload` 生成稳定的 `fixture_id` 和内容
+digest。触发器经 ddmin 后会形成独立的缩减 reproducer，原始输入与缩减输入的身份关系
+都会保留。
+
+对最多 16 个高价值 reproducer，runtime lab 会复用现有隔离矩阵执行：
+
+- 在原始触发 cell 上重复重放，分类为 `stable`、`unstable`、`run-failed`、
+  `precondition-unavailable` 或 `gate-blocked`；
+- 在所有配置版本 × SafeMode cell 上执行一次，区分 bucket 变化、仅签名/栈漂移和
+  不可比较的环境缺口；
+- 将脱敏后的结果写入 `FUZZ/runtime-lab.json`，并在 `fuzz_spec.runtime_lab` 中留下
+  artifact 引用；所有实验结果仍是 `claim_status=not-a-finding`。
+
+这一步已经把“定向 fuzz 发现”与“可复现、可差分的研究证据”连接起来；下一步是把同一
+套 fixture adapter 扩展到普通 S4 候选和固定服务 fixture，再加入跨轮记忆。
+
 ## 后续优先级
 
-1. 在现有 S4 cell 契约上增加固定 fixture、版本/配置差分和可重复的实验环境。
-2. 再做受控运行时实验室和差分 fuzz，优先复用现有 S4 cell、隔离和收敛契约。
-3. 最后做跨轮记忆和评测基准，用负结果、重复率、证据完整度和严重性校准反向约束 Agent。
+1. 将 runtime-lab fixture adapter 扩展到普通 S4 候选和固定服务/配置 fixture。
+2. 再做跨轮记忆和反馈学习，利用稳定负结果和差分结果减少重复实验。
+3. 最后做评测基准，用负结果、重复率、证据完整度和严重性校准反向约束 Agent。
 
 每一阶段都必须同时更新实现、技能契约、回归测试和 CHANGELOG；只有测试、artifact schema 和安全边界一起稳定后，才适合提交为一个独立变更。
