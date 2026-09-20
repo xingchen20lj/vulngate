@@ -22,6 +22,7 @@ from agent.evaluation.benchmark import (  # noqa: E402
     derive_benchmark_feedback,
     evaluate_benchmark,
     load_benchmark_json,
+    normalize_benchmark_feedback,
     validate_manifest,
 )
 
@@ -159,6 +160,72 @@ class BenchmarkTests(unittest.TestCase):
 
     def test_feedback_without_metrics_is_empty(self):
         self.assertEqual({}, derive_benchmark_feedback({"benchmark_id": "empty"}))
+
+    def test_feedback_derives_surface_specific_bounded_guidance(self):
+        result = {
+            "benchmark_id": "surface-feedback",
+            "run_count": 1,
+            "case_count": 6,
+            "metrics": {
+                "coverage_by_surface": {
+                    "web": {
+                        "observation_coverage": 0.5,
+                        "unsafe_confirmation_rate": 0.25,
+                        "environment_gap_fidelity": 0.5,
+                        "evidence_completeness": 0.5,
+                    },
+                    "native": {
+                        "observation_coverage": 1.0,
+                        "unsafe_confirmation_rate": 0.0,
+                        "environment_gap_fidelity": 1.0,
+                        "evidence_completeness": 1.0,
+                    },
+                },
+            },
+        }
+        feedback = derive_benchmark_feedback(result)
+        self.assertEqual(["web"], [
+            item["surface"] for item in feedback["surface_guidance"]])
+        guidance = feedback["surface_guidance"][0]
+        self.assertEqual(6, guidance["priority_delta"])
+        self.assertEqual(0.5, guidance["metric_snapshot"]["evidence_completeness"])
+        self.assertIn("benchmark-surface-coverage", guidance["strategy_tags"])
+        self.assertIn("benchmark-confirmation-safety", guidance["strategy_tags"])
+        self.assertEqual(BENCHMARK_FEEDBACK_CLAIM_STATUS,
+                         guidance["claim_status"])
+        self.assertNotIn("case_results", guidance)
+
+    def test_surface_feedback_normalization_is_allowlisted_and_bounded(self):
+        feedback = normalize_benchmark_feedback({
+            "schema_version": BENCHMARK_FEEDBACK_SCHEMA_VERSION,
+            "benchmark_id": "surface-normalization",
+            "surface_guidance": [
+                {
+                    "surface": "WEB",
+                    "priority_delta": 999,
+                    "metric_snapshot": {
+                        "evidence_completeness": 99,
+                        "unsafe_confirmation_rate": -4,
+                        "raw_payload": "discard-me",
+                    },
+                    "strategy_tags": ["benchmark-surface-coverage", "unknown"],
+                    "required_observations": [
+                        "each research surface needs an observed status or explicit execution gap",
+                        "untrusted prose",
+                    ],
+                    "falsifiers": ["unobserved surface coverage is not evidence of absence"],
+                    "case_results": ["discard-me"],
+                },
+                {"surface": "mars", "priority_delta": 6},
+            ],
+        })
+        self.assertEqual(1, len(feedback["surface_guidance"]))
+        guidance = feedback["surface_guidance"][0]
+        self.assertEqual("web", guidance["surface"])
+        self.assertEqual(6, guidance["priority_delta"])
+        self.assertEqual(1.0, guidance["metric_snapshot"]["evidence_completeness"])
+        self.assertEqual(0.0, guidance["metric_snapshot"]["unsafe_confirmation_rate"])
+        self.assertNotIn("case_results", guidance)
 
     def test_sample_manifest_and_cli_are_machine_readable(self):
         gold = load_benchmark_json(ROOT / "benchmarks" / "research-benchmark-v1.json")

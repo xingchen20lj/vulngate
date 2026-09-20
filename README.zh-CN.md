@@ -99,6 +99,7 @@ Evidence Gates
 - **研究质量评测基准** —— `agent_cli.py benchmark` 对 gold case/run 计算观测覆盖、负向安全、环境缺口保真度、重复率、证据完整度、决策稳定性和严重性校准；结果保持 `not-a-finding`。
 - **评测驱动研究闭环** —— `research-benchmark-feedback-v1` 将指标转换为有界告警、调度因子微调和实验观测提示；`schedule --benchmark-result` 或目标配置显式接入下一轮，但不会改变漏洞结论、CVSS 或 G4/G5。
 - **跨攻击面研究基准** —— `benchmarks/research-benchmark-surfaces-v1.json` 覆盖 Web、协议、云、移动端和 native 变体，并分别测试可确认、负向与环境缺口；结果保留 `research_profile` 与 `coverage_by_surface`，未满足运行条件的 case 仍保持 pending。
+- **按研究面自适应** —— 研究面级指标会生成有界 `surface_guidance`；只有显式标注且匹配的候选才会获得小幅调度优先级，匹配的实验计划才会追加对应的必需观测与证伪条件。
 - **逐 cell 运行时前置** —— 声明需要的 JDK/runtime 必须真实可用，否则记录 `precondition-unavailable`，不会静默使用其他运行时替代。
 - **S4 证据收敛** —— 已落盘矩阵证据不会被 Agent/spawn 超时元数据覆盖。
 - **保守 Novelty** —— 公开查询失败会保留为不确定状态，而不会被转化为“未发现公开记录”。

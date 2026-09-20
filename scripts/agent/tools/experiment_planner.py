@@ -21,6 +21,11 @@ PLANNER_VERSION = "experiment-planner-v1"
 MAX_PLANS = 6
 MAX_VERSIONS = 16
 MAX_PRECONDITIONS = 8
+RESEARCH_SURFACES = frozenset({"web", "protocol", "cloud", "mobile", "native"})
+RESEARCH_SURFACE_TARGET_TYPES = {
+    "web-app": "web", "middleware": "protocol", "message-rpc": "protocol",
+    "cloud-service": "cloud", "mobile-app": "mobile", "native-app": "native",
+}
 
 _STATE_MARKERS = (
     "race", "竞态", "concurr", "state", "状态", "replay", "重放",
@@ -73,6 +78,16 @@ def _contains(text: str, markers: Iterable[str]) -> bool:
     return any(marker.lower() in lowered for marker in markers)
 
 
+def _candidate_research_surface(candidate: Dict[str, Any]) -> str:
+    """Use only explicit surface metadata for surface-specific guidance."""
+    for key in ("research_surface", "surface"):
+        value = _text(candidate.get(key), 32).lower()
+        if value in RESEARCH_SURFACES:
+            return value
+    target_type = _text(candidate.get("target_type"), 32).lower()
+    return RESEARCH_SURFACE_TARGET_TYPES.get(target_type, "")
+
+
 def _versions(values: Sequence[Any]) -> List[str]:
     out: List[str] = []
     for value in values:
@@ -110,7 +125,8 @@ def _plan(candidate_id: str, kind: str, objective: str,
 
 
 def apply_benchmark_feedback(research_plan: Dict[str, Any],
-                             benchmark_feedback: Dict[str, Any]) -> Dict[str, Any]:
+                             benchmark_feedback: Dict[str, Any],
+                             research_surface: str = "") -> Dict[str, Any]:
     """Add bounded benchmark follow-ups to an existing research checklist.
 
     The feedback can add observations and falsifiers to the baseline plan, and
@@ -135,9 +151,30 @@ def apply_benchmark_feedback(research_plan: Dict[str, Any],
     tags = [str(item) for item in guidance.get("strategy_tags") or []]
     required = [str(item) for item in guidance.get("required_observations") or []]
     falsifiers = [str(item) for item in guidance.get("falsifiers") or []]
+    surface_item = next(
+        (item for item in feedback.get("surface_guidance") or []
+         if isinstance(item, dict) and item.get("surface") == research_surface),
+        None,
+    )
+    surface_tags = [str(item) for item in (surface_item or {}).get("strategy_tags") or []]
+    surface_required = [str(item) for item in
+                        (surface_item or {}).get("required_observations") or []]
+    surface_falsifiers = [str(item) for item in
+                          (surface_item or {}).get("falsifiers") or []]
+    for item in surface_tags:
+        if item not in tags:
+            tags.append(item)
+    for item in surface_required:
+        if item not in required:
+            required.append(item)
+    for item in surface_falsifiers:
+        if item not in falsifiers:
+            falsifiers.append(item)
     for tag in tags + (["benchmark-feedback"] if guidance else []):
         if tag and tag not in result["strategy_tags"]:
             result["strategy_tags"].append(tag)
+    if surface_item and "benchmark-surface-feedback" not in result["strategy_tags"]:
+        result["strategy_tags"].append("benchmark-surface-feedback")
     baseline = next((item for item in result["plans"]
                      if item.get("kind") == "baseline"), None)
     if baseline is not None:
@@ -156,6 +193,11 @@ def apply_benchmark_feedback(research_plan: Dict[str, Any],
         "schema_version": feedback.get("schema_version"),
         "source_benchmark_id": feedback.get("benchmark_id", ""),
         "alert_codes": alert_codes[:8],
+        "surface": research_surface,
+        "surface_priority_delta": int((surface_item or {}).get("priority_delta") or 0),
+        "surface_strategy_tags": surface_tags[:12],
+        "surface_required_observations": surface_required[:12],
+        "surface_falsifiers": surface_falsifiers[:12],
         "required_observations": required[:12],
         "falsifiers": falsifiers[:12],
         "claim_status": "not-a-finding",
@@ -339,4 +381,6 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
             "claim_status": "not-a-finding",
         },
     }
-    return apply_benchmark_feedback(result, benchmark_feedback or {})
+    return apply_benchmark_feedback(
+        result, benchmark_feedback or {},
+        research_surface=_candidate_research_surface(candidate))

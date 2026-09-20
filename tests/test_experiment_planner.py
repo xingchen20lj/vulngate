@@ -39,18 +39,34 @@ class ExperimentPlannerTests(unittest.TestCase):
                     "an unobserved stronger effect keeps the conservative severity",
                 ],
             },
+            "surface_guidance": [{
+                "surface": "web",
+                "priority_delta": 2,
+                "metric_snapshot": {"evidence_completeness": 0.5},
+                "strategy_tags": ["benchmark-surface-coverage"],
+                "required_observations": [
+                    "each research surface needs an observed status or explicit execution gap",
+                ],
+                "falsifiers": ["unobserved surface coverage is not evidence of absence"],
+            }],
             "claim_status": "not-a-finding",
         }
         result = plan_candidate_experiments(
-            {"candidate_id": "B-FEEDBACK", "surface": "command effect"},
+            {"candidate_id": "B-FEEDBACK", "surface": "web"},
             benchmark_feedback=feedback)
         baseline = next(item for item in result["plans"]
                         if item["kind"] == "baseline")
         self.assertIn("benchmark-severity-calibration", result["strategy_tags"])
         self.assertIn("severity must be consistent with observed typed effect and precondition tier",
                       baseline["required_observations"])
+        self.assertIn("benchmark-surface-coverage", result["strategy_tags"])
+        self.assertIn(
+            "each research surface needs an observed status or explicit execution gap",
+            baseline["required_observations"])
         self.assertEqual("planner-feedback",
                          result["benchmark_guidance"]["source_benchmark_id"])
+        self.assertEqual("web", result["benchmark_guidance"]["surface"])
+        self.assertEqual(2, result["benchmark_guidance"]["surface_priority_delta"])
         self.assertEqual("not-a-finding", result["provenance"]["claim_status"])
         self.assertNotIn("cvss", str(result).lower())
 

@@ -992,6 +992,36 @@ class IntegrationTests(ScheduleFixture):
         self.assertEqual("not-a-finding",
                          score.evidence["benchmark_feedback"]["claim_status"])
 
+    def test_surface_feedback_only_boosts_explicit_matching_candidates(self):
+        feedback = self.benchmark_feedback()
+        feedback["surface_guidance"] = [{
+            "surface": "web",
+            "priority_delta": 4,
+            "metric_snapshot": {"evidence_completeness": 0.5},
+            "strategy_tags": ["benchmark-surface-coverage"],
+            "required_observations": [
+                "each research surface needs an observed status or explicit execution gap",
+            ],
+            "falsifiers": ["unobserved surface coverage is not evidence of absence"],
+            "claim_status": "not-a-finding",
+        }]
+        ctx = SCH.ScheduleContext.from_store(self.store,
+                                             benchmark_feedback=feedback)
+        no_surface = SCH.score_candidate({"candidate_id": "C-no-surface"}, ctx)
+        free_text = SCH.score_candidate({"candidate_id": "C-free-text",
+                                         "surface": "web authz"}, ctx)
+        web = SCH.score_candidate({"candidate_id": "C-web",
+                                   "research_surface": "web"}, ctx)
+        target_type = SCH.score_candidate({"candidate_id": "C-target-type",
+                                           "target_type": "web-app"}, ctx)
+        self.assertEqual(no_surface.total + 4.0, web.total)
+        self.assertEqual(no_surface.total + 4.0, target_type.total)
+        self.assertEqual(no_surface.total, free_text.total)
+        self.assertEqual("web",
+                         web.evidence["benchmark_feedback"]["surface_guidance"]["surface"])
+        self.assertEqual(4.0,
+                         web.evidence["benchmark_feedback"]["surface_guidance"]["applied_delta"])
+
     def test_feedback_is_persisted_and_prompt_is_explicit(self):
         feedback = self.benchmark_feedback()
         pool = [self.candidate("C1", RUNNER_SINK, surface="command exec")]

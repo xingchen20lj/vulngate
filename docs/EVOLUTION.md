@@ -126,6 +126,14 @@ result safety, environment-gap fidelity and evidence completeness. The sample
 keeps tool/runtime gaps as pending research states and all benchmark artifacts
 as `not-a-finding`.
 
+Surface-level benchmark deficits now become bounded `surface_guidance`. The
+scheduler applies its small priority delta only when a candidate has an exact
+`research_surface` or an explicit supported `target_type`; free-form surface
+prose is never substring-matched. The experiment planner adds the matching
+surface's fixed observations and falsifiers to its baseline checklist. This
+turns a cross-surface score into targeted follow-up work without changing a
+candidate status, CVSS, runtime evidence or G4/G5.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

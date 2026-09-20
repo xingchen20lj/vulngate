@@ -44,6 +44,7 @@ from .inventory import CoverageStore, load_inventory
 from ..evaluation.benchmark import (
     BENCHMARK_FEEDBACK_FACTORS,
     MAX_FEEDBACK_WEIGHT_DELTA,
+    RESEARCH_SURFACES,
     normalize_benchmark_feedback,
 )
 from ..memory.research import (
@@ -90,6 +91,11 @@ DEFAULT_QUOTA: Dict[str, int] = {
 #: Priority bands, as a fraction of the achievable total.
 BAND_HIGH = 0.65
 BAND_MEDIUM = 0.40
+
+RESEARCH_SURFACE_TARGET_TYPES: Dict[str, str] = {
+    "web-app": "web", "middleware": "protocol", "message-rpc": "protocol",
+    "cloud-service": "cloud", "mobile-app": "mobile", "native-app": "native",
+}
 
 
 def _safe_weight(value: Any) -> int:
@@ -477,6 +483,49 @@ def candidate_category(candidate: Dict[str, Any]) -> str:
         if re.search(pattern, text):
             return name
     return CATEGORY_FALLBACK
+
+
+def candidate_research_surface(candidate: Dict[str, Any]) -> str:
+    """Return an explicit benchmark surface, never infer one from prose.
+
+    Candidate ``surface`` is historically free-form (for example,
+    ``"cross-tenant authz"``), so substring matching would silently apply
+    benchmark feedback to unrelated candidates.  Only the explicit
+    ``research_surface``/``target_type`` fields or an exact surface value are
+    eligible for surface-aware scheduling.
+    """
+    for key in ("research_surface", "surface"):
+        value = str(candidate.get(key) or "").strip().lower()
+        if value in RESEARCH_SURFACES:
+            return value
+    target_type = str(candidate.get("target_type") or "").strip().lower()
+    return RESEARCH_SURFACE_TARGET_TYPES.get(target_type, "")
+
+
+def _benchmark_surface_guidance(candidate: Dict[str, Any],
+                               benchmark_feedback: Dict[str, Any]
+                               ) -> Dict[str, Any]:
+    """Find bounded guidance for a candidate's explicit research surface."""
+    surface = candidate_research_surface(candidate)
+    if not surface:
+        return {}
+    for item in benchmark_feedback.get("surface_guidance") or []:
+        if isinstance(item, dict) and item.get("surface") == surface:
+            try:
+                priority_delta = int(item.get("priority_delta") or 0)
+            except (TypeError, ValueError):
+                priority_delta = 0
+            return {
+                "surface": surface,
+                "priority_delta": priority_delta,
+                "metric_snapshot": dict(item.get("metric_snapshot") or {}),
+                "strategy_tags": list(item.get("strategy_tags") or [])[:12],
+                "required_observations": list(
+                    item.get("required_observations") or [])[:12],
+                "falsifiers": list(item.get("falsifiers") or [])[:12],
+                "claim_status": "not-a-finding",
+            }
+    return {}
 
 
 @dataclass
@@ -1069,6 +1118,15 @@ def score_candidate(candidate: Dict[str, Any], ctx: ScheduleContext,
                 for name in FACTOR_ORDER}
     total = sum(weighted.values())
     scale = float(sum(max(0, int(ctx.weights.get(name, 0))) for name in FACTOR_ORDER))
+    surface_guidance = _benchmark_surface_guidance(
+        candidate, ctx.benchmark_feedback)
+    if surface_guidance:
+        requested = max(-MAX_FEEDBACK_WEIGHT_DELTA,
+                        min(MAX_FEEDBACK_WEIGHT_DELTA,
+                            int(surface_guidance.get("priority_delta") or 0)))
+        before = total
+        total = max(0.0, min(scale, total + requested))
+        surface_guidance["applied_delta"] = round(total - before, 4)
     duplicate = _near_duplicate_of(candidate, ctx, pool, link)
     if duplicate:
         total *= DUPLICATE_DAMPING
@@ -1121,6 +1179,7 @@ def score_candidate(candidate: Dict[str, Any], ctx: ScheduleContext,
                             ctx.benchmark_feedback.get("alerts", [])
                             if isinstance(item, dict) and item.get("code")][:8],
             "weight_adjustments": dict(ctx.weight_adjustments),
+            "surface_guidance": surface_guidance,
             "claim_status": "not-a-finding",
         }
     return CandidateScore(
@@ -1711,6 +1770,7 @@ def prompt_coverage_block(ctx: ScheduleContext, plan: Optional[SchedulePlan] = N
             "alerts": [item.get("code") for item in feedback.get("alerts", [])
                        if isinstance(item, dict)],
             "weight_adjustments": ctx.weight_adjustments,
+            "surface_guidance": list(feedback.get("surface_guidance") or [])[:8],
             "prompt_hints": list(feedback.get("prompt_hints") or [])[:8],
             "claim_status": feedback.get("claim_status", "not-a-finding"),
         }, ensure_ascii=False))

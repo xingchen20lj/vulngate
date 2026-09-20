@@ -24,6 +24,7 @@
 | 7 | 专家级评测基准 | 已实现（核心契约 + 确定性评分器） | `benchmarks/research-benchmark-v1.json`、`benchmarks/research-benchmark-sample-run.json`、`benchmark-result.json` | 同时衡量负向安全、环境缺口保真度、重复率、证据完整度、结论解析和严重性校准 |
 | 8 | 评测驱动的自适应研究闭环 | 已实现（有界反馈接入） | `research-benchmark-feedback-v1`、调度权重快照、`benchmark-guidance` 实验提示 | 评测指标只能改变下一轮研究优先级和必需观测；默认行为可回归，且不改变 G4/G5/CVSS |
 | 9 | 跨攻击面变体基准 | 已实现（五类研究面 + 三态契约） | `benchmarks/research-benchmark-surfaces-v1.json`、`benchmarks/research-benchmark-surfaces-sample-run.json`、`research_profile`、`coverage_by_surface` | Web、协议、云、移动端、native 均覆盖 vulnerable/negative/environment-gap；环境缺口不被误判为负向，结果保持 `not-a-finding` |
+| 10 | 研究面级自适应调度与规划 | 已实现（有界 surface guidance） | `surface_guidance`、候选级面向证据调度、面级 `benchmark_guidance` | 只对显式匹配研究面的候选加小幅优先级；计划补观测/证伪条件；默认无反馈行为不变，不改变 G4/G5/CVSS |
 
 ## 当前阶段：可证伪实验规划
 
@@ -204,9 +205,23 @@ class、必需证据和期望 claim status，不保存 payload、命令或进程
 并输出 `research_profile` 与按研究面拆分的 `coverage_by_surface`。这使得某一面证据缺失、错误确认
 负向 case 或吞掉环境缺口能够独立暴露；所有评测结果仍标记为 `claim_status=not-a-finding`。
 
+## 阶段 10 初步实现：研究面级自适应调度与规划
+
+跨面指标现在会进一步转换成有界 `surface_guidance`。它只保留 allowlist 内的研究面、四类固定指标、
+固定观测/证伪文本和最多 6 点的面级优先级增量：
+
+- observation coverage 偏低时，要求该研究面补齐状态或显式执行缺口；
+- evidence completeness 偏低时，优先补齐必需证据字段；
+- negative case 被错误确认时，优先补 typed effect/确认安全证据；
+- environment-gap fidelity 偏低时，优先补 runtime/前置条件探针。
+
+调度器只接受候选中的显式 `research_surface`，或由明确的 `target_type` 映射出的研究面；自由文本
+`surface` 不会通过 substring 猜测而获得 boost。规划器只给匹配研究面追加 baseline 观测与 falsifier，
+所有结果仍是 `not-a-finding`，不会确认/排除候选，也不会修改 CVSS 或 G4/G5。
+
 ## 后续优先级
 
-1. 将跨面 benchmark 与真实项目的多轮历史、人工复核和变体覆盖率做纵向对比，校准告警阈值但不放宽证据闸门。
+1. 将跨面 benchmark 与真实项目的多轮历史、人工复核和变体覆盖率做纵向对比，校准 guidance 阈值但不放宽证据闸门。
 2. 继续扩展协议状态机、云身份边界、移动端生命周期和 native 方法体验证的合成变体，并为每类维持正向、负向和环境缺口对照。
 
 每一阶段都必须同时更新实现、技能契约、回归测试和 CHANGELOG；只有测试、artifact schema 和安全边界一起稳定后，才适合提交为一个独立变更。

@@ -92,6 +92,12 @@ MAX_FEEDBACK_ALERTS = 8
 MAX_FEEDBACK_HINTS = 8
 MAX_FEEDBACK_GUIDANCE_ITEMS = 12
 MAX_FEEDBACK_WEIGHT_DELTA = 6
+MAX_FEEDBACK_SURFACE_GUIDANCE = 16
+MAX_FEEDBACK_SURFACE_DELTA = 6
+SURFACE_FEEDBACK_METRICS = (
+    "observation_coverage", "unsafe_confirmation_rate",
+    "environment_gap_fidelity", "evidence_completeness",
+)
 BENCHMARK_FEEDBACK_ALERT_CODES = frozenset({
     "unsafe-confirmation", "evidence-completeness-low",
     "unjustified-repeat-high", "environment-gap-fidelity-low",
@@ -106,6 +112,7 @@ BENCHMARK_FEEDBACK_TAGS = frozenset({
     "benchmark-confirmation-safety", "benchmark-evidence-completeness",
     "benchmark-novelty-followup", "benchmark-precondition-probe",
     "benchmark-severity-calibration", "benchmark-decision-stability",
+    "benchmark-surface-coverage",
 })
 BENCHMARK_FEEDBACK_OBSERVATIONS = frozenset({
     "TYPED_EFFECT must match the claimed impact before confirmation",
@@ -114,6 +121,7 @@ BENCHMARK_FEEDBACK_OBSERVATIONS = frozenset({
     "record the required runtime/precondition before interpreting a result",
     "severity must be consistent with observed typed effect and precondition tier",
     "repeat the decision only with an independent bounded observation",
+    "each research surface needs an observed status or explicit execution gap",
 })
 BENCHMARK_FEEDBACK_FALSIFIERS = frozenset({
     "a missing typed effect keeps the case candidate/pending",
@@ -122,6 +130,7 @@ BENCHMARK_FEEDBACK_FALSIFIERS = frozenset({
     "precondition-unavailable cannot be classified as excluded",
     "an unobserved stronger effect keeps the conservative severity",
     "a status change without new evidence is not a valid resolution",
+    "unobserved surface coverage is not evidence of absence",
 })
 BENCHMARK_FEEDBACK_HINTS = frozenset({
     "存在错误确认：下一轮优先补齐与声明影响一致的 typed effect，不能靠改阈值掩盖。",
@@ -893,6 +902,52 @@ def normalize_benchmark_feedback(raw: Dict[str, Any]) -> Dict[str, Any]:
              if isinstance(item, str) and item in BENCHMARK_FEEDBACK_FALSIFIERS],
             MAX_FEEDBACK_GUIDANCE_ITEMS, 160),
     }
+    surface_guidance: List[Dict[str, Any]] = []
+    seen_surfaces = set()
+    for item in raw.get("surface_guidance") or []:
+        if not isinstance(item, dict):
+            continue
+        surface = _text(item.get("surface"), 32).lower()
+        if surface not in RESEARCH_SURFACES or surface in seen_surfaces:
+            continue
+        raw_surface_snapshot = (item.get("metric_snapshot")
+                                if isinstance(item.get("metric_snapshot"), dict)
+                                else {})
+        surface_snapshot: Dict[str, float] = {}
+        for name in SURFACE_FEEDBACK_METRICS:
+            number = _finite_number(raw_surface_snapshot.get(name))
+            if number is None:
+                continue
+            surface_snapshot[name] = round(max(0.0, min(1.0, number)), 4)
+        priority_delta = _bounded_int(
+            item.get("priority_delta"), 0, MAX_FEEDBACK_SURFACE_DELTA)
+        tags = _bounded_strings(
+            [value for value in (item.get("strategy_tags") or [])
+             if isinstance(value, str) and value in BENCHMARK_FEEDBACK_TAGS],
+            MAX_FEEDBACK_GUIDANCE_ITEMS, 80)
+        required = _bounded_strings(
+            [value for value in (item.get("required_observations") or [])
+             if isinstance(value, str) and value in BENCHMARK_FEEDBACK_OBSERVATIONS],
+            MAX_FEEDBACK_GUIDANCE_ITEMS, 120)
+        falsifiers = _bounded_strings(
+            [value for value in (item.get("falsifiers") or [])
+             if isinstance(value, str) and value in BENCHMARK_FEEDBACK_FALSIFIERS],
+            MAX_FEEDBACK_GUIDANCE_ITEMS, 160)
+        if not (surface_snapshot or priority_delta or tags or required or falsifiers):
+            continue
+        seen_surfaces.add(surface)
+        surface_guidance.append({
+            "surface": surface,
+            "priority_delta": priority_delta,
+            "metric_snapshot": surface_snapshot,
+            "strategy_tags": tags,
+            "required_observations": required,
+            "falsifiers": falsifiers,
+            "claim_status": BENCHMARK_FEEDBACK_CLAIM_STATUS,
+        })
+        if len(surface_guidance) >= MAX_FEEDBACK_SURFACE_GUIDANCE:
+            break
+    surface_guidance.sort(key=lambda item: str(item.get("surface")))
     hints = _bounded_strings(
         [item for item in (raw.get("prompt_hints") or [])
          if isinstance(item, str) and item in BENCHMARK_FEEDBACK_HINTS],
@@ -911,6 +966,7 @@ def normalize_benchmark_feedback(raw: Dict[str, Any]) -> Dict[str, Any]:
         "alerts": alerts,
         "weight_deltas": deltas,
         "planner_guidance": planner_guidance,
+        "surface_guidance": surface_guidance,
         "prompt_hints": hints,
         "claim_status": BENCHMARK_FEEDBACK_CLAIM_STATUS,
     }
@@ -1035,6 +1091,81 @@ def derive_benchmark_feedback(result: Dict[str, Any]) -> Dict[str, Any]:
             "a status change without new evidence is not a valid resolution",
             "决策稳定性偏低：为状态变化补独立、可复核的观测。")
 
+    # A healthy global score can hide one weak research surface.  Keep this
+    # guidance separate from global weight deltas so only candidates explicitly
+    # identified with the affected surface receive a small follow-up boost.
+    surface_guidance: List[Dict[str, Any]] = []
+    coverage_by_surface = metrics.get("coverage_by_surface")
+    if isinstance(coverage_by_surface, dict):
+        for surface in sorted(coverage_by_surface):
+            if surface not in RESEARCH_SURFACES:
+                continue
+            surface_metrics = coverage_by_surface.get(surface)
+            if not isinstance(surface_metrics, dict):
+                continue
+            surface_snapshot: Dict[str, float] = {}
+            tags: List[str] = []
+            required: List[str] = []
+            falsifiers: List[str] = []
+            priority_delta = 0
+
+            def surface_signal(metric_name: str, value: Any, threshold: float,
+                               direction: str, delta: int, tag: str,
+                               observation: str, falsifier: str) -> None:
+                nonlocal priority_delta
+                number = _finite_number(value)
+                if number is None:
+                    return
+                surface_snapshot[metric_name] = round(
+                    max(0.0, min(1.0, number)), 4)
+                triggered = number < threshold if direction == "lt" else number > threshold
+                if not triggered:
+                    return
+                priority_delta = min(MAX_FEEDBACK_SURFACE_DELTA,
+                                     priority_delta + delta)
+                if tag not in tags:
+                    tags.append(tag)
+                if observation not in required:
+                    required.append(observation)
+                if falsifier not in falsifiers:
+                    falsifiers.append(falsifier)
+
+            surface_signal("observation_coverage",
+                           surface_metrics.get("observation_coverage"),
+                           0.90, "lt", 2,
+                           "benchmark-surface-coverage",
+                           "each research surface needs an observed status or explicit execution gap",
+                           "unobserved surface coverage is not evidence of absence")
+            surface_signal("unsafe_confirmation_rate",
+                           surface_metrics.get("unsafe_confirmation_rate"),
+                           0.0, "gt", 4,
+                           "benchmark-confirmation-safety",
+                           "TYPED_EFFECT must match the claimed impact before confirmation",
+                           "a missing typed effect keeps the case candidate/pending")
+            surface_signal("environment_gap_fidelity",
+                           surface_metrics.get("environment_gap_fidelity"),
+                           0.90, "lt", 3,
+                           "benchmark-precondition-probe",
+                           "record the required runtime/precondition before interpreting a result",
+                           "precondition-unavailable cannot be classified as excluded")
+            surface_signal("evidence_completeness",
+                           surface_metrics.get("evidence_completeness"),
+                           0.85, "lt", 2,
+                           "benchmark-evidence-completeness",
+                           "required evidence fields must be observed or explicitly unsupported",
+                           "missing required evidence is not a negative result")
+            if not (tags or required or falsifiers):
+                continue
+            surface_guidance.append({
+                "surface": surface,
+                "priority_delta": priority_delta,
+                "metric_snapshot": surface_snapshot,
+                "strategy_tags": tags,
+                "required_observations": required,
+                "falsifiers": falsifiers,
+                "claim_status": BENCHMARK_FEEDBACK_CLAIM_STATUS,
+            })
+
     raw = {
         "schema_version": BENCHMARK_FEEDBACK_SCHEMA_VERSION,
         "benchmark_id": _text(result.get("benchmark_id"), 120) or "benchmark",
@@ -1056,6 +1187,7 @@ def derive_benchmark_feedback(result: Dict[str, Any]) -> Dict[str, Any]:
             "required_observations": sorted(set(observations))[:MAX_FEEDBACK_GUIDANCE_ITEMS],
             "falsifiers": sorted(set(falsifiers))[:MAX_FEEDBACK_GUIDANCE_ITEMS],
         },
+        "surface_guidance": surface_guidance[:MAX_FEEDBACK_SURFACE_GUIDANCE],
         "prompt_hints": hints[:MAX_FEEDBACK_HINTS],
         "claim_status": BENCHMARK_FEEDBACK_CLAIM_STATUS,
     }

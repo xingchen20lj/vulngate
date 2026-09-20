@@ -84,6 +84,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   preserves surface/variant metadata and reports `research_profile` plus
   `coverage_by_surface`; tool or runtime gaps remain pending and the artifact
   remains `claim_status=not-a-finding`.
+- Added bounded surface-aware benchmark feedback. Weak per-surface coverage,
+  evidence completeness, negative-result safety, or environment-gap fidelity
+  produces allowlisted `surface_guidance`; only explicitly matching candidates
+  receive a small scheduler priority delta, and matching experiment plans gain
+  the corresponding observations/falsifiers. Findings, CVSS and G4/G5 remain
+  unchanged.
 
 ### Documentation
 
@@ -109,6 +115,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Documented the cross-surface benchmark fixture, per-surface coverage metrics,
   and the rule that unavailable runtime or analysis tools remain pending rather
   than becoming negative evidence.
+- Documented surface-aware scheduling/planning, exact metadata matching, and
+  the bounded `surface_guidance` safety boundary.
 
 ## [1.1.0] - 2026-09-16
 

@@ -705,6 +705,14 @@ The fixture deliberately includes vulnerable, negative and environment-gap
 cases; a missing runtime or analysis tool remains pending and is never treated
 as a negative result.
 
+When a surface metric is weak, the derived feedback may also contain bounded
+`surface_guidance`. The scheduler applies its small `priority_delta` only to a
+candidate with an exact `research_surface` or a supported explicit
+`target_type`; free-form surface prose is not substring-matched. The planner
+adds the matching surface's allowlisted observations and falsifiers to the
+baseline plan. This is prioritization metadata only: it cannot confirm or
+exclude a candidate, synthesize runtime evidence, change CVSS, or satisfy G4/G5.
+
 Do not use a benchmark score to promote a real finding or to bypass G4/G5. Use
 low negative-result fidelity, high unjustified-repeat rate, missing evidence,
 or severity overstatement as a reason to revise the planner, scheduler or
