@@ -580,6 +580,8 @@ def schedule_candidates(ctx: AutoCtx, round_no: int,
         round_no=round_no, pinned=pinned or (),
         benchmark_feedback=ctx.benchmark_feedback())
     if plan is not None:
+        ctx.write_artifact(round_no, "S2", "research-strategy.json",
+                           plan.research_strategy)
         print("[round-%02d] schedule: %d/%d selected, %s"
               % (round_no, len(selected), len(candidates),
                  ", ".join("%s=%d" % (k, v)

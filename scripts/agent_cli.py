@@ -24,6 +24,8 @@ Usage:
                            [--next-probe <hint>] [--round <N>] [--json]
   agent_cli.py portfolio <target> --workspace <dir> [--rebuild]
                               [--benchmark-feedback <json>] [--json]
+  agent_cli.py research-strategy <target> --workspace <dir> [--rebuild]
+                               [--benchmark-feedback <json>] [--json]
   agent_cli.py coverage <target> [--workspace <dir>] [--rebuild] [--show-uncovered]
                            [--json] [--risk high|medium|low] [--category authz]
                            [--module <prefix>] [--lang zh|en]
@@ -1202,6 +1204,82 @@ def cmd_threat_model(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_research_strategy(args: argparse.Namespace) -> int:
+    """Show or rebuild the bounded cross-artifact research strategy."""
+    from agent.analysis import research_strategy as strategy_analysis
+    from agent.analysis import threat_model as threat_model_analysis
+    from agent.memory.portfolio import load_research_portfolio
+    from agent.memory.research import load_research_memory
+
+    workspace = Path(args.workspace).resolve()
+    if args.rebuild:
+        try:
+            workspace, _store, _rebuilt, _note = _ensure_coverage_analysis(
+                args, (threat_model_analysis.THREAT_MODEL_INDEX,))
+        except FileNotFoundError as exc:
+            _out({"error": "target source root not found", "root": str(exc),
+                  "hint": "pass --root <src root> or run S1 first"})
+            return 2
+    model = threat_model_analysis.load_threat_model(workspace, args.target)
+    portfolio = load_research_portfolio(workspace, args.target)
+    memory = load_research_memory(workspace, args.target)
+    benchmark_feedback: Dict[str, Any] = {}
+    if args.benchmark_feedback:
+        try:
+            feedback_path = Path(args.benchmark_feedback)
+            if not feedback_path.is_absolute():
+                feedback_path = workspace / feedback_path
+            benchmark_feedback = json.loads(
+                feedback_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            _out({"error": "%s: %s" % (type(exc).__name__, exc)})
+            return 2
+    strategy = strategy_analysis.load_research_strategy(workspace, args.target)
+    if args.rebuild or not strategy:
+        if not model and not portfolio and not memory.get("entries"):
+            _out({"error": "research strategy inputs not found",
+                  "hint": "run S1/S8 or pass --rebuild"})
+            return 2
+        strategy = strategy_analysis.build_research_strategy(
+            threat_model=model, research_portfolio=portfolio,
+            research_memory=memory.get("entries") or [],
+            benchmark_feedback=benchmark_feedback,
+            target=args.target,
+            target_type=args.target_type or model.get("target_type", ""),
+            round_no=memory.get("round", 0),
+        )
+        strategy_analysis.write_research_strategy(
+            workspace, args.target, strategy)
+    if not strategy:
+        _out({"error": "research strategy not found",
+              "artifact": str(strategy_analysis.strategy_path(
+                  workspace, args.target))})
+        return 2
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "artifact": str(strategy_analysis.strategy_path(
+            workspace, args.target).relative_to(workspace)),
+        "strategy": strategy,
+    }
+    if args.json:
+        _out(payload)
+        return 0
+    summary = strategy.get("summary", {})
+    print("research strategy: %s" % payload["artifact"])
+    print("  items=%s paths=%s residuals=%s environments=%s claim_status=%s" % (
+        summary.get("item_count", 0), summary.get("path_count", 0),
+        summary.get("pending_residuals", 0),
+        summary.get("environment_recovery", 0),
+        strategy.get("claim_status", "not-a-finding")))
+    for item in (strategy.get("items") or [])[:max(0, args.limit)]:
+        print("  [P%s] %s kind=%s state=%s objective=%s" % (
+            item.get("priority", 0), item.get("strategy_id", ""),
+            item.get("kind", ""), item.get("state", ""),
+            item.get("objective", "")))
+    return 0
+
+
 def cmd_differential(args: argparse.Namespace) -> int:
     """Sibling / differential analysis (spec §12): where siblings disagree.
 
@@ -1463,6 +1541,31 @@ def build_parser() -> argparse.ArgumentParser:
     po.add_argument("--json", action="store_true",
                     help="machine-readable output")
     po.set_defaults(fn=cmd_portfolio)
+
+    rs = sub.add_parser(
+        "research-strategy",
+        help="show or rebuild the bounded cross-artifact research strategy",
+    )
+    rs.add_argument("target", help="target name (state/<target>/...)")
+    rs.add_argument("--workspace", required=True,
+                    help="workspace root containing state/<target>/")
+    rs.add_argument("--root", default=None,
+                    help="target source root; needed by --rebuild when S1 is absent")
+    rs.add_argument("--source-dir", action="append", default=[],
+                    help="restrict an inventory rebuild (repeatable)")
+    rs.add_argument("--target-type", default=None,
+                    choices=["library", "web-app", "middleware", "logging",
+                             "expression", "message-rpc", "native-app"],
+                    help="target type used when rebuilding the strategy")
+    rs.add_argument("--rebuild", action="store_true",
+                    help="rebuild from threat model, memory and portfolio")
+    rs.add_argument("--benchmark-feedback", default=None,
+                    help="optional bounded benchmark result/feedback JSON")
+    rs.add_argument("--limit", type=int, default=20,
+                    help="max strategy items to print (default: 20)")
+    rs.add_argument("--json", action="store_true",
+                    help="machine-readable output")
+    rs.set_defaults(fn=cmd_research_strategy)
 
     cvr = sub.add_parser(
         "coverage",

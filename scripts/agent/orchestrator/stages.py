@@ -475,6 +475,8 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
     ctx.store.write_artifact("S2", "candidate-matrix.json", matrix)
     if plan is not None:
         ctx.store.write_artifact("S2", "candidate-schedule.json", plan.as_dict())
+        ctx.store.write_artifact("S2", "research-strategy.json",
+                                 plan.research_strategy)
     result = {"candidate_count": len(matrix), "matrix": matrix,
               "generated_fix_candidates": [c["candidate_id"] for c in generated],
               "generated_chain_candidates": [c["candidate_id"]
@@ -500,6 +502,12 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
             "quota": plan.filled_quota,
             "relocated": {k: v for k, v in plan.relocated_quota.items() if v},
             "high_risk_uncovered": plan.residual.get("high_risk_uncovered"),
+        }
+        result["research_strategy"] = {
+            "artifact": "S2/research-strategy.json",
+            "item_count": (plan.research_strategy.get("summary", {})
+                           .get("item_count", 0)),
+            "claim_status": "not-a-finding",
         }
     return result
 

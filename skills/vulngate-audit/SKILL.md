@@ -512,6 +512,21 @@ even when the latest primary replay is stable. It must never copy the raw
 residual explanation or probe text; S4 still needs an explicit falsifier to
 close the residual, and every row remains `claim_status=not-a-finding`.
 
+S2 also writes a bounded `research-strategy-v1` at
+`state/<target>/coverage/research-strategy.json` and mirrors the round view to
+`S2/research-strategy.json`. It joins attacker-path hypotheses, unmapped
+coverage, residual probes, environment gaps, memory states and benchmark
+context into typed strategy items with fixed required observations and
+falsifiers. The scheduler may apply only a small nudge for an explicit flow,
+entry/sink, candidate, or research-key match. The strategy is a research
+agenda, never source/runtime proof, a vulnerability verdict, CVSS, or a G4/G5
+substitute. Inspect it with:
+
+```bash
+python3 scripts/agent_cli.py research-strategy <target> \
+  --workspace <audit-dir> --json
+```
+
 Inspect the bounded view without opening the full memory file:
 
 ```bash
@@ -1276,6 +1291,18 @@ kind/reason code、有界源码位置、probe 摘要哈希和是否存在有界 
 residual 生成一个 `state=pending-residual` 的 next probe，并把对应变体标为 unresolved，即使主
 replay 已经稳定。不能复制 residual 原文或 probe 文本；S4 仍必须用明确 falsifier 关闭 residual，
 每条记录继续保持 `claim_status=not-a-finding`。
+
+S2 还会写出有界的 `research-strategy-v1`：目标级为
+`state/<target>/coverage/research-strategy.json`，轮次快照为 `S2/research-strategy.json`。它将
+攻击路径假设、未映射 coverage、residual probe、环境缺口、跨轮状态和 benchmark 上下文汇聚为带
+固定 required observations/falsifiers 的策略项。调度器只有在 flow、entry/sink、candidate 或
+research key 明确匹配时才给很小的排序提示；策略只是研究议程，不是源码/运行时证明、漏洞结论、
+CVSS 或 G4/G5 替代品。可用下面命令查看：
+
+```bash
+python3 scripts/agent_cli.py research-strategy <target> \
+  --workspace <audit-dir> --json
+```
 
 查看有界组合视图：
 

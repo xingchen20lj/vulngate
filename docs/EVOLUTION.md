@@ -175,6 +175,16 @@ into a `pending-residual` next probe, and marks the related variant unresolved
 even when the primary replay is stable. This preserves the expert habit of
 closing every residual with a falsifiable probe without weakening G4/G5.
 
+S2 now synthesizes those artifacts into a bounded `research-strategy-v1`.
+Control, capability, reachability, coverage, residual, environment and
+portfolio follow-up items each carry fixed required observations and
+falsifiers. The strategy is persisted at
+`state/<target>/coverage/research-strategy.json` and mirrored to
+`S2/research-strategy.json`; the scheduler gives only explicit flow,
+entry/sink, candidate or research-key matches a small explainable nudge. The
+strategy is a research agenda, never a source/runtime conclusion or a G4/G5
+substitute.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

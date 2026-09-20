@@ -671,6 +671,11 @@ class ResidualTests(ScheduleFixture):
         latest = SCH.load_schedule(self.store)
         self.assertEqual(plan.selected_ids(), round_file.get("selected_ids"))
         self.assertEqual(round_file, latest)
+        strategy_file = (self.root / "state" / "fixture" / "coverage"
+                         / "research-strategy.json")
+        self.assertTrue(strategy_file.exists())
+        self.assertEqual("research-strategy-v1",
+                         round_file["research_strategy"]["schema_version"])
 
     def test_persisted_plan_carries_provenance(self):
         self.plan([self.candidate("C1", RUNNER_SINK)], refresh=False)

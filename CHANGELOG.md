@@ -147,6 +147,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   digests and plan presence; the project portfolio emits `pending-residual`
   next probes even when the primary replay is stable. The residual loop stays
   `claim_status=not-a-finding` and never copies raw probe text.
+- S2 now synthesizes a bounded `research-strategy-v1` from the attacker-path
+  model, unresolved coverage, residual-aware portfolio probes, cross-round
+  memory and benchmark context. Each strategy item carries fixed required
+  observations and falsifiers; explicit path/research-key matches can receive
+  only a small scheduler nudge and remain `claim_status=not-a-finding`.
 
 ## [1.1.0] - 2026-09-16
 

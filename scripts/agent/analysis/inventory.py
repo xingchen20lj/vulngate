@@ -23,6 +23,7 @@ Storage layout follows spec §3::
     ├── differential-candidates.json
     ├── capability-graph.json    capability-candidates.json     (research paths)
     ├── threat-model.json        (attacker-path / trust-boundary research view)
+    ├── research-strategy.json   (cross-artifact S2 research agenda)
     └── inventory-summary.json
 
 Files not yet produced by an implemented phase are omitted rather than written

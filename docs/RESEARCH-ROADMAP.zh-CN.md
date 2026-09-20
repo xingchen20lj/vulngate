@@ -29,6 +29,7 @@
 | 12 | 项目级研究组合与变体覆盖 | 已实现（bounded research portfolio） | `research-portfolio-v1`、`state/<target>/research-portfolio.json`、S8 组合视图 | 能按研究面/攻击类别/变体/前置条件汇总已观测状态，输出有界 next probes；不把组合统计升级为漏洞结论 |
 | 13 | 攻击路径威胁模型与信任边界 | 已实现（bounded attacker-path model） | `threat-model-v1`、`state/<target>/coverage/threat-model.json`、`S1/threat-model.json`、威胁模型 CLI/调度 prompt | 入口、边界、flow、sink、控制姿态、未解析区域和能力链保持可追溯；所有路径仍是 `not-a-finding` |
 | 14 | S3 residual 跨轮闭环 | 已实现（bounded residual continuity） | `research-memory-v1` residual metadata、`pending-residual` portfolio probes、调度 prompt | residual 不因主 replay 稳定而消失；只保留受控分类、位置、摘要哈希和计划存在性；不复制原始 probe，也不升级为漏洞结论 |
+| 15 | 跨产物证据驱动研究策略 | 已实现（bounded research strategy synthesis） | `research-strategy-v1`、`state/<target>/coverage/research-strategy.json`、`S2/research-strategy.json`、策略 CLI/调度证据 | 威胁路径、coverage gap、residual、跨轮状态和 benchmark 上下文汇聚为带 required observations/falsifiers 的有界议程；策略不能替代 G4/G5 |
 
 ## 当前阶段：可证伪实验规划
 
@@ -282,10 +283,21 @@ S3 的 `residuals.json` 代表“尚未正式立项、但不能丢掉的研究�
 
 这样可以把顶级研究员常用的“残余怀疑点清单”变成可恢复、可回放、可验证的项目级状态，同时不放宽 G4/G5。
 
+## 阶段 15 初步实现：跨产物证据驱动研究策略
+
+顶级研究员不会把“危险路径”“环境缺口”“已稳定的主样例”和“尚未关闭的变体”混在一个优先级列表里。S2 现在生成 `research-strategy-v1`，把已有 bounded artifact 统一成可回放的研究议程：
+
+- `control-closure`、`capability-closure`、`reachability-closure` 和 `path-closure` 分别对应控制顺序、能力 transition、入口可达性和完整 source→sink 路径的待验证目标；未映射 entry/sink 也单独生成 `coverage-closure`；
+- `residual-closure` 与 `environment-recovery` 直接承接 S3 residual 和运行环境缺口，不会因为主 replay 稳定或某轮没有观测就被清掉；
+- 每条策略由固定的 required observations 与 falsifiers 构成，并保存 path/research-key/residual 等有界关联；调度器只有在 flow、entry+sink、candidate/research key 等明确证据匹配时才给小幅提示；
+- 目标级产物写入 `state/<target>/coverage/research-strategy.json`，S2 快照写入 `S2/research-strategy.json`，也可通过 `python3 scripts/agent_cli.py research-strategy <target> --workspace <audit-dir> --json` 查看。
+
+策略层只是研究计划，不是 source review、运行时观测、漏洞确认、CVSS 或 G4/G5 的替代品；所有记录继续强制 `claim_status=not-a-finding`。
+
 ## 后续优先级
 
-1. 将威胁模型的边界/路径状态与项目组合、纵向趋势关联成可回放的研究策略实验，但不放宽证据闸门。
-2. 将组合视图与真实项目的多轮历史、人工复核和变体覆盖率做更细粒度关联，校准 guidance 阈值。
+1. 用真实 S4 观测回写策略项的闭合状态与信息增益，但只更新研究优先级，不把策略状态直接升级成结论。
+2. 将策略项与真实项目的多轮历史、人工复核和变体覆盖率做更细粒度关联，校准 guidance 阈值。
 3. 继续扩展协议状态机、云身份边界、移动端生命周期和 native 方法体验证的合成变体，并为每类维持正向、负向和环境缺口对照。
 
 每一阶段都必须同时更新实现、技能契约、回归测试和 CHANGELOG；只有测试、artifact schema 和安全边界一起稳定后，才适合提交为一个独立变更。

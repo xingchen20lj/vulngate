@@ -94,6 +94,10 @@ class CompositeChainCandidateTests(unittest.TestCase):
             experiment_plans = ctx.store.read_artifact(
                 "S2", "experiment-plans.json")
             self.assertTrue(experiment_plans)
+            strategy = ctx.store.read_artifact("S2", "research-strategy.json")
+            self.assertEqual("research-strategy-v1",
+                             strategy["schema_version"])
+            self.assertEqual("not-a-finding", strategy["claim_status"])
             chain_plan = next(item for item in experiment_plans
                               if item["candidate_id"].startswith("chain-"))
             self.assertTrue(chain_plan["scheduled"])
