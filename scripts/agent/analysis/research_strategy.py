@@ -761,6 +761,23 @@ def _summary_observation(summary: Any) -> Dict[str, Any]:
     if summary.get("errors") or summary.get("env_errors"):
         signals.add("runtime-error")
 
+    runtime_lab = summary.get("runtime_lab")
+    if isinstance(runtime_lab, Mapping):
+        for signal in runtime_lab.get("variant_observed_signals") or []:
+            signal = str(signal).strip().lower()
+            if signal in {
+                    "execution", "entry-behavior", "authorization",
+                    "negative-baseline", "capability-trace", "state-sequence",
+                    "typed-effect", "safe-equivalent", "environment-gap",
+                    "evidence-field", "runtime-error"}:
+                signals.add(signal)
+        variant_statuses = {
+            str(value).strip().lower()
+            for value in runtime_lab.get("variant_evidence_statuses") or []
+        }
+        if "environment-gap" in variant_statuses:
+            signals.add("environment-gap")
+
     if (summary.get("instantiated") or summary.get("parsed") or
             summary.get("http_evidence")):
         signals.add("entry-behavior")

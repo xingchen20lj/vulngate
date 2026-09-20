@@ -415,9 +415,25 @@ S2→S4→S8 的单向契约：
 - 回归测试同时覆盖 workspace 边界、指纹脱敏、无 checkout/build 副作用、真实 source arm 差异以及记忆归一化后的
   持久化，保证“未执行”“环境缺口”和“已观察差异”不混淆。
 
+## 阶段 24 初步实现：surface lane 的真实观测见证层
+
+阶段 20 已经把研究面 lane 和状态步骤送进 S4，但仅有 fixture context 仍不能说明 PoC 真正执行了哪些步骤。
+阶段 24 增加 `surface-variant-evidence-v1`，把 runner 的实际机器可读输出压缩成可回放的 lane witness：
+
+- 只消费真实 replay/differential runner row；计划声明、环境变量和 fixture context 不会单独满足任何观测要求；
+- 对每个 cell 仅保留 `execution`、`entry-behavior`、`authorization`、`negative-baseline`、`capability-trace`、
+  `state-sequence`、`typed-effect`、`safe-equivalent`、`environment-gap`、`evidence-field` 和 `runtime-error` 等固定信号，
+  并严格限制状态步骤、序列状态、cell 数量和缺口码；
+- lane 汇总明确区分 `observed`、`partial`、`environment-gap` 与 `not-executed`，只有实际完整的 STEP trace 才能形成
+  `state-sequence`，typed effect 与 safe-equivalent 仍是独立观测；
+- S8 research memory 只保存归一化 witness 与有界 next-probe hint，S2 strategy observation 读取同一组信号，帮助下一轮
+  补状态顺序、负向基线、typed effect 或修复环境；原始输出、effect 细节、payload、命令、凭据不会跨轮持久化；
+- witness 始终是 `claim_status=not-a-finding`，不会改变 candidate conclusion、CVSS、G4 或 G5；环境缺口仍不是负向证据。
+
 ## 后续优先级
 
-1. 用更多细粒度 fixture/state-machine 回放样例校准五类研究面的状态步骤覆盖，保留 runner 的回环、审批和资源上限。
+1. 用更多真实 lane witness 和细粒度 fixture/state-machine 回放样例校准五类研究面的状态步骤、负向基线和 typed-effect 覆盖，
+   保留 runner 的回环、审批和资源上限。
 2. 增加更多受控历史产物格式与 project replay 样本，但继续禁止自动 checkout、构建和远程执行，把 artifact provenance 与
    comparison gap 分开统计。
 3. 继续积累跨项目回放样本，分别校准 environment recovery、comparison gap 和 fixture budget 的告警边界，避免把样本偏差固化为调度规则。

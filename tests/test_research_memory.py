@@ -346,6 +346,48 @@ class ResearchMemoryTests(unittest.TestCase):
                          comparison["source_revision_comparison"]["pairs"][0]["status"])
         self.assertEqual("not-a-finding", comparison["claim_status"])
 
+    def test_surface_variant_witness_is_bounded_and_drives_next_probe(self):
+        c = candidate()
+        lab = lab_for("C1")
+        lab["fixtures"][0]["variant_evidence"] = {
+            "schema_version": "surface-variant-evidence-v1",
+            "fixture_key": "vf-" + "c" * 20,
+            "surface": "protocol",
+            "variant_id": "protocol-frame-state-order",
+            "lane": "positive",
+            "expected_observation": "typed-effect",
+            "required_observations": ["execution", "state-sequence",
+                                       "typed-effect"],
+            "observed_signals": ["execution", "state-sequence"],
+            "missing_observations": ["typed-effect"],
+            "falsifier_signals": ["typed-effect-missing", "secret=drop"],
+            "sequence_statuses": ["partial"],
+            "cells_observed": 1,
+            "cells_with_gap": 0,
+            "status": "partial",
+            "cells": [{
+                "version": "1.0", "safe_mode": "false",
+                "status": "observed", "signals": ["execution"],
+                "sequence_status": "partial",
+                "typed_effect_observed": "false",
+            }],
+            "raw_output": "secret=drop",
+        }
+        delta = build_round_memory([c], {"C1": {}}, {"C1": "候选"},
+                                   lab, 7)
+        event = delta["entries"][0]["events"][0]
+        witness = event["evidence"]["variant_evidence"]
+        self.assertEqual("partial", witness["status"])
+        self.assertEqual(["typed-effect-missing"],
+                         witness["falsifier_signals"])
+        self.assertFalse(witness["cells"][0]["safe_mode"])
+        self.assertFalse(witness["cells"][0]["typed_effect_observed"])
+        self.assertIn("补 typed-effect", " ".join(event["next_probe_hints"]))
+        encoded = json.dumps(delta, ensure_ascii=False)
+        self.assertNotIn("secret=drop", encoded)
+        self.assertNotIn("raw_output", encoded)
+        self.assertEqual("not-a-finding", witness["claim_status"])
+
     def test_merge_is_idempotent_and_preserves_old_events(self):
         c = candidate()
         first = build_round_memory([c], {"C1": {}}, {"C1": "候选"},

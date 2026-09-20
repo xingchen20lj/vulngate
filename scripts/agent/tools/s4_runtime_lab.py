@@ -32,6 +32,7 @@ from .surface_variants import (normalize_variant_fixture_context,
 from .source_revisions import (source_revision_index,
                                source_revision_paths,
                                source_revision_snapshot)
+from .variant_evidence import summarize_variant_evidence
 from .variant_comparisons import (build_comparison_contract,
                                   normalize_comparison_contract,
                                   summarize_comparison_observations)
@@ -821,6 +822,8 @@ def _run_s4_runtime_lab_core(
         ]
         replay_id = "LAB-S4-REPLAY-" + fixture_id
         diff_id = "LAB-S4-DIFF-" + fixture_id
+        raw_replay_records: List[Dict[str, Any]] = []
+        raw_differential_records: List[Dict[str, Any]] = []
         replay_records: List[Dict[str, Any]] = []
         differential_records: List[Dict[str, Any]] = []
         try:
@@ -828,14 +831,20 @@ def _run_s4_runtime_lab_core(
             runner = java_runner if kind == "java" else shell_runner
             if runner is None:
                 raise RuntimeError("runtime lab runner unavailable")
+            raw_replay_records = _run_manifest(
+                kind, runner, replay_spec, jars_by_version)
             replay_records = _decorate(
-                _run_manifest(kind, runner, replay_spec, jars_by_version),
+                raw_replay_records,
                 fixture_id, "replay", variant_context)
             diff_spec = _clone_spec(spec, kind, diff_id, differential_cells)
+            raw_differential_records = _run_manifest(
+                kind, runner, diff_spec, jars_by_version)
             differential_records = _decorate(
-                _run_manifest(kind, runner, diff_spec, jars_by_version),
+                raw_differential_records,
                 fixture_id, "differential", variant_context)
         except Exception as exc:  # preserve a typed lab gap, keep S4 usable
+            raw_replay_records = []
+            raw_differential_records = []
             replay_records = _failure(
                 primary, bool(variant_base.safe_mode), fixture_id,
                 "replay", exc, variant_context)
@@ -876,6 +885,10 @@ def _run_s4_runtime_lab_core(
                         "claim_status": "not-a-finding",
                     })
 
+        variant_evidence = summarize_variant_evidence(
+            variant_context,
+            raw_replay_records + raw_differential_records
+            or replay_records + differential_records)
         replay = summarize_replay(replay_records)
         differential = summarize_version_differential(
             differential_records, primary)
@@ -907,6 +920,7 @@ def _run_s4_runtime_lab_core(
             "comparison": comparison,
             "differential_records": differential_records[:MAX_CELLS],
             "source_revision_records": source_revision_records[:MAX_CELLS],
+            "variant_evidence": variant_evidence,
             "claim_status": "not-a-finding",
         })
 
@@ -933,6 +947,17 @@ def _run_s4_runtime_lab_core(
         if lane:
             lane_counts = status.setdefault("variant_lane_counts", {})
             lane_counts[lane] = int(lane_counts.get(lane, 0)) + 1
+        variant_evidence = item.get("variant_evidence") or {}
+        if isinstance(variant_evidence, dict) and variant_evidence.get("status"):
+            status.setdefault("variant_evidence_statuses", []).append(
+                variant_evidence.get("status"))
+            if variant_evidence.get("status") in {"partial", "not-executed"}:
+                status["variant_incomplete_count"] = int(
+                    status.get("variant_incomplete_count", 0)) + 1
+            observed_signals = status.setdefault("variant_observed_signals", [])
+            for signal in variant_evidence.get("observed_signals") or []:
+                if signal not in observed_signals and len(observed_signals) < 12:
+                    observed_signals.append(signal)
     return {
         "schema_version": LAB_SCHEMA_VERSION,
         "scope": "ordinary-s4",

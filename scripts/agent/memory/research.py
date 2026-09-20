@@ -127,6 +127,24 @@ _SOURCE_REVISION_PAIR_STATUSES = frozenset({
 _SOURCE_REVISION_PAIR_REASONS = _COMPARISON_REASON_CODES | frozenset({
     "missing-source-revision-cell",
 })
+_VARIANT_EVIDENCE_STATUSES = frozenset({
+    "observed", "partial", "environment-gap", "not-executed",
+})
+_VARIANT_EVIDENCE_SIGNALS = frozenset({
+    "execution", "entry-behavior", "authorization", "negative-baseline",
+    "capability-trace", "state-sequence", "typed-effect",
+    "safe-equivalent", "environment-gap", "evidence-field", "runtime-error",
+})
+_VARIANT_SEQUENCE_STATUSES = frozenset({
+    "not-declared", "no-trace", "partial", "out-of-order",
+    "unexpected-step", "complete",
+})
+_VARIANT_FALSIFIER_SIGNALS = frozenset({
+    "typed-effect-missing", "transition-not-observed",
+    "negative-baseline-missing", "safe-equivalent-missing",
+    "subject-object-binding-missing",
+})
+_VARIANT_FIXTURE_RE = re.compile(r"^vf-[0-9a-f]{20}$")
 _COMPARISON_REF_RE = re.compile(r"^[0-9a-f]{7,64}$", re.I)
 _COMPARISON_ID_RE = re.compile(r"^cmp-[0-9a-f]{20}$")
 _COMPARISON_VARIANTS = frozenset({
@@ -855,6 +873,89 @@ def _normalize_comparison_evidence(value: Any) -> Dict[str, Any]:
     return out
 
 
+def _normalize_variant_evidence(value: Any) -> Dict[str, Any]:
+    """Keep actual surface-lane witnesses bounded and non-finding."""
+    if not isinstance(value, dict):
+        return {}
+    if _text(value.get("schema_version"), 60) != "surface-variant-evidence-v1":
+        return {}
+    status = _text(value.get("status"), 40).lower()
+    if status not in _VARIANT_EVIDENCE_STATUSES:
+        status = "partial"
+    fixture_key = _text(value.get("fixture_key"), 80)
+    if not _VARIANT_FIXTURE_RE.fullmatch(fixture_key):
+        fixture_key = ""
+    def signals_from(raw: Any) -> List[str]:
+        if not isinstance(raw, (list, tuple, set)):
+            return []
+        return sorted({str(item).strip().lower() for item in raw
+                       if str(item).strip().lower() in _VARIANT_EVIDENCE_SIGNALS})[:12]
+
+    def signals(key: str) -> List[str]:
+        return signals_from(value.get(key, []))
+
+    def identifiers_from(raw: Any) -> List[str]:
+        if not isinstance(raw, (list, tuple, set)):
+            return []
+        return [str(item).strip().lower() for item in raw if str(item).strip()]
+
+    sequence_statuses = sorted({item for item in identifiers_from(
+        value.get("sequence_statuses", []))
+        if item in _VARIANT_SEQUENCE_STATUSES})[:8]
+    falsifier_signals = sorted({item for item in identifiers_from(
+        value.get("falsifier_signals", []))
+        if item in _VARIANT_FALSIFIER_SIGNALS})[:8]
+    cells: List[Dict[str, Any]] = []
+    for row in value.get("cells") or []:
+        if not isinstance(row, dict):
+            continue
+        cell_status = _text(row.get("status"), 40).lower()
+        if cell_status not in {"observed", "environment-gap"}:
+            continue
+        safe_mode = row.get("safe_mode", False)
+        if not isinstance(safe_mode, bool):
+            safe_mode = str(safe_mode).strip().lower() in {
+                "1", "true", "yes", "on",
+            }
+        typed_effect = row.get("typed_effect_observed", False)
+        if not isinstance(typed_effect, bool):
+            typed_effect = str(typed_effect).strip().lower() in {
+                "1", "true", "yes", "on",
+            }
+        cells.append({
+            "version": _text(row.get("version"), 80),
+            "safe_mode": safe_mode,
+            "status": cell_status,
+            "signals": signals_from(row.get("signals")),
+            "sequence_status": (
+                _text(row.get("sequence_status"), 40).lower()
+                if _text(row.get("sequence_status"), 40).lower()
+                in _VARIANT_SEQUENCE_STATUSES else "no-trace"),
+            "typed_effect_observed": typed_effect,
+            "claim_status": MEMORY_CLAIM_STATUS,
+        })
+        if len(cells) >= 16:
+            break
+    return {
+        "schema_version": "surface-variant-evidence-v1",
+        "fixture_key": fixture_key,
+        "surface": _text(value.get("surface"), 32).lower(),
+        "variant_id": _text(value.get("variant_id"), 96),
+        "lane": _text(value.get("lane"), 24).lower(),
+        "expected_observation": _text(value.get("expected_observation"), 40),
+        "required_observations": signals("required_observations"),
+        "observed_signals": signals("observed_signals"),
+        "missing_observations": signals("missing_observations"),
+        "falsifier_signals": falsifier_signals,
+        "sequence_statuses": sequence_statuses,
+        "cells_observed": _safe_int(value.get("cells_observed"), 0, 0, 64),
+        "cells_with_gap": _safe_int(value.get("cells_with_gap"), 0, 0, 64),
+        "status": status,
+        "cells": cells,
+        "claim_status": MEMORY_CLAIM_STATUS,
+    }
+
+
 def _comparison_probe_hints(comparison: Dict[str, Any]) -> List[str]:
     """Turn comparison state into bounded next actions without verdicts."""
     status = comparison.get("status")
@@ -879,6 +980,28 @@ def _comparison_probe_hints(comparison: Dict[str, Any]) -> List[str]:
     return _bounded_strings(hints, MAX_HINTS, 220)
 
 
+def _variant_probe_hints(variant: Dict[str, Any]) -> List[str]:
+    """Turn lane witness gaps into bounded next research actions."""
+    hints: List[str] = []
+    status = variant.get("status")
+    lane = variant.get("lane")
+    missing = set(variant.get("missing_observations") or [])
+    if status == "environment-gap":
+        hints.append("先修复该 surface lane 的 runtime/harness 缺口；缺口不等于安全")
+    elif status in {"partial", "not-executed"}:
+        if "state-sequence" in missing:
+            hints.append("补齐 state-machine 的有序 STEP/STATE 观测，不把声明当成已执行")
+        if "typed-effect" in missing:
+            hints.append("补 typed-effect 或 safe-equivalent 观测，区分中间轨迹与真实影响")
+        if "negative-baseline" in missing or "safe-equivalent" in missing:
+            hints.append("补对应 lane 的负向/安全等价基线，避免只跑正向路径")
+        if not hints:
+            hints.append("补齐该 surface lane 的必需观测，避免把部分覆盖当成完整")
+    elif status == "observed" and lane == "positive":
+        hints.append("lane 观测已闭合；继续核对 source→sink 与 typed-effect 语义，不直接下结论")
+    return _bounded_strings(hints, MAX_HINTS, 220)
+
+
 def _fixture_event(item: Dict[str, Any], round_no: int,
                    fixture_index: int = 0,
                    runtime_context: Optional[Dict[str, Any]] = None
@@ -889,9 +1012,13 @@ def _fixture_event(item: Dict[str, Any], round_no: int,
     reproduces = item.get("reproduces_expected")
     state, hints = _runtime_state(replay, differential, reproduces)
     comparison = _normalize_comparison_evidence(item.get("comparison"))
+    variant_evidence = _normalize_variant_evidence(item.get("variant_evidence"))
     if comparison:
         hints = _bounded_strings(
             list(hints) + _comparison_probe_hints(comparison), MAX_HINTS, 220)
+    if variant_evidence:
+        hints = _bounded_strings(
+            list(hints) + _variant_probe_hints(variant_evidence), MAX_HINTS, 220)
     differences = []
     for diff in differential.get("differences") or []:
         if not isinstance(diff, dict):
@@ -923,6 +1050,8 @@ def _fixture_event(item: Dict[str, Any], round_no: int,
     }
     if comparison:
         evidence["comparison"] = comparison
+    if variant_evidence:
+        evidence["variant_evidence"] = variant_evidence
     context = dict(runtime_context or {})
     authz_fixture_id = evidence["authz_fixture_id"]
     if authz_fixture_id:

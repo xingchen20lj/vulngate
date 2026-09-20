@@ -27,6 +27,7 @@ from agent.analysis.research_strategy import (  # noqa: E402
     load_research_guidance,
     load_research_strategy,
     normalize_research_strategy,
+    _summary_observation,
     strategy_path,
     write_research_guidance,
     write_research_strategy,
@@ -39,6 +40,22 @@ class ResearchStrategyTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix="vulngate-strategy-"))
         self.addCleanup(lambda: shutil.rmtree(self.root, ignore_errors=True))
+
+    def test_surface_variant_witnesses_backfill_safe_observation_signals(self):
+        view = _summary_observation({
+            "execution_state": "executed-no-effect",
+            "cells_ran": 1,
+            "runtime_lab": {
+                "variant_observed_signals": [
+                    "state-sequence", "typed-effect", "raw-secret",
+                ],
+                "variant_evidence_statuses": ["partial", "environment-gap"],
+            },
+        })
+        self.assertIn("state-sequence", view["signals"])
+        self.assertIn("typed-effect", view["signals"])
+        self.assertIn("environment-gap", view["signals"])
+        self.assertNotIn("raw-secret", view["signals"])
 
     def _threat_model(self):
         return build_threat_model(

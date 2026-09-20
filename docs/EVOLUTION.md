@@ -219,6 +219,18 @@ fixture budget can truncate work, and that truncation is explicit rather than
 silently presenting partial coverage as complete. The lane remains a planning
 contract until the PoC emits actual evidence.
 
+Stage 24 closes that distinction with `surface-variant-evidence-v1`. S4
+derives the artifact only from actual replay/differential rows and records a
+small allowlisted taxonomy: execution, entry behavior, authorization,
+negative baseline, capability trace, state sequence, typed effect,
+safe-equivalent, environment gap, evidence field, and runtime error. Each lane
+is classified as observed, partial, environment-gap, or not-executed; a plan's
+declared steps never count, and only a complete observed STEP trace satisfies
+the state-sequence signal. S8 stores the bounded witness and turns missing
+signals into the next probe, while S2 reuses the same observation taxonomy.
+The witness is research metadata with `claim_status=not-a-finding` and never
+copies raw output, effect details, payloads, commands, or credentials.
+
 For multi-version or fix-completeness candidates, the next deterministic layer
 is `comparison-orchestration-v1`. It binds configured before/after version
 pairs, read-only parent/fixed revision references, and canonical sibling hints

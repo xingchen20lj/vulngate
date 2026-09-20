@@ -411,6 +411,23 @@ verification summary, but keep every replay/differential result at
 `claim_status=not-a-finding`; a missing baseline, service, runtime or harness
 must remain an explicit gap.
 
+#### Surface-variant lane witnesses
+
+S4 must derive `surface-variant-evidence-v1` only from actual replay and
+differential runner rows. The fixture/plan context is not an observation. Keep
+only the allowlisted signals `execution`, `entry-behavior`, `authorization`,
+`negative-baseline`, `capability-trace`, `state-sequence`, `typed-effect`,
+`safe-equivalent`, `environment-gap`, `evidence-field`, and `runtime-error`,
+plus bounded cell counts, approved state-step identifiers, and sequence
+statuses. Classify each lane as `observed`, `partial`, `environment-gap`, or
+`not-executed`; only a complete actual STEP trace satisfies `state-sequence`.
+Typed effects and safe-equivalent behavior remain separate observations. S8
+may persist the bounded witness and turn missing signals into next-probe hints,
+and S2 may reuse the same taxonomy for strategy feedback. The witness is always
+`claim_status=not-a-finding`; never copy raw output, effect details, payloads,
+commands, or credentials, and never use it to alter candidate status, CVSS,
+G4, or G5.
+
 #### Explicit source-revision artifact arms
 
 When a comparison contract contains exact `before`/`after` source refs, an
@@ -1245,6 +1262,20 @@ cell。所有产物都是 `claim_status=not-a-finding` 的研究证据，不得�
 SafeMode 对照，聚合结果写入 `S4/runtime-lab.json`，并从 S4 verification summary
 关联到候选。所有重放/差分结果仍必须是 `claim_status=not-a-finding`；缺少基线、服务、
 runtime 或 harness 时必须保留为显式缺口。
+
+#### Surface lane witness
+
+S4 必须只从真实 replay/differential runner row 生成
+`surface-variant-evidence-v1`；fixture/plan context 本身不是观测。只保留
+`execution`、`entry-behavior`、`authorization`、`negative-baseline`、
+`capability-trace`、`state-sequence`、`typed-effect`、`safe-equivalent`、
+`environment-gap`、`evidence-field`、`runtime-error` 这些白名单信号，以及有界
+cell 计数、批准的状态步骤身份和 sequence status。每条 lane 必须区分
+`observed`、`partial`、`environment-gap`、`not-executed`；只有真实完整的 STEP trace
+才能满足 `state-sequence`，typed effect 与 safe-equivalent 仍是分开的观测。S8 可以保存这份
+有界 witness 并把缺失信号转成 next-probe，S2 可以复用同一分类做策略反馈。witness 始终是
+`claim_status=not-a-finding`；不得复制原始输出、effect 细节、payload、命令或凭据，也不得改变
+candidate status、CVSS、G4 或 G5。
 
 #### 显式 source-revision 构建产物 arm
 

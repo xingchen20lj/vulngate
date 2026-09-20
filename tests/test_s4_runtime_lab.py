@@ -182,6 +182,16 @@ class S4RuntimeLabTests(unittest.TestCase):
             {"positive": 1, "negative": 1, "environment-gap": 1},
             artifact["candidate_status"]["MOBILE-1"]["variant_lane_counts"],
         )
+        self.assertEqual(3, len([
+            row for row in artifact["fixtures"]
+            if row.get("variant_evidence", {}).get("schema_version")
+            == "surface-variant-evidence-v1"
+        ]))
+        self.assertEqual(
+            {"partial"},
+            set(artifact["candidate_status"]["MOBILE-1"]
+                ["variant_evidence_statuses"]),
+        )
         # Each lane is a real runner invocation with a distinct state-machine
         # context; the plan still remains metadata and all rows are safe.
         self.assertEqual(6, len(FakeJavaRunner.calls))

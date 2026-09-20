@@ -51,6 +51,12 @@ S4 runtime lab 会在配置的 fixture 预算内把规范化计划展开为
 一起落盘。预算不足时 artifact 会显式记录截断。environment-gap 仍只是“需要观察缺口”的要求；runner 失败、
 前置条件缺失和安全等价行为仍按不同的真实运行结果处理。
 
+S4 还会从真实 replay/differential runner row 生成 `surface-variant-evidence-v1`。它只保留有界的固定信号分类和
+状态步骤身份，将每条 lane 区分为 `observed`、`partial`、`environment-gap` 或 `not-executed`。计划声明不是 witness：
+只有完整的实际 STEP trace 才能满足 `state-sequence`，typed-effect 与 safe-equivalent 仍是独立信号。S8 与 S2 会复用
+这份有界 witness 选择下一步探针，但它始终保持 `claim_status=not-a-finding`；原始输出、effect 细节、payload、命令和
+凭据不会进入 artifact，也不会改变任何闸门、CVSS 或 candidate conclusion。
+
 对于存在多个配置版本或修复元数据的候选，S2 还会生成
 `comparison-orchestration-v1`。S4 将比较绑定到同一个 fixture 和 lane，并把真实配对 cell 分类为 bucket
 变化、仅签名漂移、相同观测或 inconclusive；如果没有操作者提供的构建产物，源码 revision 和同族路径会明确

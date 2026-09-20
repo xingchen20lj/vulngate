@@ -40,6 +40,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   preserving `not-a-finding`; no lane declaration satisfies G4/G5 or changes
   CVSS.
 
+- S4 now emits `surface-variant-evidence-v1` from actual replay/differential
+  rows. The bounded witness layer distinguishes observed, partial,
+  environment-gap, and not-executed lanes; only a complete observed STEP trace
+  satisfies state-sequence, while typed-effect and safe-equivalent remain
+  separate signals. S8/S2 reuse missing signals as next-probe hints, without
+  persisting raw output or changing candidate status, CVSS, G4, or G5.
+
 - S2 experiment plans now carry a shared `surface-variant-plan-v1` for Web,
   protocol, cloud, mobile, and native research. Each selected state-machine,
   identity-boundary, lifecycle, route, parser, or method-body variant is

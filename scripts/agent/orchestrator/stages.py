@@ -834,6 +834,12 @@ def run_s4(ctx: StageContext) -> Dict[str, Any]:
                 "replay_statuses": candidate_lab.get("replay_statuses", []),
                 "differential_statuses": candidate_lab.get(
                     "differential_statuses", []),
+                "variant_evidence_statuses": candidate_lab.get(
+                    "variant_evidence_statuses", []),
+                "variant_incomplete_count": candidate_lab.get(
+                    "variant_incomplete_count", 0),
+                "variant_observed_signals": candidate_lab.get(
+                    "variant_observed_signals", []),
                 "claim_status": "not-a-finding",
             }
         for cell in cells:

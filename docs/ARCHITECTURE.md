@@ -59,6 +59,17 @@ environment-gap lane is still only a request to observe a gap: runner failure,
 missing preconditions, and safe-equivalent behavior remain separate runtime
 outcomes.
 
+S4 also emits `surface-variant-evidence-v1` from the actual replay and
+differential rows. It keeps only an allowlisted signal taxonomy and bounded
+state-step identities, classifying each lane as `observed`, `partial`,
+`environment-gap`, or `not-executed`. A declared sequence is not a witness:
+only a complete observed STEP trace satisfies `state-sequence`, while
+typed-effect and safe-equivalent remain separate signals. S8 and S2 reuse this
+bounded witness to select the next probe, but it is always
+`claim_status=not-a-finding`; raw output, effect details, payloads, commands,
+and credentials never enter the artifact, and no gate, CVSS value, or candidate
+conclusion is changed.
+
 For candidates with multiple configured versions or patch metadata, S2 also
 emits `comparison-orchestration-v1`. S4 binds the comparison to the same
 fixture and lane, classifies actual paired cells as bucket change, signature
