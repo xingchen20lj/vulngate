@@ -22,6 +22,7 @@ from agent.evaluation.benchmark import (  # noqa: E402
     derive_benchmark_feedback,
     evaluate_benchmark,
     load_benchmark_json,
+    validate_manifest,
 )
 
 
@@ -191,6 +192,50 @@ class BenchmarkTests(unittest.TestCase):
                              feedback["schema_version"])
             self.assertIn("feedback", json.loads(stdout.getvalue()))
             self.assertIn("case_results", stdout.getvalue())
+
+    def test_cross_surface_manifest_preserves_profile_and_gap_contract(self):
+        gold_path = ROOT / "benchmarks" / "research-benchmark-surfaces-v1.json"
+        run_path = ROOT / "benchmarks" / "research-benchmark-surfaces-sample-run.json"
+        gold = load_benchmark_json(gold_path)
+        run = load_benchmark_json(run_path)
+
+        self.assertEqual([], validate_manifest(gold))
+        result = evaluate_benchmark(gold, [run])
+        self.assertEqual(15, result["case_count"])
+        self.assertEqual(
+            ["cloud", "mobile", "native", "protocol", "web"],
+            result["research_profile"]["surfaces"],
+        )
+        self.assertEqual(1.0, result["metrics"]["evidence_completeness"])
+        self.assertEqual(1.0, result["metrics"]["negative_result_fidelity"])
+        self.assertEqual(1.0, result["metrics"]["environment_gap_fidelity"])
+        self.assertEqual(0.0, result["metrics"]["unsafe_confirmation_rate"])
+        self.assertEqual(
+            {"cloud", "mobile", "native", "protocol", "web"},
+            set(result["metrics"]["coverage_by_surface"]),
+        )
+        for surface, metrics in result["metrics"]["coverage_by_surface"].items():
+            self.assertEqual(3, metrics["case_results"], surface)
+            self.assertEqual(1.0, metrics["observation_coverage"], surface)
+            self.assertEqual(0.0, metrics["unsafe_confirmation_rate"], surface)
+            self.assertEqual(1.0, metrics["environment_gap_fidelity"], surface)
+            self.assertEqual(1.0, metrics["evidence_completeness"], surface)
+        self.assertEqual(
+            "tenant-object-authorization",
+            result["case_results"][0]["variant"],
+        )
+        self.assertEqual(BENCHMARK_CLAIM_STATUS, result["claim_status"])
+
+    def test_manifest_rejects_unknown_research_surface(self):
+        bad = {
+            "schema_version": "research-benchmark-v1",
+            "cases": [{
+                "case_id": "bad-surface",
+                "truth": "vulnerable",
+                "surface": "unknown",
+            }],
+        }
+        self.assertIn("case[0] has unsupported surface", validate_manifest(bad))
 
 
 if __name__ == "__main__":

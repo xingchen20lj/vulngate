@@ -23,6 +23,7 @@
 | 6 | 研究记忆与反馈学习 | 已实现（上下文 + 可回放人工复核） | `state/<target>/research-memory.json`、`state/<target>/review-feedback.json`、`S8/research-memory.json`、`S8/review-feedback.json`、`S4/runtime-lab.json`、`S4/processes.json`、配置快照、authz fixture、修复变体提示 | 新轮次能利用旧证据；服务/配置/授权/修复上下文可复现；人工复核可回放；环境缺口不被当成负证据；重复实验只降权不删除 |
 | 7 | 专家级评测基准 | 已实现（核心契约 + 确定性评分器） | `benchmarks/research-benchmark-v1.json`、`benchmarks/research-benchmark-sample-run.json`、`benchmark-result.json` | 同时衡量负向安全、环境缺口保真度、重复率、证据完整度、结论解析和严重性校准 |
 | 8 | 评测驱动的自适应研究闭环 | 已实现（有界反馈接入） | `research-benchmark-feedback-v1`、调度权重快照、`benchmark-guidance` 实验提示 | 评测指标只能改变下一轮研究优先级和必需观测；默认行为可回归，且不改变 G4/G5/CVSS |
+| 9 | 跨攻击面变体基准 | 已实现（五类研究面 + 三态契约） | `benchmarks/research-benchmark-surfaces-v1.json`、`benchmarks/research-benchmark-surfaces-sample-run.json`、`research_profile`、`coverage_by_surface` | Web、协议、云、移动端、native 均覆盖 vulnerable/negative/environment-gap；环境缺口不被误判为负向，结果保持 `not-a-finding` |
 
 ## 当前阶段：可证伪实验规划
 
@@ -184,10 +185,28 @@ python3 scripts/agent_cli.py schedule <target> \
 `benchmark_feedback_path`（或内嵌 `benchmark_feedback`），从而复用同一反馈。反馈只影响排序、
 prompt 和研究清单，不会删除候选、确认漏洞、填补运行时证据或绕过 G4/G5。
 
+## 阶段 9 初步实现：跨攻击面变体基准
+
+为了避免“只在解析库样例上表现良好”被误认为具备专家级泛化能力，新增一组脱离真实目标的合成基准：
+
+```bash
+python3 scripts/agent_cli.py benchmark \
+  --manifest benchmarks/research-benchmark-surfaces-v1.json \
+  --run benchmarks/research-benchmark-surfaces-sample-run.json \
+  --out state/research-surfaces-result.json --json
+```
+
+这组 15 个 case 分布在 Web、协议、云、移动端和 native 五类研究面；每类各包含一个可确认漏洞、一个
+应被排除的负向 case 和一个只能保留为候选的环境/工具缺口。manifest 只保存 bounded metadata、truth
+class、必需证据和期望 claim status，不保存 payload、命令或进程输出。
+
+评分器会保留 case 的 `surface`、`target_type`、`attack_class`、`variant` 和 `precondition_class`，
+并输出 `research_profile` 与按研究面拆分的 `coverage_by_surface`。这使得某一面证据缺失、错误确认
+负向 case 或吞掉环境缺口能够独立暴露；所有评测结果仍标记为 `claim_status=not-a-finding`。
+
 ## 后续优先级
 
-1. 扩展真实/合成变体集，覆盖更多 Web、协议、云、移动端和 native 研究面，同时保持负结果
-   与环境缺口分离。
-2. 将反馈与真实项目的多轮历史、人工复核和变体覆盖率做纵向对比，校准告警阈值但不放宽证据闸门。
+1. 将跨面 benchmark 与真实项目的多轮历史、人工复核和变体覆盖率做纵向对比，校准告警阈值但不放宽证据闸门。
+2. 继续扩展协议状态机、云身份边界、移动端生命周期和 native 方法体验证的合成变体，并为每类维持正向、负向和环境缺口对照。
 
 每一阶段都必须同时更新实现、技能契约、回归测试和 CHANGELOG；只有测试、artifact schema 和安全边界一起稳定后，才适合提交为一个独立变更。

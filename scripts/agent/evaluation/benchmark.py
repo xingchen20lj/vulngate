@@ -41,6 +41,19 @@ MAX_RUNS = 64
 MAX_EVIDENCE_FIELDS = 16
 MAX_EVENTS = 128
 MAX_ID = 160
+MAX_SURFACES = 16
+
+RESEARCH_SURFACES = frozenset({
+    "web", "protocol", "cloud", "mobile", "native",
+})
+RESEARCH_TARGET_TYPES = frozenset({
+    "web-app", "middleware", "message-rpc", "cloud-service",
+    "mobile-app", "native-app",
+})
+RESEARCH_PRECONDITION_CLASSES = frozenset({
+    "default", "single-feature", "app-cooperation", "tool-gap",
+    "environment-gap",
+})
 
 TRUTH_VULNERABLE = "vulnerable"
 TRUTH_NEGATIVE = "negative"
@@ -240,7 +253,7 @@ def normalize_case(raw: Dict[str, Any]) -> Dict[str, Any]:
     expected = raw.get("expected") if isinstance(raw.get("expected"), dict) else {}
     evidence = raw.get("required_evidence", expected.get("required_evidence", []))
     required = _bounded_strings(evidence, MAX_EVIDENCE_FIELDS, 80)
-    return {
+    out = {
         "case_id": case_id,
         "truth": truth,
         "expected_status": _expected_status(raw, truth),
@@ -249,6 +262,22 @@ def normalize_case(raw: Dict[str, Any]) -> Dict[str, Any]:
         "mechanism_key": _text(raw.get("mechanism_key", raw.get("research_key", "")), 80),
         "category": _text(raw.get("category", ""), 80),
     }
+    surface = _text(raw.get("surface", raw.get("research_surface", "")), 32).lower()
+    target_type = _text(raw.get("target_type", ""), 32).lower()
+    attack_class = _text(raw.get("attack_class", ""), 64).lower()
+    variant = _text(raw.get("variant", ""), 80).lower()
+    precondition_class = _text(raw.get("precondition_class", ""), 32).lower()
+    if surface:
+        out["surface"] = surface
+    if target_type:
+        out["target_type"] = target_type
+    if attack_class:
+        out["attack_class"] = attack_class
+    if variant:
+        out["variant"] = variant
+    if precondition_class:
+        out["precondition_class"] = precondition_class
+    return out
 
 
 def normalize_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
@@ -307,6 +336,20 @@ def validate_manifest(manifest: Dict[str, Any]) -> List[str]:
         if raw.get("expected_severity") is not None or raw.get("severity") is not None:
             if not severity:
                 errors.append("case[%d] has invalid expected_severity" % index)
+        surface = _text(raw.get("surface", raw.get("research_surface", "")), 32).lower()
+        if surface and surface not in RESEARCH_SURFACES:
+            errors.append("case[%d] has unsupported surface" % index)
+        target_type = _text(raw.get("target_type", ""), 32).lower()
+        if target_type and target_type not in RESEARCH_TARGET_TYPES:
+            errors.append("case[%d] has unsupported target_type" % index)
+        precondition_class = _text(raw.get("precondition_class", ""), 32).lower()
+        if precondition_class and precondition_class not in RESEARCH_PRECONDITION_CLASSES:
+            errors.append("case[%d] has unsupported precondition_class" % index)
+        for field_name in ("attack_class", "variant"):
+            if raw.get(field_name) not in (None, ""):
+                value = _text(raw.get(field_name), 100)
+                if not value:
+                    errors.append("case[%d] has invalid %s" % (index, field_name))
     if len(raw_cases) > MAX_CASES:
         errors.append("cases exceeds limit %d" % MAX_CASES)
     return errors
@@ -329,7 +372,7 @@ def _evidence_present(row: Dict[str, Any], field: str) -> bool:
         "negative_runtime": ("negative_runtime", "negative_observation", "no_effect"),
         "environment_gap": ("environment_gap", "precondition_gap", "harness_gap"),
         "guard_evidence": ("guard_evidence", "control_map", "control_verdict"),
-        "novelty_status": ("novelty", "novelty_verdict"),
+        "novelty_status": ("novelty_status", "novelty", "novelty_verdict"),
         "severity": ("severity", "cvss"),
         "precondition": ("precondition", "preconditions"),
         "reproduction": ("reproduction", "repro", "runtime_lab"),
@@ -539,6 +582,11 @@ def _score_case(case: Dict[str, Any], row: Dict[str, Any], run_id: str) -> Dict[
         "run_id": run_id,
         "case_id": case["case_id"],
         "truth": case["truth"],
+        "surface": case.get("surface", ""),
+        "target_type": case.get("target_type", ""),
+        "attack_class": case.get("attack_class", ""),
+        "variant": case.get("variant", ""),
+        "precondition_class": case.get("precondition_class", ""),
         "expected_status": case["expected_status"],
         "observed_status": observed_status,
         "classification": _case_classification(
@@ -634,11 +682,43 @@ def _aggregate_case_results(results: Sequence[Dict[str, Any]],
                           if r["observed_status"] != STATUS_MISSING]
         coverage_by_truth[truth] = round(
             len(truth_observed) / len(truth_rows), 4) if truth_rows else None
+    by_surface: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for row in results:
+        surface = str(row.get("surface") or "").strip().lower()
+        if surface:
+            by_surface[surface].append(row)
+    coverage_by_surface: Dict[str, Dict[str, Any]] = {}
+    for surface in sorted(by_surface)[:MAX_SURFACES]:
+        rows = by_surface[surface]
+        observed_rows = [r for r in rows if r["observed_status"] != STATUS_MISSING]
+        negative_rows = [r for r in rows if r["truth"] == TRUTH_NEGATIVE]
+        gap_rows = [r for r in rows if r["truth"] == TRUTH_ENVIRONMENT_GAP]
+        completeness = [float(r["evidence"]["completeness"])
+                        for r in observed_rows]
+        coverage_by_surface[surface] = {
+            "case_results": len(rows),
+            "observed_results": len(observed_rows),
+            "observation_coverage": round(
+                len(observed_rows) / len(rows), 4) if rows else None,
+            "unsafe_confirmation_rate": round(
+                sum(r["classification"] == "unsafe-false-positive"
+                    for r in negative_rows) / len(negative_rows), 4)
+            if negative_rows else None,
+            "environment_gap_fidelity": round(
+                sum(r["classification"] == "gap-preserved"
+                    for r in gap_rows) / len(gap_rows), 4)
+            if gap_rows else None,
+            "evidence_completeness": round(
+                sum(completeness) / len(completeness), 4)
+            if completeness else None,
+            "claim_status": BENCHMARK_CLAIM_STATUS,
+        }
     return {
         "case_results": total,
         "observed_results": len(observed),
         "case_observation_coverage": round(len(observed) / total, 4) if total else None,
         "coverage_by_truth": coverage_by_truth,
+        "coverage_by_surface": coverage_by_surface,
         "confirmed_precision": round(tp / confirmed, 4) if confirmed else None,
         "confirmed_recall": round(tp / vulnerable, 4) if vulnerable else None,
         "resolution_accuracy": round(exact / len(observed), 4) if observed else None,
@@ -706,11 +786,22 @@ def evaluate_benchmark(manifest: Dict[str, Any],
             results.append(_score_case(case, row, run_id))
 
     metrics = _aggregate_case_results(results, gold.get("cases") or [], normalized_runs)
+    gold_cases = gold.get("cases") or []
+    profile = {
+        "surfaces": sorted({str(case.get("surface")) for case in gold_cases
+                             if case.get("surface")})[:MAX_SURFACES],
+        "target_types": sorted({str(case.get("target_type")) for case in gold_cases
+                                 if case.get("target_type")})[:MAX_SURFACES],
+        "variants": sorted({str(case.get("variant")) for case in gold_cases
+                             if case.get("variant")})[:MAX_CASES],
+        "claim_status": BENCHMARK_CLAIM_STATUS,
+    }
     return {
         "schema_version": BENCHMARK_SCHEMA_VERSION,
         "benchmark_id": gold.get("benchmark_id", "benchmark"),
         "run_count": len(normalized_runs),
         "case_count": len(gold.get("cases") or []),
+        "research_profile": profile,
         "metrics": metrics,
         "case_results": results[:MAX_CASES * MAX_RUNS],
         "claim_status": BENCHMARK_CLAIM_STATUS,
@@ -999,6 +1090,8 @@ def render_benchmark_text(result: Dict[str, Any]) -> str:
         "Benchmark %s (%d cases x %d runs)" % (
             result.get("benchmark_id", "benchmark"),
             result.get("case_count", 0), result.get("run_count", 0)),
+        "  research surfaces: %s" % ", ".join(
+            (result.get("research_profile") or {}).get("surfaces") or []) or "unspecified",
         "  confirmed precision: %s  recall: %s  resolution: %s" % (
             metrics.get("confirmed_precision"), metrics.get("confirmed_recall"),
             metrics.get("resolution_accuracy")),

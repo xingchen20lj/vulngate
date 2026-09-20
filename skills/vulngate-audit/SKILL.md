@@ -695,6 +695,16 @@ keeps `claim_status=not-a-finding` and reports:
 - required/present evidence completeness; and
 - CVSS absolute error, within-one-point rate and severity overstatement.
 
+For cross-surface regression, use the bounded synthetic fixture
+`benchmarks/research-benchmark-surfaces-v1.json` with its sample run. It covers
+web, protocol, cloud, mobile and native cases, preserving each case's
+`surface`, `target_type`, `attack_class`, `variant` and `precondition_class`.
+The result exposes `research_profile` and `metrics.coverage_by_surface`, so a
+weak research surface is visible even when the global score looks healthy.
+The fixture deliberately includes vulnerable, negative and environment-gap
+cases; a missing runtime or analysis tool remains pending and is never treated
+as a negative result.
+
 Do not use a benchmark score to promote a real finding or to bypass G4/G5. Use
 low negative-result fidelity, high unjustified-repeat rate, missing evidence,
 or severity overstatement as a reason to revise the planner, scheduler or

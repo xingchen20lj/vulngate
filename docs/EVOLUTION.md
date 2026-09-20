@@ -117,6 +117,15 @@ feedback is `not-a-finding`: it cannot confirm/exclude a candidate, synthesize
 runtime evidence, change CVSS, or bypass G4/G5. With no feedback, the default
 schedule and plan remain byte-for-byte compatible.
 
+The benchmark suite now also includes a cross-surface synthetic manifest and
+sample run covering web, protocol, cloud, mobile and native research. Each
+surface has a vulnerable, negative and environment-gap variant. Case metadata
+is retained in the score, while `research_profile` and
+`metrics.coverage_by_surface` expose per-surface observation coverage, negative
+result safety, environment-gap fidelity and evidence completeness. The sample
+keeps tool/runtime gaps as pending research states and all benchmark artifacts
+as `not-a-finding`.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

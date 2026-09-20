@@ -78,6 +78,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   autonomous loop accept the feedback explicitly; plans and schedules record
   the source and actual adjustments while preserving default behavior and
   never changing G4/G5 conclusions or CVSS.
+- Added the cross-surface synthetic research benchmark and sample run. Fifteen
+  bounded cases cover web, protocol, cloud, mobile and native surfaces, with a
+  vulnerable, negative and environment-gap variant per surface. The evaluator
+  preserves surface/variant metadata and reports `research_profile` plus
+  `coverage_by_surface`; tool or runtime gaps remain pending and the artifact
+  remains `claim_status=not-a-finding`.
 
 ### Documentation
 
@@ -100,6 +106,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Documented the benchmark feedback artifact, `--feedback-out`, explicit
   `schedule --benchmark-result` wiring, target-config opt-in, and its strict
   `not-a-finding` boundary.
+- Documented the cross-surface benchmark fixture, per-surface coverage metrics,
+  and the rule that unavailable runtime or analysis tools remain pending rather
+  than becoming negative evidence.
 
 ## [1.1.0] - 2026-09-16
 

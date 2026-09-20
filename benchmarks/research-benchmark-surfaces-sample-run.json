@@ -1,0 +1,123 @@
+{
+  "schema_version": "research-run-v1",
+  "run_id": "surface-sample-agent-run",
+  "observations": [
+    {
+      "case_id": "web-tenant-object-bypass",
+      "status": "confirmed",
+      "research_key": "rk-web-tenant-object-bypass",
+      "round": 1,
+      "evidence": {"source_to_sink": true, "runtime_effect": true, "authz_boundary": true, "typed_effect": true, "novelty_status": true, "severity": true},
+      "cvss": {"score": 8.1, "severity": "High"}
+    },
+    {
+      "case_id": "web-guarded-ssrf",
+      "status": "excluded",
+      "research_key": "rk-web-guarded-ssrf",
+      "round": 1,
+      "evidence": {"source_to_sink": true, "negative_runtime": true, "guard_evidence": true, "novelty_status": true},
+      "cvss": {"score": 0.0, "severity": "None"}
+    },
+    {
+      "case_id": "web-runtime-gap",
+      "status": "candidate",
+      "research_key": "rk-web-runtime-gap",
+      "round": 1,
+      "execution_state": "precondition-unavailable",
+      "evidence": {"environment_gap": true, "precondition": true, "reproduction": true}
+    },
+    {
+      "case_id": "protocol-frame-length-dos",
+      "status": "confirmed",
+      "research_key": "rk-protocol-frame-length-dos",
+      "round": 1,
+      "evidence": {"source_to_sink": true, "runtime_effect": true, "typed_effect": true, "precondition": true, "severity": true},
+      "cvss": {"score": 6.5, "severity": "Medium"}
+    },
+    {
+      "case_id": "protocol-guarded-deserializer",
+      "status": "excluded",
+      "research_key": "rk-protocol-guarded-deserializer",
+      "round": 1,
+      "evidence": {"source_to_sink": true, "negative_runtime": true, "guard_evidence": true, "novelty_status": true},
+      "cvss": {"score": 0.0, "severity": "None"}
+    },
+    {
+      "case_id": "protocol-jdk-gap",
+      "status": "candidate",
+      "research_key": "rk-protocol-jdk-gap",
+      "round": 1,
+      "execution_state": "precondition-unavailable",
+      "evidence": {"environment_gap": true, "precondition": true, "reproduction": true}
+    },
+    {
+      "case_id": "cloud-metadata-ssrf",
+      "status": "candidate",
+      "research_key": "rk-cloud-metadata-ssrf",
+      "round": 1,
+      "evidence": {"source_to_sink": true, "runtime_effect": true, "authz_boundary": true, "precondition": true, "novelty_status": true}
+    },
+    {
+      "case_id": "cloud-iam-guard",
+      "status": "excluded",
+      "research_key": "rk-cloud-iam-guard",
+      "round": 1,
+      "evidence": {"source_to_sink": true, "negative_runtime": true, "guard_evidence": true, "novelty_status": true},
+      "cvss": {"score": 0.0, "severity": "None"}
+    },
+    {
+      "case_id": "cloud-sdk-gap",
+      "status": "candidate",
+      "research_key": "rk-cloud-sdk-gap",
+      "round": 1,
+      "execution_state": "precondition-unavailable",
+      "evidence": {"environment_gap": true, "precondition": true, "reproduction": true}
+    },
+    {
+      "case_id": "mobile-deep-link-authz",
+      "status": "candidate",
+      "research_key": "rk-mobile-deep-link-authz",
+      "round": 1,
+      "evidence": {"source_to_sink": true, "runtime_effect": true, "authz_boundary": true, "novelty_status": true}
+    },
+    {
+      "case_id": "mobile-keychain-guard",
+      "status": "excluded",
+      "research_key": "rk-mobile-keychain-guard",
+      "round": 1,
+      "evidence": {"source_to_sink": true, "negative_runtime": true, "guard_evidence": true, "novelty_status": true},
+      "cvss": {"score": 0.0, "severity": "None"}
+    },
+    {
+      "case_id": "mobile-analysis-tool-gap",
+      "status": "candidate",
+      "research_key": "rk-mobile-analysis-tool-gap",
+      "round": 1,
+      "execution_state": "precondition-unavailable",
+      "evidence": {"environment_gap": true, "precondition": true, "reproduction": true}
+    },
+    {
+      "case_id": "native-url-command",
+      "status": "candidate",
+      "research_key": "rk-native-url-command",
+      "round": 1,
+      "evidence": {"source_to_sink": true, "runtime_effect": true, "typed_effect": true, "precondition": true, "novelty_status": true}
+    },
+    {
+      "case_id": "native-webview-bridge-guard",
+      "status": "excluded",
+      "research_key": "rk-native-webview-bridge-guard",
+      "round": 1,
+      "evidence": {"source_to_sink": true, "negative_runtime": true, "guard_evidence": true, "novelty_status": true},
+      "cvss": {"score": 0.0, "severity": "None"}
+    },
+    {
+      "case_id": "native-symbol-tool-gap",
+      "status": "candidate",
+      "research_key": "rk-native-symbol-tool-gap",
+      "round": 1,
+      "execution_state": "precondition-unavailable",
+      "evidence": {"environment_gap": true, "precondition": true, "reproduction": true}
+    }
+  ]
+}
