@@ -15,6 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from agent.analysis import scheduler as SCH  # noqa: E402
+from agent.analysis.research_strategy import (  # noqa: E402
+    build_research_strategy,
+    write_research_strategy,
+)
 from agent.memory.research import (  # noqa: E402
     STATE_ACTIONABLE_DIFFERENCE,
     STATE_ENVIRONMENT_GAP,
@@ -425,6 +429,9 @@ class ResearchMemoryTests(unittest.TestCase):
                            candidates=[c], notes="test")
         ctx = StageContext(self.root, "target", 1, cfg, offline=True)
         ctx.store.write_artifact("S4", "runtime-lab.json", lab_for("C1"))
+        write_research_strategy(
+            self.root, "target",
+            build_research_strategy(target="target", target_type="library"))
         result = run_s8(ctx, {"C1": {}}, {"C1": "候选（待验证）"}, {}, {})
         target_memory = self.root / "state" / "target" / "research-memory.json"
         round_delta = (self.root / "state" / "target" / "round-01" / "S8"
@@ -433,16 +440,27 @@ class ResearchMemoryTests(unittest.TestCase):
                           / "review-feedback.json")
         round_portfolio = (self.root / "state" / "target" / "round-01" / "S8"
                            / "research-portfolio.json")
+        round_strategy_feedback = (self.root / "state" / "target" / "round-01" / "S8"
+                                   / "research-strategy-feedback.json")
         target_portfolio = self.root / "state" / "target" / "research-portfolio.json"
+        target_strategy = (self.root / "state" / "target" / "coverage"
+                           / "research-strategy.json")
         self.assertTrue(target_memory.exists())
         self.assertTrue(round_delta.exists())
         self.assertTrue(round_feedback.exists())
         self.assertTrue(round_portfolio.exists())
+        self.assertTrue(round_strategy_feedback.exists())
         self.assertTrue(target_portfolio.exists())
+        self.assertTrue(target_strategy.exists())
         self.assertEqual("state/target/research-memory.json",
                          result["research_memory"]["artifact"])
         self.assertEqual("state/target/research-portfolio.json",
                          result["research_portfolio"]["artifact"])
+        self.assertEqual("state/target/coverage/research-strategy.json",
+                         result["research_strategy"]["artifact"])
+        self.assertEqual("research-strategy-feedback-v1",
+                         json.loads(round_strategy_feedback.read_text(
+                             encoding="utf-8"))["schema_version"])
         portfolio = json.loads(target_portfolio.read_text(encoding="utf-8"))
         self.assertEqual("research-portfolio-v1", portfolio["schema_version"])
         self.assertEqual("not-a-finding", portfolio["claim_status"])

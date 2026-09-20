@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- S8 now feeds bounded real S4 observations back into matching research-strategy items. The new `research-strategy-feedback-v1` snapshot records current/history observation status, missing required signals, explicit falsifier observations, and per-round information gain without copying runtime output; complete items with zero new signal no longer receive a strategy scheduling nudge.
+
 - S3 residuals now carry a bounded S2->S4 closure contract. The matrix parser
   records only allowlisted `RESIDUAL_ID` / `RESIDUAL_STATUS` /
   `RESIDUAL_FALSIFIER` observations; S8 advances a residual to

@@ -738,6 +738,18 @@ def _research_strategy_guidance(candidate: Dict[str, Any],
         "state": str(item.get("state") or ""),
         "priority": priority,
         "reason_codes": list(item.get("reason_codes") or [])[:4],
+        "observation": {
+            "status": str((item.get("observation") or {}).get(
+                "status") or "unobserved"),
+            "current_status": str((item.get("observation") or {}).get(
+                "current_status") or "unobserved"),
+            "information_gain": min(5, max(0, int(
+                (item.get("observation") or {}).get("information_gain") or 0))),
+            "missing_observations": list(
+                (item.get("observation") or {}).get(
+                    "missing_observations") or [])[:8],
+            "claim_status": "not-a-finding",
+        },
         "claim_status": "not-a-finding",
     }
 
@@ -1396,8 +1408,21 @@ def score_candidate(candidate: Dict[str, Any], ctx: ScheduleContext,
     strategy_guidance = _research_strategy_guidance(
         candidate, ctx.research_strategy, link)
     if strategy_guidance:
+        observation = strategy_guidance.get("observation") or {}
+        status = str(observation.get("status") or "unobserved")
+        try:
+            information_gain = int(observation.get("information_gain") or 0)
+        except (TypeError, ValueError):
+            information_gain = 0
+        # A strategy item that already has complete/falsifier evidence and
+        # produced no new signal should remain visible, but must not receive a
+        # fresh priority nudge merely because it is still linked statically.
+        # This is a scheduling rule, never a candidate suppression rule.
+        strategy_delta = 0.0 if status in {
+            "complete", "falsifier-observed"} and information_gain == 0 \
+            else RESEARCH_STRATEGY_BOOST
         before = total
-        total = min(scale, total + RESEARCH_STRATEGY_BOOST)
+        total = min(scale, total + strategy_delta)
         strategy_guidance["applied_delta"] = round(total - before, 4)
         evidence["research_strategy"] = strategy_guidance
     if ctx.benchmark_feedback:
@@ -1638,6 +1663,7 @@ def build_schedule(workspace: Path, target: str,
     memory = load_research_memory(workspace, target)
     portfolio = load_research_portfolio(workspace, target)
     threat_model = load_threat_model(workspace, target)
+    prior_strategy = load_research_strategy(workspace, target)
     target_type = str(threat_model.get("target_type") or "")
     strategy = build_research_strategy(
         threat_model=threat_model,
@@ -1647,6 +1673,7 @@ def build_schedule(workspace: Path, target: str,
         target=target,
         target_type=target_type,
         round_no=round_no,
+        prior_strategy=prior_strategy,
     )
     write_research_strategy(workspace, target, strategy)
     ctx = ScheduleContext.from_store(
@@ -2077,9 +2104,11 @@ def prompt_coverage_block(ctx: ScheduleContext, plan: Optional[SchedulePlan] = N
             "claim_status": strategy.get("claim_status", "not-a-finding"),
         }, ensure_ascii=False))
         for item in strategy.get("items", []):
+            observation = item.get("observation") or {}
             lines.append("  [priority=%s] %s kind=%s state=%s "
                          "path=%s residual=%s objective=%s observe=%s "
-                         "falsify=%s claim_status=%s" % (
+                         "falsify=%s observation=%s gain=%s missing=%s "
+                         "claim_status=%s" % (
                              item.get("priority", 0),
                              item.get("strategy_id"), item.get("kind"),
                              item.get("state"), item.get("path_id") or "-",
@@ -2087,6 +2116,10 @@ def prompt_coverage_block(ctx: ScheduleContext, plan: Optional[SchedulePlan] = N
                              item.get("objective"),
                              ";".join(item.get("required_observations") or []),
                              ";".join(item.get("falsifiers") or [])[:360],
+                             observation.get("status", "unobserved"),
+                             observation.get("information_gain", 0),
+                             ";".join(observation.get(
+                                 "missing_observations") or []) or "-",
                              item.get("claim_status", "not-a-finding")))
 
     lines.append("## 评测反馈 / Benchmark Feedback")

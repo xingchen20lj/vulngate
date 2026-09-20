@@ -18,7 +18,9 @@ from agent.analysis.scheduler import ScheduleContext, prompt_coverage_block, sco
 from agent.analysis.threat_model import build_threat_model  # noqa: E402
 from agent.analysis.research_strategy import (  # noqa: E402
     STRATEGY_CLAIM_STATUS,
+    STRATEGY_FEEDBACK_SCHEMA_VERSION,
     STRATEGY_SCHEMA_VERSION,
+    apply_strategy_observations,
     build_research_strategy,
     load_research_strategy,
     normalize_research_strategy,
@@ -130,6 +132,121 @@ class ResearchStrategyTests(unittest.TestCase):
         self.assertFalse(any(item["kind"] == "residual-closure"
                              for item in strategy["items"]))
         self.assertEqual(0, strategy["summary"]["pending_residuals"])
+
+    def test_s4_observations_backfill_information_gain_without_finding_status(self):
+        candidate = {
+            "candidate_id": "C-residual",
+            "surface": "web",
+            "target_type": "web-app",
+            "residuals": [{
+                "kind": "variant", "reason_code": "unverified",
+                "probe_plan": "bounded residual probe",
+            }],
+        }
+        from agent.memory.research import residual_meta
+        residual_id = residual_meta(candidate)[0]["residual_id"]
+        strategy = build_research_strategy(
+            research_portfolio={
+                "schema_version": "research-portfolio-v1",
+                "next_probes": [{
+                    "research_key": "rk-residual",
+                    "candidate_id": "C-residual",
+                    "state": "pending-residual",
+                    "priority": 4,
+                    "residual_id": residual_id,
+                    "residual_kind": "variant",
+                    "residual_reason_code": "unverified",
+                    "research_surface": "web",
+                    "target_type": "web-app",
+                }],
+            },
+            target="demo", target_type="web-app")
+        summary = {
+            "execution_state": "executed-no-effect",
+            "cells_ran": 2,
+            "residual_falsifiers": [{
+                "residual_id": residual_id,
+                "status": "falsified",
+                "execution_state": "executed",
+                "effect_observed": False,
+                "contract_declared": True,
+                "falsifier_code": "variant-rejected",
+            }],
+        }
+        updated, feedback = apply_strategy_observations(
+            strategy, [candidate], {"C-residual": summary}, round_no=4)
+        item = updated["items"][0]
+        observation = item["observation"]
+        self.assertEqual("falsifier-observed", observation["status"])
+        self.assertEqual([], observation["missing_observations"])
+        self.assertGreater(observation["information_gain"], 0)
+        self.assertEqual(STRATEGY_FEEDBACK_SCHEMA_VERSION,
+                         feedback["schema_version"])
+        self.assertEqual(STRATEGY_CLAIM_STATUS,
+                         observation["claim_status"])
+        self.assertEqual(STRATEGY_CLAIM_STATUS, feedback["claim_status"])
+
+        repeated, repeated_feedback = apply_strategy_observations(
+            updated, [candidate], {"C-residual": summary}, round_no=5)
+        repeated_observation = repeated["items"][0]["observation"]
+        self.assertEqual(0, repeated_observation["information_gain"])
+        self.assertEqual(
+            observation["cumulative_information_gain"],
+            repeated_observation["cumulative_information_gain"])
+        self.assertEqual(0, repeated_feedback["summary"]["information_gain"])
+
+        rebuilt = build_research_strategy(
+            research_portfolio={
+                "schema_version": "research-portfolio-v1",
+                "next_probes": [{
+                    "research_key": "rk-residual",
+                    "candidate_id": "C-residual",
+                    "state": "pending-residual",
+                    "priority": 4,
+                    "residual_id": residual_id,
+                    "residual_kind": "variant",
+                    "residual_reason_code": "unverified",
+                    "research_surface": "web",
+                    "target_type": "web-app",
+                }],
+            },
+            target="demo", target_type="web-app", prior_strategy=repeated)
+        self.assertEqual(
+            repeated_observation,
+            next(item for item in rebuilt["items"]
+                 if item.get("residual_id") == residual_id)["observation"])
+
+    def test_strategy_feedback_keeps_environment_gap_pending(self):
+        candidate = {
+            "candidate_id": "C-gap", "surface": "web",
+            "target_type": "web-app", "residuals": [{
+                "kind": "environment-gap", "reason_code": "environment-gap",
+            }],
+        }
+        from agent.memory.research import residual_meta
+        residual_id = residual_meta(candidate)[0]["residual_id"]
+        strategy = build_research_strategy(
+            research_portfolio={
+                "schema_version": "research-portfolio-v1",
+                "next_probes": [{
+                    "research_key": "rk-gap", "candidate_id": "C-gap",
+                    "state": "pending-residual", "priority": 4,
+                    "residual_id": residual_id, "residual_kind": "environment-gap",
+                    "residual_reason_code": "environment-gap",
+                    "research_surface": "web", "target_type": "web-app",
+                }],
+            },
+            target="demo", target_type="web-app")
+        updated, _ = apply_strategy_observations(
+            strategy, [candidate], {"C-gap": {
+                "execution_state": "precondition-unavailable",
+                "cells_ran": 1,
+            }}, round_no=2)
+        observation = updated["items"][0]["observation"]
+        self.assertEqual("environment-gap", observation["status"])
+        self.assertTrue(observation["missing_observations"])
+        self.assertEqual(STRATEGY_CLAIM_STATUS,
+                         updated["claim_status"])
 
     def test_strategy_round_trip_is_bounded_and_forces_research_status(self):
         strategy = build_research_strategy(

@@ -44,6 +44,9 @@ from ..memory.research import (build_residual_closure_report,
                                 write_research_memory)
 from ..memory.portfolio import (build_research_portfolio,
                                 write_research_portfolio)
+from ..analysis.research_strategy import (apply_strategy_observations,
+                                           load_research_strategy,
+                                           write_research_strategy)
 from ..orchestrator.config import TargetConfig
 from ..orchestrator.gates import g3_novelty
 from ..sandbox.approval import ApprovalGate
@@ -1885,6 +1888,29 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
     portfolio = build_research_portfolio(
         memory, review_feedback, ctx.benchmark_feedback())
     portfolio_file = write_research_portfolio(ctx.root, ctx.cfg.name, portfolio)
+    strategy = load_research_strategy(ctx.root, ctx.cfg.name)
+    if not strategy:
+        s2_strategy_path = (ctx.root / "state" / ctx.cfg.name
+                            / ("round-%02d" % round_no) / "S2"
+                            / "research-strategy.json")
+        try:
+            loaded_strategy = json.loads(
+                s2_strategy_path.read_text(encoding="utf-8"))
+            strategy = loaded_strategy if isinstance(loaded_strategy, dict) else {}
+        except (OSError, ValueError, TypeError):
+            strategy = {}
+    strategy_feedback = {}
+    strategy_file = None
+    if strategy:
+        strategy, strategy_feedback = apply_strategy_observations(
+            strategy, candidates, memory_summaries, round_no)
+        if strategy:
+            strategy_file = write_research_strategy(
+                ctx.root, ctx.cfg.name, strategy)
+            ctx.write_artifact(round_no, "S8", "research-strategy.json", strategy)
+            ctx.write_artifact(
+                round_no, "S8", "research-strategy-feedback.json",
+                strategy_feedback)
     ctx.write_artifact(round_no, "S8", "research-memory.json", memory_delta)
     ctx.write_artifact(round_no, "S8", "research-memory-summary.json", memory["summary"])
     ctx.write_artifact(round_no, "S8", "review-feedback.json", review_feedback)
@@ -1912,6 +1938,22 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         "next_probe_count": len(portfolio.get("next_probes") or []),
         "claim_status": "not-a-finding",
     }
+    research_strategy_info = {
+        "claim_status": "not-a-finding",
+    }
+    if strategy_file:
+        research_strategy_info = {
+            "artifact": str(strategy_file.relative_to(ctx.root.resolve())),
+            "round_artifact": "state/%s/round-%02d/S8/research-strategy.json"
+                              % (ctx.cfg.name, round_no),
+            "feedback_artifact": "state/%s/round-%02d/S8/research-strategy-feedback.json"
+                                % (ctx.cfg.name, round_no),
+            "observed_items": strategy.get("summary", {}).get(
+                "observed_items", 0),
+            "information_gain": strategy_feedback.get("summary", {}).get(
+                "information_gain", 0),
+            "claim_status": "not-a-finding",
+        }
     s8 = store.load_stage("S8")
     if s8 and not force:
         print("[round-%02d] S8 resume: ledger already written" % round_no)
@@ -1941,6 +1983,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             "research_memory": research_memory_info,
             "review_feedback": review_feedback_info,
             "research_portfolio": research_portfolio_info,
+            "research_strategy": research_strategy_info,
         }
         by_candidate_memory = {
             str(entry.get("candidate_id")): entry
@@ -1961,12 +2004,14 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         store.save_stage("S8", {"ledger_rows": len(ledger_rows), "excluded": len(excluded),
                                 "research_memory": research_memory_info,
                                 "review_feedback": review_feedback_info,
-                                "research_portfolio": research_portfolio_info})
+                                "research_portfolio": research_portfolio_info,
+                                "research_strategy": research_strategy_info})
     print("[round-%02d] done: 确认=%d 排除=%d" % (round_no, len(rows), len(excluded)))
     return {"next_candidates": _propose_next(ctx, candidates, rows),
             "research_memory": research_memory_info,
             "review_feedback": review_feedback_info,
-            "research_portfolio": research_portfolio_info}
+            "research_portfolio": research_portfolio_info,
+            "research_strategy": research_strategy_info}
 
 
 def _repro_text(row: Dict[str, Any]) -> str:

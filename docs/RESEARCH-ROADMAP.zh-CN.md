@@ -31,6 +31,7 @@
 | 14 | S3 residual 跨轮闭环 | 已实现（bounded residual continuity） | `research-memory-v1` residual metadata、`pending-residual` portfolio probes、调度 prompt | residual 不因主 replay 稳定而消失；只保留受控分类、位置、摘要哈希和计划存在性；不复制原始 probe，也不升级为漏洞结论 |
 | 15 | 跨产物证据驱动研究策略 | 已实现（bounded research strategy synthesis） | `research-strategy-v1`、`state/<target>/coverage/research-strategy.json`、`S2/research-strategy.json`、策略 CLI/调度证据 | 威胁路径、coverage gap、residual、跨轮状态和 benchmark 上下文汇聚为带 required observations/falsifiers 的有界议程；策略不能替代 G4/G5 |
 | 16 | Residual falsifier 闭合 | 已实现（contract-bound S4 closure） | `S2/experiment-plans.json` residual contracts、`S4/residual-closure.json`、`research-memory-v1` 的 `residual-falsified` | 只有声明过的 residual contract、匹配 ID、显式 allowlisted falsifier、成功执行且无副作用的 cell 才能闭合；环境失败、门控和实际 effect 保持 pending，且不改变 G4/G5 |
+| 17 | 策略项真实观测回写与信息增益 | 已实现（bounded S4 strategy feedback） | `research-strategy-feedback-v1`、`S8/research-strategy.json`、`S8/research-strategy-feedback.json`、下一轮策略提示/调度证据 | 只用真实 S4 summary 的有界信号更新匹配策略项；记录缺失观测、最新/历史状态和本轮信息增益；重复且无新信号时取消策略加分，不改变候选、CVSS 或 G4/G5 |
 
 ## 当前阶段：可证伪实验规划
 
@@ -314,10 +315,31 @@ S2→S4→S8 的单向契约：
 - 这只是研究记忆和调度状态，始终是 `claim_status=not-a-finding`，不代表漏洞被证伪，
   也不改变 G4/G5、CVSS 或 finding ledger。
 
+## 阶段 17 初步实现：策略项真实观测回写与信息增益
+
+阶段 15/16 已经能生成策略项、执行 residual contract 并把状态写入 memory，但策略项本身仍像
+一次性静态清单：S4 跑完后，系统不知道哪些 required observations 已经得到真实信号，也不知道
+下一次运行是否只是重复。阶段 17 在 S8 增加一个 bounded feedback loop：
+
+- `apply_strategy_observations` 只按 candidate id、stable research key、residual id 或显式 path
+  标识符关联 S4 summary；不会用自由文本、结论或 stdout/stderr 做模糊匹配；
+- 汇总器把实际执行、入口行为、授权断言、能力 trace、typed effect、safe-equivalent、residual
+  contract 和环境缺口压缩成固定信号，计算 `unobserved`、`execution-only`、`partial`、
+  `complete`、`environment-gap` 或 `falsifier-observed` 状态；静态 source→sink 要求不会被
+  一次运行的缺失 marker 自动满足；
+- `information_gain` 是相对于该策略项历史信号的本轮新增信号数（有界），并保存 missing
+  observations、execution states、evidence digest 和 cumulative gain；相同状态重复运行得到 0，
+  不会伪造“学习”；
+- S8 将反馈写入 `state/<target>/coverage/research-strategy.json` 与轮次的
+  `S8/research-strategy-feedback.json`，下一轮重新生成策略时保留该观察历史；策略调度只在有新
+  信息或仍未完成时施加小幅提示，已完整/已观察 falsifier 且没有新信息的项不再重复获得加分；
+- 所有回写字段继续是 `claim_status=not-a-finding`，只改变研究优先级和下一步提示，不改变
+  candidate status、finding ledger、CVSS、G4 或 G5。环境缺口仍然是缺口，而不是负向证据。
+
 ## 后续优先级
 
-1. 用真实 S4 观测回写更细粒度的策略项闭合状态与信息增益，但只更新研究优先级，不把策略状态直接升级成结论。
-2. 将策略项与真实项目的多轮历史、人工复核和变体覆盖率做更细粒度关联，校准 guidance 阈值。
-3. 继续扩展协议状态机、云身份边界、移动端生命周期和 native 方法体验证的合成变体，并为每类维持正向、负向和环境缺口对照。
+1. 将策略项与真实项目的多轮历史、人工复核和变体覆盖率做更细粒度关联，校准 guidance 阈值。
+2. 将新增 signal taxonomy 与协议状态机、云身份边界、移动端生命周期和 native 方法体验证的合成变体对齐，并为每类维持正向、负向和环境缺口对照。
+3. 在不扩大 claim 权限的前提下，增加跨轮“信息增益不足”的自动实验替换建议。
 
 每一阶段都必须同时更新实现、技能契约、回归测试和 CHANGELOG；只有测试、artifact schema 和安全边界一起稳定后，才适合提交为一个独立变更。

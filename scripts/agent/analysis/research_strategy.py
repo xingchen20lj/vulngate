@@ -26,17 +26,22 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 from ..evaluation.benchmark import normalize_benchmark_feedback
 from ..tools.redaction import redact_text
 from ..memory.portfolio import normalize_research_portfolio
+from ..memory.research import research_key, residual_meta
 from .threat_model import normalize_threat_model
 
 
 STRATEGY_SCHEMA_VERSION = "research-strategy-v1"
 STRATEGY_FILENAME = "research-strategy.json"
 STRATEGY_CLAIM_STATUS = "not-a-finding"
+STRATEGY_FEEDBACK_SCHEMA_VERSION = "research-strategy-feedback-v1"
 
 MAX_STRATEGY_ITEMS = 48
 MAX_REASON_CODES = 6
 MAX_IDS = 16
 MAX_TEXT = 160
+MAX_OBSERVATION_SIGNALS = 16
+MAX_OBSERVATION_STATES = 8
+MAX_OBSERVATION_CANDIDATES = 8
 
 STRATEGY_KINDS = frozenset({
     "path-closure",
@@ -56,6 +61,14 @@ STRATEGY_STATES = frozenset({
     "pending-coverage",
     "pending-residual",
     "pending-environment",
+})
+STRATEGY_OBSERVATION_STATUSES = frozenset({
+    "unobserved",
+    "execution-only",
+    "partial",
+    "complete",
+    "environment-gap",
+    "falsifier-observed",
 })
 STRATEGY_REASON_CODES = frozenset({
     "threat-path",
@@ -98,6 +111,57 @@ TARGET_TYPE_TO_SURFACE = {
 }
 
 _STRATEGY_ID = re.compile(r"^rs-[0-9a-f]{20}$")
+
+_OBSERVATION_SIGNALS = frozenset({
+    "execution",
+    "entry-behavior",
+    "authorization",
+    "negative-baseline",
+    "capability-trace",
+    "state-sequence",
+    "typed-effect",
+    "safe-equivalent",
+    "residual-contract",
+    "explicit-falsifier",
+    "residual-safe",
+    "evidence-field",
+    "environment-gap",
+    "runtime-error",
+})
+
+# These are intentionally conservative aliases.  S4 may establish that an
+# observation was made, but a missing alias remains missing; absence is never
+# promoted into a negative result.
+_REQUIRED_SIGNAL_ALIASES = {
+    "default-config-exposure": ("entry-behavior",),
+    "typed-source-sink-flow": (),
+    "control-ordering-and-binding": ("authorization",),
+    "negative-unauthorized-baseline": ("negative-baseline",),
+    "typed-effect-or-safe-equivalent": ("typed-effect", "safe-equivalent"),
+    "capability-transition": ("capability-trace",),
+    "negative-baseline": ("negative-baseline", "safe-equivalent"),
+    "dynamic-dispatch-or-registration": (),
+    "negative-unreachable-control": ("negative-baseline",),
+    "entry-or-sink-mapping": (),
+    "explicit-negative-observation": ("negative-baseline", "safe-equivalent"),
+    "declared-residual-probe": ("residual-contract",),
+    "explicit-falsifier": ("explicit-falsifier",),
+    "negative-or-safe-observation": (
+        "negative-baseline", "safe-equivalent", "residual-safe"),
+    "runtime-availability": ("execution",),
+    "replay-after-remediation": ("execution",),
+    "independent-reproduction": ("execution",),
+    "required-evidence-fields": ("evidence-field",),
+}
+
+_EXECUTION_GAP_STATES = frozenset({
+    "unexecuted", "run-failed", "precondition-unavailable", "gate-blocked",
+    "harness-error", "inconclusive", "disabled",
+})
+_EXECUTION_STATES = frozenset({
+    "executed", "executed-no-effect", "executed-with-effect",
+    *_EXECUTION_GAP_STATES,
+})
 
 _OBJECTIVES = {
     "path-closure": "close the attacker path with independent source-to-sink and typed runtime evidence",
@@ -251,6 +315,385 @@ def _code(value: Any, allowed: Iterable[str], fallback: str) -> str:
 def _stable_id(*parts: Any) -> str:
     material = "\x1f".join(_text(part, 240) for part in parts)
     return "rs-" + hashlib.sha1(material.encode("utf-8", errors="replace")).hexdigest()[:20]
+
+
+def _safe_execution_state(value: Any) -> str:
+    text = _text(value, 64).lower()
+    return text if text in _EXECUTION_STATES else ""
+
+
+def _normalize_observation(value: Any) -> Dict[str, Any]:
+    """Normalize one S4-derived strategy observation without raw evidence."""
+    if not isinstance(value, Mapping):
+        return {}
+    status = _code(value.get("status"), STRATEGY_OBSERVATION_STATUSES,
+                   "unobserved")
+    current_status = _code(value.get("current_status"),
+                           STRATEGY_OBSERVATION_STATUSES, status)
+    history_status = _code(value.get("history_status"),
+                           STRATEGY_OBSERVATION_STATUSES, status)
+    states = [_safe_execution_state(item)
+              for item in _bounded(value.get("execution_states"),
+                                   MAX_OBSERVATION_STATES, 64)]
+    states = [item for item in states if item]
+    signals = [item for item in _bounded(value.get("observed_signals"),
+                                         MAX_OBSERVATION_SIGNALS, 48)
+               if item in _OBSERVATION_SIGNALS]
+    current_signals = [item for item in _bounded(
+        value.get("current_signals"), MAX_OBSERVATION_SIGNALS, 48)
+        if item in _OBSERVATION_SIGNALS]
+    new_signals = [item for item in _bounded(
+        value.get("new_signals"), MAX_OBSERVATION_SIGNALS, 48)
+        if item in _OBSERVATION_SIGNALS]
+    missing = _bounded(value.get("missing_observations"), 8, 96)
+    falsifiers = _bounded(value.get("falsifier_codes"), 8, 64)
+    candidates = _bounded(value.get("matched_candidate_ids"),
+                          MAX_OBSERVATION_CANDIDATES, 120)
+    try:
+        last_round = int(value.get("last_round", 0) or 0)
+    except (TypeError, ValueError):
+        last_round = 0
+    last_round = max(0, min(1000000, last_round))
+    information_gain = _int(value.get("information_gain"), 0, 0, 5)
+    cumulative_gain = _int(value.get("cumulative_information_gain"),
+                            information_gain, 0, 32)
+    digest = _text(value.get("evidence_digest"), 40).lower()
+    if digest and not re.fullmatch(r"sg-[0-9a-f]{24}", digest):
+        digest = ""
+    return {
+        "status": status,
+        "current_status": current_status,
+        "history_status": history_status,
+        "last_round": last_round,
+        "matched_candidate_ids": candidates,
+        "execution_states": states,
+        "observed_signals": signals,
+        "current_signals": current_signals,
+        "new_signals": new_signals,
+        "missing_observations": missing,
+        "falsifier_codes": falsifiers,
+        "information_gain": information_gain,
+        "cumulative_information_gain": cumulative_gain,
+        "evidence_digest": digest,
+        "claim_status": STRATEGY_CLAIM_STATUS,
+    }
+
+
+def _required_observations(signals: Iterable[str], required: Any
+                           ) -> List[str]:
+    """Return required labels still missing from the bounded signal set."""
+    observed = set(signals)
+    missing = []
+    for label in _bounded(required, 8, 96):
+        aliases = _REQUIRED_SIGNAL_ALIASES.get(label, ())
+        if aliases and not any(alias in observed for alias in aliases):
+            missing.append(label)
+        elif not aliases:
+            # Static/source obligations intentionally remain open until their
+            # own artifact has evidence; S4 runtime execution cannot satisfy
+            # them by implication.
+            missing.append(label)
+    return missing
+
+
+def _classify_observation(signals: Iterable[str], required: Any,
+                          execution_states: Iterable[str]) -> str:
+    observed = set(signals)
+    states = set(execution_states)
+    has_execution = "execution" in observed
+    has_gap = "environment-gap" in observed
+    if "explicit-falsifier" in observed:
+        return "falsifier-observed"
+    if not has_execution and has_gap:
+        return "environment-gap"
+    if not has_execution:
+        return "unobserved"
+    missing = _required_observations(observed, required)
+    if not missing:
+        return "complete"
+    if any(signal != "execution" for signal in observed):
+        return "partial"
+    if states:
+        return "execution-only"
+    return "unobserved"
+
+
+def _summary_observation(summary: Any) -> Dict[str, Any]:
+    """Extract a safe observation taxonomy from one S4 candidate summary."""
+    if not isinstance(summary, Mapping):
+        return {"signals": [], "execution_states": [], "falsifiers": []}
+    signals = set()
+    states = set()
+    falsifiers = set()
+    state = _safe_execution_state(summary.get("execution_state"))
+    if state:
+        states.add(state)
+        if state.startswith("executed-"):
+            signals.add("execution")
+        elif state in _EXECUTION_GAP_STATES:
+            signals.add("environment-gap")
+    try:
+        if (int(summary.get("cells_ran", 0) or 0) > 0 and
+                state not in _EXECUTION_GAP_STATES):
+            signals.add("execution")
+    except (TypeError, ValueError):
+        pass
+    if summary.get("harness_error") or summary.get("compile_error"):
+        signals.add("environment-gap")
+        states.add("harness-error" if summary.get("harness_error")
+                   else "run-failed")
+    if summary.get("errors") or summary.get("env_errors"):
+        signals.add("runtime-error")
+
+    if (summary.get("instantiated") or summary.get("parsed") or
+            summary.get("http_evidence")):
+        signals.add("entry-behavior")
+        signals.add("evidence-field")
+
+    authz_rows = [row for row in summary.get("authz_results") or []
+                  if isinstance(row, Mapping)]
+    if authz_rows:
+        signals.update({"authorization", "evidence-field"})
+        for row in authz_rows:
+            expected = row.get("authz") or row.get("expected") or {}
+            deny_expected = expected.get("expected_authz") == "deny"
+            if not deny_expected:
+                deny_expected = any(
+                    code in {401, 403}
+                    for code in expected.get("expected_http_codes") or [])
+            if deny_expected and row.get("status") == "passed" \
+                    and not row.get("boundary_violation"):
+                signals.add("negative-baseline")
+                falsifiers.add("negative-baseline-observed")
+
+    capability_rows = [row for row in summary.get("capability_evidence") or []
+                       if isinstance(row, Mapping)]
+    if capability_rows:
+        signals.update({"capability-trace", "evidence-field"})
+
+    experiment_rows = [row for row in summary.get("experiment_evidence") or []
+                       if isinstance(row, Mapping)]
+    if experiment_rows:
+        signals.update({"state-sequence", "evidence-field"})
+
+    if (summary.get("effect_evidence") or summary.get("network_side_effects")
+            or summary.get("leaked")):
+        signals.update({"typed-effect", "evidence-field"})
+    if summary.get("safe_equivalent"):
+        signals.update({"safe-equivalent", "evidence-field"})
+        falsifiers.add("safe-equivalent-observed")
+
+    residual_rows = [row for row in summary.get("residual_falsifiers") or []
+                     if isinstance(row, Mapping)]
+    if residual_rows:
+        signals.update({"residual-contract", "evidence-field"})
+        for row in residual_rows:
+            row_state = _safe_execution_state(row.get("execution_state"))
+            if row_state:
+                states.add(row_state)
+            if (str(row.get("status") or "").lower() == "falsified" and
+                    row_state in {"executed", "executed-no-effect"}):
+                if not row.get("effect_observed"):
+                    signals.update({"explicit-falsifier", "residual-safe"})
+                    falsifiers.add("explicit-residual-falsifier")
+                else:
+                    signals.add("typed-effect")
+
+    return {
+        "signals": sorted(signals),
+        "execution_states": sorted(states),
+        "falsifiers": sorted(falsifiers),
+    }
+
+
+def _candidate_residual_ids(candidate: Mapping[str, Any]) -> set:
+    ids = {str(row.get("residual_id")) for row in residual_meta(dict(candidate))
+           if row.get("residual_id")}
+    plan = candidate.get("experiment_plan")
+    if isinstance(plan, Mapping):
+        for row in plan.get("residual_contracts") or []:
+            if isinstance(row, Mapping) and row.get("residual_id"):
+                ids.add(str(row.get("residual_id")))
+    return ids
+
+
+def _item_matches_candidate(item: Mapping[str, Any],
+                            candidate: Mapping[str, Any]) -> bool:
+    candidate_id = _text(candidate.get("candidate_id"), 120)
+    if candidate_id and candidate_id == _text(item.get("candidate_id"), 120):
+        return True
+    try:
+        candidate_key = research_key(dict(candidate))
+    except Exception:  # pragma: no cover - defensive identity boundary
+        candidate_key = ""
+    if candidate_key and candidate_key == _text(item.get("research_key"), 80):
+        return True
+    residual_id = _text(item.get("residual_id"), 80)
+    if residual_id and residual_id in _candidate_residual_ids(candidate):
+        return True
+    for field in ("path_id", "flow_id", "entry_id", "sink_id"):
+        item_value = _text(item.get(field), 160)
+        candidate_value = _text(candidate.get(field), 160)
+        if item_value and item_value == candidate_value:
+            return True
+    return False
+
+
+def _item_observation(item: Mapping[str, Any], matches: Sequence[Mapping[str, Any]],
+                      round_no: int) -> Dict[str, Any]:
+    previous = _normalize_observation(item.get("observation"))
+    current_signals = set()
+    current_states = set()
+    current_falsifiers = set()
+    for summary in matches:
+        view = _summary_observation(summary)
+        current_signals.update(view["signals"])
+        current_states.update(view["execution_states"])
+        current_falsifiers.update(view["falsifiers"])
+    prior_signals = set(previous.get("observed_signals") or [])
+    prior_states = set(previous.get("execution_states") or [])
+    all_signals = prior_signals | current_signals
+    all_states = prior_states | current_states
+    all_falsifiers = set(previous.get("falsifier_codes") or []) | current_falsifiers
+    current_status = _classify_observation(
+        current_signals, item.get("required_observations") or [], current_states)
+    history_status = _classify_observation(
+        all_signals, item.get("required_observations") or [], all_states)
+    new_signals = current_signals - prior_signals
+    new_states = current_states - prior_states
+    information_gain = min(5, len(new_signals) + len(new_states))
+    if previous and information_gain == 0 and current_status != previous.get("current_status"):
+        information_gain = 1
+    matched_ids = set(previous.get("matched_candidate_ids") or [])
+    matched_ids.update(_text(summary.get("candidate_id"), 120)
+                       for summary in matches if summary.get("candidate_id"))
+    digest_material = {
+        "strategy_id": item.get("strategy_id"),
+        "round": _int(round_no, 0, 0, 1000000),
+        "signals": sorted(current_signals),
+        "states": sorted(current_states),
+        "falsifiers": sorted(current_falsifiers),
+    }
+    digest = "sg-" + hashlib.sha256(json.dumps(
+        digest_material, sort_keys=True, ensure_ascii=False,
+        separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
+    return {
+        "status": history_status,
+        "current_status": current_status,
+        "history_status": history_status,
+        "last_round": _int(round_no, 0, 0, 1000000),
+        "matched_candidate_ids": sorted(matched_ids)[:MAX_OBSERVATION_CANDIDATES],
+        "execution_states": sorted(all_states)[:MAX_OBSERVATION_STATES],
+        "observed_signals": sorted(all_signals)[:MAX_OBSERVATION_SIGNALS],
+        "current_signals": sorted(current_signals)[:MAX_OBSERVATION_SIGNALS],
+        "new_signals": sorted(new_signals)[:MAX_OBSERVATION_SIGNALS],
+        "missing_observations": _required_observations(
+            all_signals, item.get("required_observations") or []),
+        "falsifier_codes": sorted(all_falsifiers)[:8],
+        "information_gain": information_gain,
+        "cumulative_information_gain": min(
+            32, _int(previous.get("cumulative_information_gain"), 0, 0, 32)
+            + information_gain),
+        "evidence_digest": digest,
+        "claim_status": STRATEGY_CLAIM_STATUS,
+    }
+
+
+def _carry_strategy_observations(items: List[Dict[str, Any]],
+                                 prior_strategy: Any) -> None:
+    prior = normalize_research_strategy(prior_strategy or {})
+    by_id = {
+        str(item.get("strategy_id")): item.get("observation")
+        for item in prior.get("items") or []
+        if isinstance(item, Mapping) and item.get("observation")
+    }
+    for item in items:
+        observation = _normalize_observation(by_id.get(item.get("strategy_id")))
+        if observation:
+            item["observation"] = observation
+
+
+def apply_strategy_observations(
+        strategy: Mapping[str, Any], candidates: Sequence[Mapping[str, Any]],
+        summaries: Optional[Mapping[str, Any]], round_no: int = 0
+        ) -> tuple:
+    """Back-write bounded S4 observations and per-round information gain.
+
+    Matching is explicit (candidate id, stable research key, residual id, or
+    persisted path identifiers).  The result is a research status update only;
+    it never writes a finding status or changes G4/G5 inputs.
+    """
+    normalized = normalize_research_strategy(strategy)
+    if not normalized:
+        return {}, {
+            "schema_version": STRATEGY_FEEDBACK_SCHEMA_VERSION,
+            "round": _int(round_no, 0, 0, 1000000),
+            "summary": {"item_count": 0, "matched_items": 0,
+                         "information_gain": 0,
+                         "claim_status": STRATEGY_CLAIM_STATUS},
+            "items": [], "claim_status": STRATEGY_CLAIM_STATUS,
+        }
+    summaries = summaries if isinstance(summaries, Mapping) else {}
+    candidate_list = [candidate for candidate in candidates or []
+                      if isinstance(candidate, Mapping)]
+    feedback_items = []
+    for item in normalized.get("items") or []:
+        matched = []
+        for candidate in candidate_list:
+            if not _item_matches_candidate(item, candidate):
+                continue
+            cid = _text(candidate.get("candidate_id"), 120)
+            summary = summaries.get(cid, {}) if cid else {}
+            if isinstance(summary, Mapping):
+                row = dict(summary)
+                row["candidate_id"] = cid
+                matched.append(row)
+        if not matched:
+            continue
+        observation = _item_observation(item, matched, round_no)
+        item["observation"] = observation
+        feedback_items.append({
+            "strategy_id": item.get("strategy_id"),
+            "kind": item.get("kind"),
+            "candidate_id": item.get("candidate_id", ""),
+            "research_key": item.get("research_key", ""),
+            "residual_id": item.get("residual_id", ""),
+            "observation": observation,
+            "claim_status": STRATEGY_CLAIM_STATUS,
+        })
+    normalized["summary"] = _summary(
+        normalized.get("items") or [],
+        _int((normalized.get("summary") or {}).get("path_count"), 0,
+             0, 1000000),
+        _int((normalized.get("summary") or {}).get("unresolved_count"), 0,
+             0, 1000000),
+    )
+    feedback_summary = {
+        "item_count": len(feedback_items),
+        "matched_items": len(feedback_items),
+        "information_gain": sum(
+            _int(item.get("observation", {}).get("information_gain"), 0, 0, 5)
+            for item in feedback_items),
+        "new_information_items": sum(
+            1 for item in feedback_items
+            if item.get("observation", {}).get("information_gain", 0)),
+        "falsifier_observed": sum(
+            1 for item in feedback_items
+            if item.get("observation", {}).get("status") == "falsifier-observed"),
+        "environment_gaps": sum(
+            1 for item in feedback_items
+            if item.get("observation", {}).get("status") == "environment-gap"),
+        "claim_status": STRATEGY_CLAIM_STATUS,
+    }
+    feedback = {
+        "schema_version": STRATEGY_FEEDBACK_SCHEMA_VERSION,
+        "strategy_schema_version": STRATEGY_SCHEMA_VERSION,
+        "round": _int(round_no, 0, 0, 1000000),
+        "summary": feedback_summary,
+        "items": feedback_items[:MAX_STRATEGY_ITEMS],
+        "claim_status": STRATEGY_CLAIM_STATUS,
+    }
+    return normalized, feedback
 
 
 def _surface(target_type: Any) -> str:
@@ -513,6 +956,11 @@ def _summary(items: Sequence[Mapping[str, Any]], path_count: int,
              unresolved_count: int) -> Dict[str, Any]:
     kinds = Counter(_text(item.get("kind"), 64) for item in items)
     states = Counter(_text(item.get("state"), 64) for item in items)
+    observations = [item.get("observation") for item in items
+                    if isinstance(item.get("observation"), Mapping)]
+    observation_states = Counter(
+        _text(item.get("status"), 48) for item in observations
+        if item.get("status"))
     return {
         "item_count": len(items),
         "path_count": path_count,
@@ -521,6 +969,13 @@ def _summary(items: Sequence[Mapping[str, Any]], path_count: int,
             1 for item in items if item.get("kind") == "residual-closure"),
         "environment_recovery": sum(
             1 for item in items if item.get("kind") == "environment-recovery"),
+        "observed_items": len(observations),
+        "information_gain": sum(
+            _int(item.get("information_gain"), 0, 0, 5)
+            for item in observations),
+        "falsifier_observed": sum(
+            1 for item in observations if item.get("status") == "falsifier-observed"),
+        "observation_statuses": dict(sorted(observation_states.items())),
         "by_kind": dict(sorted(kinds.items())),
         "by_state": dict(sorted(states.items())),
         "claim_status": STRATEGY_CLAIM_STATUS,
@@ -535,6 +990,7 @@ def build_research_strategy(
         target: str = "",
         target_type: str = "",
         round_no: int = 0,
+        prior_strategy: Optional[Dict[str, Any]] = None,
         ) -> Dict[str, Any]:
     """Join bounded research artifacts into a deterministic agenda."""
     model = normalize_threat_model(threat_model or {})
@@ -631,6 +1087,7 @@ def build_research_strategy(
         _text(item.get("strategy_id"), 80),
     ))
     normalized_items = normalized_items[:MAX_STRATEGY_ITEMS]
+    _carry_strategy_observations(normalized_items, prior_strategy)
     return {
         "schema_version": STRATEGY_SCHEMA_VERSION,
         "target": target,
@@ -704,6 +1161,9 @@ def _normalize_item(raw: Mapping[str, Any]) -> Dict[str, Any]:
             raw.get("capability_candidate_ids"), 8, 160),
         "claim_status": STRATEGY_CLAIM_STATUS,
     }
+    observation = _normalize_observation(raw.get("observation"))
+    if observation:
+        out["observation"] = observation
     if out["residual_id"] and not re.fullmatch(
             r"rr-[0-9a-f]{20}", out["residual_id"]):
         out["residual_id"] = ""
