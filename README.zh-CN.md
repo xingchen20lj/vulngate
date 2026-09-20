@@ -102,6 +102,7 @@ Evidence Gates
 - **按研究面自适应** —— 研究面级指标会生成有界 `surface_guidance`；只有显式标注且匹配的候选才会获得小幅调度优先级，匹配的实验计划才会追加对应的必需观测与证伪条件。
 - **纵向评测退化检测** —— `benchmark --baseline <result.json>` 对比多轮有界聚合指标与研究面指标，将退化保存为 `research-benchmark-trend-v1`，不复制 case 证据，也不会升级为漏洞结论。
 - **项目级研究组合** —— S8 将研究记忆、人工复核和评测上下文汇聚为有界 `research-portfolio-v1`，按研究面、攻击类别、变体和前置条件展示覆盖与缺口，并输出 `next_probes`；调度器只对精确匹配的待验证探针做小幅排序提示，组合统计保持 `not-a-finding`。
+- **攻击路径威胁模型** —— S1 将入口、信任边界、flow、sink、控制姿态、未解析可达性和能力链假设关联成有界 `threat-model-v1`；调度器与 `agent_cli.py threat-model` 可查看这张研究地图，但不会把它升级成漏洞结论。
 - **逐 cell 运行时前置** —— 声明需要的 JDK/runtime 必须真实可用，否则记录 `precondition-unavailable`，不会静默使用其他运行时替代。
 - **S4 证据收敛** —— 已落盘矩阵证据不会被 Agent/spawn 超时元数据覆盖。
 - **保守 Novelty** —— 公开查询失败会保留为不确定状态，而不会被转化为“未发现公开记录”。
@@ -196,7 +197,7 @@ npm install -g @openai/codex
 
 | 阶段 | 目的 | 代表性输出 | 闸门 |
 |---|---|---|---|
-| S1 | 攻击面、入口、危险调用点、修复历史/变体、项目画像、目标类型规则、复合攻击链、能力原语候选 | `S1/entry-inventory.json`、`S1/security-fix-history.json`、`S1/patch-variants.json`、`S1/project-profile.json`、`S1/target-rules.json`、`S1/composite-chain-candidates.json`、`S1/capability-graph.json`、`S1/capability-candidates.json` | G0 死代码、G1 可达性 |
+| S1 | 攻击面、入口、危险调用点、修复历史/变体、项目画像、目标类型规则、复合攻击链、能力原语与攻击路径威胁模型 | `S1/entry-inventory.json`、`S1/security-fix-history.json`、`S1/patch-variants.json`、`S1/project-profile.json`、`S1/target-rules.json`、`S1/composite-chain-candidates.json`、`S1/capability-graph.json`、`S1/capability-candidates.json`、`S1/threat-model.json` | G0 死代码、G1 可达性 |
 | S2 | 候选矩阵与可证伪研究计划：surface × entry × input × mechanism | `S2/candidate-matrix.json`、`S2/experiment-plans.json` | — |
 | S3 | 带 file:line 证据的源码审计、Source→Sink hints、residuals | `S3/audit-notes.json`、`S3/residuals.json` | G1b 默认配置门控 |
 | S4 | PoC 矩阵：版本 × safe mode × 前置条件；可选 authz、有界状态/并发、能力 transition 与重放/差分实验室 | `S4/matrix-runs/<c>/cells.json`、`S4/execution-status.json`、`S4/authz-matrix.json`、`S4/runtime-lab.json` | G4 运行时证据 |

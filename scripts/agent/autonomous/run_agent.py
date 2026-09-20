@@ -378,13 +378,17 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
     """
     from ..analysis import capability_graph as capability
     from ..analysis import coverage as cov
+    from ..analysis import threat_model as threat_model_analysis
     from ..analysis.inventory import (CoverageStore, build_inventory,
                                       load_inventory, persist_inventory)
 
     store = CoverageStore(ctx.root, ctx.cfg.name)
-    if store.path(capability.CAPABILITY_GRAPH_INDEX).exists():
+    if (store.path(capability.CAPABILITY_GRAPH_INDEX).exists()
+            and store.path(threat_model_analysis.THREAT_MODEL_INDEX).exists()):
         return {"rebuilt": False, "graph": capability.load_capability_graph(store),
-                "candidates": capability.load_capability_candidates(store)}
+                "candidates": capability.load_capability_candidates(store),
+                "threat_model": threat_model_analysis.load_threat_model(
+                    ctx.root, ctx.cfg.name)}
 
     target_root = ctx.root / "targets" / ctx.cfg.name
     if not target_root.exists():
@@ -402,11 +406,13 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
         return {"rebuilt": True,
                 "graph": capability.load_capability_graph(store),
                 "candidates": capability.load_capability_candidates(store),
+                "threat_model": threat_model_analysis.load_threat_model(
+                    ctx.root, ctx.cfg.name),
                 "root": str(target_root)}
     except Exception as exc:  # pragma: no cover - autonomous is best-effort
         return {"rebuilt": False,
                 "error": "%s: %s" % (type(exc).__name__, exc),
-                "graph": {}, "candidates": []}
+                "graph": {}, "candidates": [], "threat_model": {}}
 
 
 class AutoCtx:
@@ -1533,6 +1539,8 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                        capability_state.get("graph") or {})
     ctx.write_artifact(round_no, "S1", "capability-candidates.json",
                        capability_state.get("candidates") or [])
+    ctx.write_artifact(round_no, "S1", "threat-model.json",
+                       capability_state.get("threat_model") or {})
     if capability_state.get("error"):
         ctx.write_artifact(round_no, "S1", "capability-graph-error.json", {
             "error": capability_state["error"]})

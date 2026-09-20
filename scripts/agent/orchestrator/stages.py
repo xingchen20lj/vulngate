@@ -149,12 +149,14 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
     from ..analysis import capability_graph as capability
     from ..analysis import coverage as cov
     from ..analysis import differential as diff
+    from ..analysis import threat_model as threat_model_analysis
     from ..analysis.inventory import CoverageStore, build_inventory, persist_inventory
 
     store = CoverageStore(ctx.workspace, ctx.target)
     required = ("source-inventory", "flow-index", "symbol-index",
                 ctl.CONTROL_MAP_INDEX, diff.DIFFERENTIAL_INDEX,
-                capability.CAPABILITY_GRAPH_INDEX)
+                capability.CAPABILITY_GRAPH_INDEX,
+                threat_model_analysis.THREAT_MODEL_INDEX)
     missing = [name for name in required if not store.path(name).exists()]
     built = False
     if missing:
@@ -172,6 +174,8 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
     control_summary = (store.read(ctl.CONTROL_MAP_INDEX) or {}).get("summary") or {}
     differential_summary = (store.read(diff.DIFFERENTIAL_INDEX) or {}).get("summary") or {}
     capability_summary = (store.read(capability.CAPABILITY_GRAPH_INDEX) or {}).get("summary") or {}
+    threat_model_summary = (store.read(
+        threat_model_analysis.THREAT_MODEL_INDEX) or {}).get("summary") or {}
     if control_summary:
         info["control_map"] = {
             "flows": control_summary.get("flows"),
@@ -198,6 +202,19 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
             "complete_hypotheses": capability_summary.get("complete_hypotheses"),
             "partial_hypotheses": capability_summary.get("partial_hypotheses"),
             "truncated": capability_summary.get("truncated"),
+        }
+    if threat_model_summary:
+        info["threat_model"] = {
+            "boundaries": threat_model_summary.get("boundaries"),
+            "attack_paths": threat_model_summary.get("attack_paths"),
+            "high_priority_paths": threat_model_summary.get("high_priority_paths"),
+            "capability_linked_paths": threat_model_summary.get(
+                "capability_linked_paths"),
+            "unmapped_entries": threat_model_summary.get("unmapped_entries"),
+            "unmapped_sinks": threat_model_summary.get("unmapped_sinks"),
+            "truncated": threat_model_summary.get("truncated"),
+            "claim_status": threat_model_summary.get(
+                "claim_status", "not-a-finding"),
         }
     if summary:
         info["call_graph"] = {
@@ -356,6 +373,9 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
         ctx.store.write_artifact(
             "S1", "capability-candidates.json",
             capability.load_capability_candidates(coverage_store))
+        ctx.store.write_artifact(
+            "S1", "threat-model.json",
+            threat_model_analysis.load_threat_model(ctx.workspace, ctx.target))
     except Exception as exc:  # pragma: no cover - evidence mirror is best-effort
         ctx.store.write_artifact("S1", "capability-graph-error.json", {
             "error": "%s: %s" % (type(exc).__name__, exc)})

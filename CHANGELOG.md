@@ -102,6 +102,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   explicit portfolio match a small, recorded priority nudge; broad/free-form
   labels cannot steer a candidate and the nudge never changes G4/G5, CVSS or
   finding status.
+- Added bounded `threat-model-v1` attacker-path artifacts. S1 now joins trust
+  boundaries, entries, flows, sinks, static control posture, unresolved
+  reachability, and matching capability hypotheses; the scheduler prompt and
+  `agent_cli.py threat-model` expose the same view. Unmapped regions remain
+  pending and every row is forced to `claim_status=not-a-finding`.
 
 ### Documentation
 
@@ -134,6 +139,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Documented the project research portfolio, its S8 artifacts, bounded variant
   coverage and next-probe contract, including its strict `not-a-finding`
   boundary.
+- Documented the attacker-path threat model, its target/round artifacts, CLI,
+  trust-boundary assumptions, unresolved-region handling, and strict
+  separation from vulnerability, CVSS, and G4/G5 conclusions.
 
 ## [1.1.0] - 2026-09-16
 

@@ -22,6 +22,7 @@ Storage layout follows spec §3::
     ├── sibling-groups.json      differential-index.json        (PR4, spec §12)
     ├── differential-candidates.json
     ├── capability-graph.json    capability-candidates.json     (research paths)
+    ├── threat-model.json        (attacker-path / trust-boundary research view)
     └── inventory-summary.json
 
 Files not yet produced by an implemented phase are omitted rather than written
@@ -44,6 +45,7 @@ from . import capability_graph as capability_analysis
 from . import controls as control_map
 from . import differential as differential_analysis
 from . import models
+from . import threat_model as threat_model_analysis
 from .callgraph import build_call_graph
 from .dataflow import build_flow_index
 from .languages import (JVM_LANGUAGES, ExcludedDir, SourceFilter, classify_file,
@@ -969,6 +971,17 @@ def persist_inventory(store: CoverageStore, result: InventoryResult,
         written[capability_analysis.CAPABILITY_CANDIDATE_INDEX] = str(
             store.write(capability_analysis.CAPABILITY_CANDIDATE_INDEX,
                         result.capability_candidates))
+    # The threat model is a deterministic join of the inventory, control map,
+    # and capability graph.  Persist it beside the source ledger so the
+    # scheduler and both pipeline drivers consume the same attacker-path view.
+    threat_model = threat_model_analysis.build_threat_model(
+        entries=result.entries, sinks=result.sinks, flows=result.flows,
+        control_map=result.control_map,
+        capability_graph=result.capability_graph,
+        reachability=result.sink_reachability, target=result.target,
+        target_type=target_type or "")
+    written[threat_model_analysis.THREAT_MODEL_INDEX] = str(
+        store.write(threat_model_analysis.THREAT_MODEL_INDEX, threat_model))
     written["inventory-summary"] = str(store.write("inventory-summary", {
         "root": result.root, "target": result.target,
         "generated_at": result.generated_at, "elapsed_ms": result.elapsed_ms,
@@ -1008,6 +1021,8 @@ def load_inventory(store: CoverageStore) -> Dict[str, Any]:
             capability_analysis.CAPABILITY_GRAPH_INDEX) or {},
         capability_analysis.CAPABILITY_CANDIDATE_INDEX: store.read_records(
             capability_analysis.CAPABILITY_CANDIDATE_INDEX),
+        threat_model_analysis.THREAT_MODEL_INDEX: threat_model_analysis.load_threat_model(
+            store.workspace, store.target),
         "inventory-summary": store.read("inventory-summary") or {},
         "call-graph-summary": store.read("call-graph-summary") or {},
         "flow-summary": store.read("flow-summary") or {},

@@ -154,6 +154,19 @@ explicit match a small, explainable nudge and records the match in its
 schedule evidence. The artifact remains `claim_status=not-a-finding` and never carries reviewer notes,
 payloads, commands, process output, CVSS or G4/G5 evidence.
 
+S1 now also emits a bounded `threat-model-v1` under
+`state/<target>/coverage/threat-model.json` and mirrors it to
+`round-NN/S1/threat-model.json`. It groups entries into explicit trust
+boundaries and joins each emitted flow to its sink, static control posture,
+reachability gap, attacker-role label, research questions, and any matching
+capability-chain hypothesis. Unmapped entries and sinks remain visible as
+pending investigation instead of disappearing from the model. The scheduler
+includes a bounded snapshot in its prompt and persisted plan, and
+`agent_cli.py threat-model` provides a direct report. All rows are static
+research hypotheses with `claim_status=not-a-finding`; route exposure, data
+flow, control ordering, transitions, and typed effects still require S3/S4
+evidence.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable
@@ -166,7 +179,8 @@ not contain method bodies and cannot by itself establish a vulnerability.
 
 Use an independent `--workspace` for each audit so checkpoints and evidence do
 not enter the installed plugin cache. Missing external tools are reported as
-precondition gaps. Static coverage, control, differential and capability output remains a
+precondition gaps. Static coverage, control, differential, capability, and
+threat-model output remains a
 lead until the S1-S8 evidence gates are satisfied.
 
 The regression suite covers the analysis indexes, scheduler, installer,

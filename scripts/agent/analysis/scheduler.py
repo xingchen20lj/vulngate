@@ -59,6 +59,7 @@ from ..memory.research import (
     research_key,
 )
 from ..memory.portfolio import load_research_portfolio
+from .threat_model import load_threat_model
 
 # ---------------------------------------------------------------------------
 # configuration
@@ -296,6 +297,7 @@ class ScheduleContext:
     prior_coverage: List[Dict[str, Any]] = field(default_factory=list)
     research_memory: List[Dict[str, Any]] = field(default_factory=list)
     research_portfolio: Dict[str, Any] = field(default_factory=dict)
+    threat_model: Dict[str, Any] = field(default_factory=dict)
     weights: Dict[str, int] = field(default_factory=lambda: dict(DEFAULT_FACTOR_WEIGHTS))
     benchmark_feedback: Dict[str, Any] = field(default_factory=dict)
     weight_adjustments: Dict[str, int] = field(default_factory=dict)
@@ -316,7 +318,8 @@ class ScheduleContext:
                    weights: Optional[Dict[str, int]] = None,
                    research_memory: Optional[Sequence[Dict[str, Any]]] = None,
                    benchmark_feedback: Optional[Dict[str, Any]] = None,
-                   research_portfolio: Optional[Dict[str, Any]] = None
+                   research_portfolio: Optional[Dict[str, Any]] = None,
+                   threat_model: Optional[Dict[str, Any]] = None
                    ) -> "ScheduleContext":
         indices = load_inventory(store)
         reachability = {str(r.get("sink_id")): r
@@ -324,6 +327,8 @@ class ScheduleContext:
         feedback = normalize_benchmark_feedback(benchmark_feedback or {})
         portfolio = (research_portfolio if isinstance(research_portfolio, dict)
                      else load_research_portfolio(store.workspace, store.target))
+        model = (threat_model if isinstance(threat_model, dict)
+                 else load_threat_model(store.workspace, store.target))
         effective_weights, weight_adjustments = apply_benchmark_feedback_weights(
             weights, feedback)
         return cls(
@@ -343,6 +348,7 @@ class ScheduleContext:
             research_memory=[item for item in (research_memory or [])
                              if isinstance(item, dict)],
             research_portfolio=portfolio,
+            threat_model=model,
             weights=effective_weights,
             benchmark_feedback=feedback,
             weight_adjustments=weight_adjustments,
@@ -449,6 +455,39 @@ class ScheduleContext:
             reviewed["categories"].update(str(x) for x in record.get("categories") or [])
             reviewed["flows"].update(str(x) for x in record.get("flows") or [])
         return reviewed
+
+
+def _threat_model_snapshot(model: Any, path_limit: int = 24,
+                           boundary_limit: int = 16) -> Dict[str, Any]:
+    """Keep schedule artifacts bounded while retaining attacker-path context."""
+    if not isinstance(model, dict):
+        return {}
+    paths = [row for row in (model.get("attack_paths") or [])
+             if isinstance(row, dict)]
+    paths.sort(key=lambda row: (
+        -int(row.get("research_priority") or 0),
+        str(row.get("path_id") or ""),
+    ))
+    unresolved = model.get("unresolved")
+    if not isinstance(unresolved, dict):
+        unresolved = {}
+    return {
+        "schema_version": str(model.get("schema_version") or ""),
+        "summary": dict(model.get("summary") or {})
+        if isinstance(model.get("summary"), dict) else {},
+        "boundaries": [row for row in (model.get("boundaries") or [])
+                       if isinstance(row, dict)][:boundary_limit],
+        "attack_paths": paths[:path_limit],
+        "unresolved": {
+            "unmapped_entries": [row for row in
+                                  (unresolved.get("unmapped_entries") or [])
+                                  if isinstance(row, dict)][:path_limit],
+            "unmapped_sinks": [row for row in
+                                (unresolved.get("unmapped_sinks") or [])
+                                if isinstance(row, dict)][:path_limit],
+        },
+        "claim_status": "not-a-finding",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1325,6 +1364,7 @@ class SchedulePlan:
     weights: Dict[str, int] = field(default_factory=dict)
     benchmark_feedback: Dict[str, Any] = field(default_factory=dict)
     research_portfolio: Dict[str, Any] = field(default_factory=dict)
+    threat_model: Dict[str, Any] = field(default_factory=dict)
     weight_adjustments: Dict[str, int] = field(default_factory=dict)
     #: Candidates selected outside the quota because they carry runtime
     #: evidence the static score cannot see (see :func:`stratified_select`).
@@ -1341,6 +1381,7 @@ class SchedulePlan:
             "weight_adjustments": dict(self.weight_adjustments),
             "benchmark_feedback": self.benchmark_feedback,
             "research_portfolio": self.research_portfolio,
+            "threat_model": _threat_model_snapshot(self.threat_model),
             "selected": [s.as_dict() for s in self.selected],
             "deferred": [s.as_dict() for s in self.deferred],
             "pinned": list(self.pinned),
@@ -1505,10 +1546,11 @@ def build_schedule(workspace: Path, target: str,
         coverage = residual_sweep(store, workspace, target, round_no)
     memory = load_research_memory(workspace, target)
     portfolio = load_research_portfolio(workspace, target)
+    threat_model = load_threat_model(workspace, target)
     ctx = ScheduleContext.from_store(
         store, weights, research_memory=memory.get("entries") or [],
         benchmark_feedback=benchmark_feedback,
-        research_portfolio=portfolio)
+        research_portfolio=portfolio, threat_model=threat_model)
     scores = score_candidates(candidates, ctx)
     selected, deferred, requested, filled, relocated = stratified_select(
         scores, slots, quota, pinned)
@@ -1532,6 +1574,7 @@ def build_schedule(workspace: Path, target: str,
         weights=dict(ctx.weights),
         benchmark_feedback=dict(ctx.benchmark_feedback),
         research_portfolio=dict(ctx.research_portfolio),
+        threat_model=dict(ctx.threat_model),
         weight_adjustments=dict(ctx.weight_adjustments),
         pinned=[str(cid) for cid in pinned if str(cid) in selected_ids],
     )
@@ -1880,6 +1923,33 @@ def prompt_coverage_block(ctx: ScheduleContext, plan: Optional[SchedulePlan] = N
             "benchmark": portfolio.get("benchmark", {}),
             "claim_status": portfolio.get("claim_status", "not-a-finding"),
         }, ensure_ascii=False))
+
+    lines.append("## 攻击路径威胁模型 / Attacker-Path Threat Model")
+    if not ctx.threat_model:
+        lines.append("  （暂无威胁模型 / no threat model yet）")
+    else:
+        model = _threat_model_snapshot(ctx.threat_model, path_limit=limit_flows,
+                                       boundary_limit=limit_selected)
+        lines.append("  " + json.dumps({
+            "summary": model.get("summary", {}),
+            "boundaries": model.get("boundaries", []),
+            "unresolved": model.get("unresolved", {}),
+            "claim_status": model.get("claim_status", "not-a-finding"),
+        }, ensure_ascii=False))
+        for path in model.get("attack_paths", []):
+            capability_ids = ",".join(
+                str(item.get("candidate_id"))
+                for item in (path.get("capability_hypotheses") or [])
+                if item.get("candidate_id")) or "-"
+            lines.append("  [priority=%s] %s %s -> %s posture=%s state=%s "
+                         "capability_hypotheses=%s questions=%s claim_status=%s" % (
+                             path.get("research_priority", 0),
+                             path.get("path_id"), path.get("entry_id"),
+                             path.get("sink_id"), path.get("control_posture"),
+                             path.get("research_state"),
+                             capability_ids,
+                             "; ".join(path.get("research_questions") or [])[:420],
+                             path.get("claim_status", "not-a-finding")))
 
     lines.append("## 评测反馈 / Benchmark Feedback")
     if not ctx.benchmark_feedback:

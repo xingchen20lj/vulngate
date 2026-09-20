@@ -191,6 +191,8 @@ Run stages in order unless a hard gate or explicit scope rule ends a candidate.
   ```
 - **Capability-primitive search:** `capability-graph.json` maps observed entry/flow/sink signals to bounded `read` / `write` / `exec` / `ssrf` / credential and evaluation primitives. `capability-candidates.json` composes only explicitly listed equations, records `observed_capabilities` versus `missing_capabilities`, emits a minimal verification sequence, and carries a bounded S4 `capability_contract`. A complete-looking chain is still `claim_status=not-a-finding`, `requires_manual_dataflow=true`, and `runtime_required=true`; missing primitives are pending research goals, never negative evidence or an RCE claim.
 
+- **Attacker-path threat model:** `threat-model.json` is a bounded deterministic join of entries, trust boundaries, flows, sinks, static control posture, unresolved reachability and matching capability hypotheses. It records attacker-role labels, preconditions and research questions so S2/S3 can reason about a whole path instead of an isolated sink. It is mirrored to `S1/threat-model.json`, loaded into the scheduler prompt/plan, and is inspectable with `python3 scripts/agent_cli.py threat-model <target> --workspace <audit-dir> --json`. Route exposure, real data flow, control ordering, capability transitions and typed effects remain pending until S3/S4 evidence; every row is `claim_status=not-a-finding`.
+
   ```bash
   python3 scripts/agent_cli.py capability <target> --show-candidates
   ```
@@ -1005,6 +1007,8 @@ reports/<target>/round-NN/...
     --fix-history state/<target>/round-01/S1/security-fix-history.json
   ```
 - **能力原语搜索：** `capability-graph.json` 将入口/flow/sink 的静态信号映射成有界的 `read` / `write` / `exec` / `ssrf` / 凭据 / 求值原语。`capability-candidates.json` 只组合显式方程，分别记录 `observed_capabilities` 与 `missing_capabilities`，给出最小验证序列，并携带有界的 S4 `capability_contract`。即使链看起来闭合，仍必须保持 `claim_status=not-a-finding`、`requires_manual_dataflow=true`、`runtime_required=true`；缺失原语是待研究目标，不是负证据，更不是 RCE 结论。
+
+- **攻击路径威胁模型：** `threat-model.json` 是由 entry、信任边界、flow、sink、静态控制姿态、未解析可达性和匹配能力链假设组成的有界确定性关联视图。它记录 attacker-role 标签、前置条件和研究问题，使 S2/S3 可以围绕完整路径推理，而不是只看孤立 sink；同时镜像到 `S1/threat-model.json`，进入调度 prompt/plan，并可用 `python3 scripts/agent_cli.py threat-model <target> --workspace <audit-dir> --json` 查看。路由暴露、真实数据流、控制顺序、能力 transition 和 typed effect 仍须由 S3/S4 证据确认；每条记录都必须是 `claim_status=not-a-finding`。
 
   ```bash
   python3 scripts/agent_cli.py capability <target> --show-candidates

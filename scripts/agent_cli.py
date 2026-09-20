@@ -29,6 +29,8 @@ Usage:
                            [--module <prefix>] [--lang zh|en]
   agent_cli.py capability <target> [--workspace <dir>] [--rebuild]
                              [--show-candidates] [--json]
+  agent_cli.py threat-model <target> [--workspace <dir>] [--rebuild]
+                                [--json]
   agent_cli.py spawn-probe --workspace <dir> --target <name> --round <N>
                            --status ok|degraded [--reply <agent-reply>]
   agent_cli.py staging-exec --authorized-staging --host <ECS> --user <user> ...
@@ -1140,6 +1142,66 @@ def cmd_capability(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_threat_model(args: argparse.Namespace) -> int:
+    """Show the bounded attacker-path threat model; paths are not findings."""
+    from agent.analysis import threat_model as threat_model_analysis
+
+    try:
+        workspace, store, rebuilt, _ = _ensure_coverage_analysis(
+            args, (threat_model_analysis.THREAT_MODEL_INDEX,))
+    except FileNotFoundError as exc:
+        _out({"error": "target source root not found", "root": str(exc),
+              "hint": "pass --root <src root> (with --rebuild) or run S1 first"})
+        return 2
+
+    model = threat_model_analysis.load_threat_model(workspace, args.target)
+    if not model:
+        _out({"error": "threat model not found",
+              "hint": "run S1 or `agent_cli.py threat-model --rebuild`"})
+        return 2
+    paths = list(model.get("attack_paths") or [])
+    if args.limit:
+        paths = paths[:max(0, args.limit)]
+    payload: Dict[str, Any] = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "schema_version": model.get("schema_version", ""),
+        "summary": model.get("summary") or {},
+        "boundaries": (model.get("boundaries") or [])[:max(0, args.limit)],
+        "attack_paths": paths,
+        "unresolved": model.get("unresolved") or {},
+        "claim_status": model.get("claim_status", "not-a-finding"),
+    }
+    if rebuilt is not None:
+        payload["rebuilt"] = rebuilt
+    if args.json:
+        _out(payload)
+        return 0
+
+    label = "攻击路径威胁模型" if args.lang == "zh" \
+        else "Attacker-path threat model"
+    print("\n%s" % label)
+    print("─" * 46)
+    summary = payload["summary"]
+    print("  boundaries %s  paths %s  high-priority %s" % (
+        summary.get("boundaries", 0), summary.get("attack_paths", 0),
+        summary.get("high_priority_paths", 0)))
+    print("  control postures %s" %
+          (summary.get("attack_paths_by_control_posture") or {}))
+    print("  unresolved entries %s  sinks %s" % (
+        summary.get("unmapped_entries", 0), summary.get("unmapped_sinks", 0)))
+    for path in paths:
+        print("  [P%s] %s %s -> %s posture=%s state=%s" % (
+            path.get("research_priority", 0), path.get("path_id", ""),
+            path.get("entry_id", ""), path.get("sink_id", ""),
+            path.get("control_posture", "unmapped"),
+            path.get("research_state", "")))
+    print("  claim_status=%s" % payload["claim_status"])
+    if rebuilt is not None:
+        print("\n[index rebuilt from %s]" % rebuilt["root"])
+    return 0
+
+
 def cmd_differential(args: argparse.Namespace) -> int:
     """Sibling / differential analysis (spec §12): where siblings disagree.
 
@@ -1517,6 +1579,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_analysis_args(cap)
     cap.set_defaults(fn=cmd_capability)
+
+    tm = sub.add_parser(
+        "threat-model",
+        help="bounded attacker-path threat model; paths are research hypotheses, "
+             "not findings",
+    )
+    _add_analysis_args(tm)
+    tm.set_defaults(fn=cmd_threat_model)
 
     sp = sub.add_parser(
         "spawn-probe",

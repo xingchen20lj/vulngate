@@ -27,6 +27,7 @@
 | 10 | 研究面级自适应调度与规划 | 已实现（有界 surface guidance） | `surface_guidance`、候选级面向证据调度、面级 `benchmark_guidance` | 只对显式匹配研究面的候选加小幅优先级；计划补观测/证伪条件；默认无反馈行为不变，不改变 G4/G5/CVSS |
 | 11 | 纵向评测退化检测 | 已实现（bounded trend comparison） | `research-benchmark-trend-v1`、`--baseline`、趋势反馈 | 跨轮只比较固定聚合指标；全局/研究面退化进入有界 guidance；不复制 case、运行时输出或结论 |
 | 12 | 项目级研究组合与变体覆盖 | 已实现（bounded research portfolio） | `research-portfolio-v1`、`state/<target>/research-portfolio.json`、S8 组合视图 | 能按研究面/攻击类别/变体/前置条件汇总已观测状态，输出有界 next probes；不把组合统计升级为漏洞结论 |
+| 13 | 攻击路径威胁模型与信任边界 | 已实现（bounded attacker-path model） | `threat-model-v1`、`state/<target>/coverage/threat-model.json`、`S1/threat-model.json`、威胁模型 CLI/调度 prompt | 入口、边界、flow、sink、控制姿态、未解析区域和能力链保持可追溯；所有路径仍是 `not-a-finding` |
 
 ## 当前阶段：可证伪实验规划
 
@@ -256,10 +257,24 @@ case、PoC、stdout/stderr 都不会被复制。趋势仍是 `not-a-finding`，�
 research key 或至少两个显式维度（含变体）的精确匹配施加很小的优先级增量，并把匹配证据写入
 schedule，帮助宿主 Agent 把跨面覆盖和变体缺口转成可证伪实验；它不改变候选状态、CVSS 或 G4/G5。
 
+## 阶段 13 初步实现：攻击路径威胁模型与信任边界
+
+顶级研究员不会只看“某个 API 命中了危险函数”，而会持续维护一张
+“谁能够从哪条信任边界、以什么前置条件、经过哪些控制，到达哪个危险操作”的研究地图。
+S1 现在把已有 entry/sink/flow、控制图和能力图做成有界的
+`threat-model-v1`：
+
+- 按入口类型聚合网络、RPC、消息、WebView、IPC、URL scheme、库解析、文件输入、配置和 CLI 等信任边界，并只记录待确认的 attacker-role 标签；
+- 对每条 flow 关联 sink、静态控制姿态、缺失控制组、覆盖缺口、前置条件、证伪问题和能力链假设；
+- 对没有生成 flow 的入口、只被 sink 反向看到的区域和其他 reachability gap 单独列为 pending，防止“索引没有路径”被误解成安全；
+- 目标级保存到 `state/<target>/coverage/threat-model.json`，轮次镜像保存到 `S1/threat-model.json`；调度 prompt 和 `agent_cli.py threat-model` 使用同一份 bounded 视图。
+
+该模型只表达研究假设，所有记录强制 `claim_status=not-a-finding`，不携带源码原文、payload、命令、stdout/stderr、凭据、CVSS 或 G4/G5 证据。路由暴露、真实数据流、控制顺序、能力 transition 和 typed effect 仍必须由 S3/S4 独立验证。
+
 ## 后续优先级
 
-1. 将组合视图与真实项目的多轮历史、人工复核和变体覆盖率做更细粒度关联，校准 guidance 阈值但不放宽证据闸门。
-2. 将纵向趋势与组合缺口联合成可回放的研究策略实验，并保持策略与漏洞结论隔离。
+1. 将威胁模型的边界/路径状态与项目组合、纵向趋势关联成可回放的研究策略实验，但不放宽证据闸门。
+2. 将组合视图与真实项目的多轮历史、人工复核和变体覆盖率做更细粒度关联，校准 guidance 阈值。
 3. 继续扩展协议状态机、云身份边界、移动端生命周期和 native 方法体验证的合成变体，并为每类维持正向、负向和环境缺口对照。
 
 每一阶段都必须同时更新实现、技能契约、回归测试和 CHANGELOG；只有测试、artifact schema 和安全边界一起稳定后，才适合提交为一个独立变更。
