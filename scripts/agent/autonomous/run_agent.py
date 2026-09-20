@@ -1663,7 +1663,10 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                                        capability_contract_from_candidate(c)),
                                        ("variant_fixture_plan",
                                         (c.get("experiment_plan") or {}).get(
-                                            "variant_fixture_plan", {}))]
+                                            "variant_fixture_plan", {})),
+                                       ("comparison_contract",
+                                        (c.get("experiment_plan") or {}).get(
+                                            "comparison_contract", {}))]
                                 )
                                 for c in candidates
                             ]})

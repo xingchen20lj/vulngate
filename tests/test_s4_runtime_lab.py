@@ -103,6 +103,8 @@ class S4RuntimeLabTests(unittest.TestCase):
         item = artifact["fixtures"][0]
         self.assertEqual(item["replay"]["status"], "stable")
         self.assertTrue(item["reproduces_expected"])
+        self.assertEqual("difference-observed", item["comparison"]["status"])
+        self.assertEqual(1, len(artifact["comparison_contracts"]))
         self.assertEqual(len(FakeJavaRunner.calls), 2)
         self.assertEqual(len(FakeJavaRunner.calls[0][1]), 2)
         self.assertEqual(len(FakeJavaRunner.calls[1][1]), 4)

@@ -29,6 +29,9 @@ from .runtime_lab import (LAB_SCHEMA_VERSION, MAX_CELLS,
 from .service_lifecycle import ServiceLifecycle
 from .surface_variants import (normalize_variant_fixture_context,
                                normalize_variant_fixture_plan)
+from .variant_comparisons import (build_comparison_contract,
+                                  normalize_comparison_contract,
+                                  summarize_comparison_observations)
 
 
 MAX_S4_FIXTURES = 16
@@ -116,7 +119,8 @@ def _spec_identity(spec: Any, kind: str) -> Dict[str, str]:
 def build_s4_fixture(candidate: Dict[str, Any], spec: Any, cell: MatrixCell,
                      kind: str, spec_index: int,
                      template_key: Optional[str] = None,
-                     variant_context: Optional[Dict[str, Any]] = None
+                     variant_context: Optional[Dict[str, Any]] = None,
+                     comparison_contract: Optional[Dict[str, Any]] = None
                      ) -> Dict[str, Any]:
     """Build a stable ordinary-S4 fixture without persisting raw arguments."""
     candidate_id = str(candidate.get("candidate_id", ""))
@@ -124,6 +128,7 @@ def build_s4_fixture(candidate: Dict[str, Any], spec: Any, cell: MatrixCell,
     context = _safe_cell_context(cell)
     variant = normalize_variant_fixture_context(
         variant_context if variant_context is not None else cell.variant_context)
+    comparison = normalize_comparison_contract(comparison_contract)
     identity = {
         "kind": kind,
         "candidate_id": candidate_id,
@@ -134,6 +139,7 @@ def build_s4_fixture(candidate: Dict[str, Any], spec: Any, cell: MatrixCell,
         "input_shape": str(getattr(spec, "input_shape", "") or
                             candidate.get("input_shape", "")),
         "cell_context": context,
+        "comparison_id": comparison.get("comparison_id", ""),
     }
     digest = _digest(identity)
     fixture = {
@@ -161,6 +167,7 @@ def build_s4_fixture(candidate: Dict[str, Any], spec: Any, cell: MatrixCell,
         "concurrency": context["concurrency"],
         "availability_probe": context["availability_probe"],
         "variant_context": variant,
+        "comparison_contract": comparison,
         "claim_status": "not-a-finding",
     }
     return fixture
@@ -369,6 +376,15 @@ def _variant_contexts(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
         if context:
             rows.append(context)
     return rows
+
+
+def _comparison_contract(candidate: Dict[str, Any],
+                         versions: Sequence[str]) -> Dict[str, Any]:
+    """Prefer the S2 contract, with a deterministic old-candidate fallback."""
+    plan = candidate.get("experiment_plan")
+    raw = plan.get("comparison_contract") if isinstance(plan, dict) else None
+    normalized = normalize_comparison_contract(raw)
+    return normalized or build_comparison_contract(candidate, versions)
 
 
 def _merge_state_steps(base: Sequence[str], variant: Sequence[str]) -> List[str]:
@@ -629,6 +645,25 @@ def _failure(version: str, safe_mode: bool, fixture_id: str,
     }, fixture_id, lab_kind, variant_context=variant_context)]
 
 
+def _unique_comparison_contracts(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep one bounded comparison contract per comparison id."""
+    result: List[Dict[str, Any]] = []
+    seen = set()
+    for row in rows:
+        fixture = row.get("fixture") if isinstance(row, dict) else {}
+        contract = normalize_comparison_contract(
+            fixture.get("comparison_contract") if isinstance(fixture, dict)
+            else None)
+        comparison_id = contract.get("comparison_id")
+        if not comparison_id or comparison_id in seen:
+            continue
+        seen.add(comparison_id)
+        result.append(contract)
+        if len(result) >= 16:
+            break
+    return result
+
+
 def _run_s4_runtime_lab_core(
         workspace: Any, target: str, round_no: int, config: Any,
         candidates: Sequence[Dict[str, Any]],
@@ -672,6 +707,7 @@ def _run_s4_runtime_lab_core(
             "fixture_count": 0,
             "fixture_budget": options["max_fixtures"],
             "fixture_budget_truncated": False,
+            "comparison_contracts": [],
             "fixtures": [],
             "claim_status": "not-a-finding",
     }
@@ -686,9 +722,11 @@ def _run_s4_runtime_lab_core(
          variant_context) in work_items:
         variant_base = (_variant_cell(base, variant_context)
                         if variant_context else base)
+        comparison_contract = _comparison_contract(candidate, versions)
         fixture = build_s4_fixture(
             candidate, spec, variant_base, kind, spec_index, template_key,
-            variant_context=variant_context)
+            variant_context=variant_context,
+            comparison_contract=comparison_contract)
         fixture_id = fixture["fixture_id"]
         candidate_id = str(candidate.get("candidate_id", ""))
         selected_versions = versions or [str(base.version)]
@@ -730,6 +768,8 @@ def _run_s4_runtime_lab_core(
         replay = summarize_replay(replay_records)
         differential = summarize_version_differential(
             differential_records, primary)
+        comparison = summarize_comparison_observations(
+            comparison_contract, differential_records, primary)
         baseline = _baseline_row(baseline_results.get(candidate_id, []),
                                  spec, kind, variant_base)
         expected = (normalize_matrix_record(baseline)
@@ -751,6 +791,7 @@ def _run_s4_runtime_lab_core(
             "reproduces_expected": reproduces,
             "replay_records": replay_records[:MAX_CELLS],
             "differential": differential,
+            "comparison": comparison,
             "differential_records": differential_records[:MAX_CELLS],
             "claim_status": "not-a-finding",
         })
@@ -768,6 +809,12 @@ def _run_s4_runtime_lab_core(
         status["replay_statuses"].append(item["replay"].get("status"))
         status["differential_statuses"].append(
             item["differential"].get("status"))
+        comparison = item.get("comparison") or {}
+        if comparison:
+            status.setdefault("comparison_statuses", []).append(
+                comparison.get("status", "unobserved"))
+            status.setdefault("comparison_ids", []).append(
+                comparison.get("comparison_id", ""))
         lane = (item["fixture"].get("variant_context") or {}).get("lane")
         if lane:
             lane_counts = status.setdefault("variant_lane_counts", {})
@@ -782,6 +829,7 @@ def _run_s4_runtime_lab_core(
         "fixture_count": len(rows),
         "fixture_budget": options["max_fixtures"],
         "fixture_budget_truncated": work_item_count > len(work_items),
+        "comparison_contracts": _unique_comparison_contracts(rows),
         "candidate_status": candidate_status,
         "fixtures": rows,
         "claim_status": "not-a-finding",
@@ -802,8 +850,16 @@ def _runtime_lab_gap(status: str, options: Dict[str, Any],
         "safe_modes": options["safe_modes"],
         "version_count": len(versions),
         "fixture_count": 0,
+        "fixture_budget": options["max_fixtures"],
+        "fixture_budget_truncated": False,
         "candidate_status": {},
         "fixtures": [],
+        "comparison_contracts": [
+            contract for contract in (
+                build_comparison_contract(candidate, versions)
+                for candidate in candidates if isinstance(candidate, dict)
+            ) if contract
+        ][:16],
         "service_lifecycle": service_record,
         "claim_status": "not-a-finding",
     }
@@ -902,12 +958,22 @@ def merge_runtime_lab_artifacts(artifacts: Iterable[Dict[str, Any]],
     statuses = []
     configurations = []
     service_lifecycles = []
+    comparison_contracts: Dict[str, Dict[str, Any]] = {}
+    fixture_budget = 0
+    fixture_budget_truncated = False
     for item in items:
         fixtures.extend(item.get("fixtures", []) or [])
         try:
             replay_runs = max(replay_runs, int(item.get("replay_runs", 0) or 0))
         except (TypeError, ValueError):
             pass
+        try:
+            fixture_budget = max(fixture_budget,
+                                 int(item.get("fixture_budget", 0) or 0))
+        except (TypeError, ValueError):
+            pass
+        fixture_budget_truncated = (fixture_budget_truncated
+                                    or bool(item.get("fixture_budget_truncated")))
         try:
             versions = max(versions, int(item.get("version_count", 0) or 0))
         except (TypeError, ValueError):
@@ -917,6 +983,10 @@ def merge_runtime_lab_artifacts(artifacts: Iterable[Dict[str, Any]],
             configurations.append(item["configuration"])
         if isinstance(item.get("service_lifecycle"), dict):
             service_lifecycles.append(item["service_lifecycle"])
+        for contract in item.get("comparison_contracts") or []:
+            normalized = normalize_comparison_contract(contract)
+            if normalized:
+                comparison_contracts[normalized["comparison_id"]] = normalized
         for cid, status in (item.get("candidate_status") or {}).items():
             candidate_status[str(cid)] = status
     if not items:
@@ -935,6 +1005,9 @@ def merge_runtime_lab_artifacts(artifacts: Iterable[Dict[str, Any]],
         "replay_runs": replay_runs,
         "version_count": versions,
         "fixture_count": len(fixtures),
+        "fixture_budget": fixture_budget,
+        "fixture_budget_truncated": fixture_budget_truncated,
+        "comparison_contracts": list(comparison_contracts.values())[:16],
         "candidate_status": candidate_status,
         "fixtures": fixtures,
         "configuration": configurations[0] if configurations else {},

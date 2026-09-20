@@ -59,6 +59,14 @@ environment-gap lane is still only a request to observe a gap: runner failure,
 missing preconditions, and safe-equivalent behavior remain separate runtime
 outcomes.
 
+For candidates with multiple configured versions or patch metadata, S2 also
+emits `comparison-orchestration-v1`. S4 binds the comparison to the same
+fixture and lane, classifies actual paired cells as bucket change, signature
+drift, same observation, or inconclusive, and keeps source-revision builds and
+sibling paths explicitly unexecuted when no operator-supplied artifact exists.
+A patch reference is never treated as a runtime result; a missing old or fixed
+runtime is an environment gap rather than evidence that the fix works.
+
 ## Two operating modes
 
 | Mode | Reasoning | Setup | Typical use |

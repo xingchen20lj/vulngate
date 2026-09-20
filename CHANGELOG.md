@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- S2/S4 now carry `comparison-orchestration-v1` for bounded cross-version and
+  fix-completeness research. Configured version pairs are compared on the same
+  fixture/lane, read-only patch parent/fixed references remain explicit
+  build-required arms, and sibling hints remain pending until a matching lane
+  runs. S4 distinguishes bucket changes, signature-only drift, missing runtime
+  cells, and unexecuted source/sibling arms; S8 retains the bounded comparison
+  state as research-only memory; all comparison output remains `not-a-finding`.
+
 - S4 runtime research now consumes the shared surface plan through
   `surface-variant-fixture-v1`. Within the configured fixture budget, each
   selected Web/protocol/cloud/mobile/native variant expands into positive,

@@ -93,6 +93,29 @@ _GAP_STATUSES = frozenset({
 })
 _DIFFERENCE_PREFIXES = ("difference-observed", "difference-with-inconclusive")
 
+# Comparison summaries are research context, not a second finding channel.
+# Keep their durable representation narrower than the S4 artifact so a future
+# producer cannot smuggle arbitrary payloads, commands, or source prose into
+# cross-round prompts.
+_COMPARISON_STATUSES = frozenset({
+    "difference-observed", "signature-drift", "inconclusive",
+    "same-observation", "unobserved",
+})
+_COMPARISON_OBSERVATION_STATUSES = frozenset({
+    "bucket-difference", "signature-drift", "same-observation",
+    "environment-gap", "inconclusive",
+})
+_COMPARISON_REASON_CODES = frozenset({
+    "bucket-changed", "signature-changed", "bucket-and-signature-match",
+    "cell-unavailable-or-gated", "missing-comparison-cell",
+})
+_COMPARISON_REF_RE = re.compile(r"^[0-9a-f]{7,64}$", re.I)
+_COMPARISON_ID_RE = re.compile(r"^cmp-[0-9a-f]{20}$")
+_COMPARISON_VARIANTS = frozenset({
+    "alternate-codec", "boundary-variant", "production-path", "multi-file",
+    "state-variant", "method-body", "lifecycle-variant", "identity-boundary",
+})
+
 # S3 residuals are deliberately reduced to a small vocabulary.  A residual's
 # free-form reason or probe plan may contain payloads, commands, or source
 # prose, so durable memory keeps only a category, a digest, and a boolean that
@@ -681,6 +704,118 @@ def _runtime_context(runtime_lab: Any, candidate_id: str = "") -> Dict[str, Any]
     return context
 
 
+def _normalize_comparison_evidence(value: Any) -> Dict[str, Any]:
+    """Keep only bounded, non-finding comparison context in memory."""
+    if not isinstance(value, dict):
+        return {}
+    if _text(value.get("schema_version"), 60) != "comparison-orchestration-v1":
+        return {}
+    comparison_id = _text(value.get("comparison_id"), 40)
+    if not _COMPARISON_ID_RE.fullmatch(comparison_id):
+        return {}
+    out: Dict[str, Any] = {
+        "schema_version": "comparison-orchestration-v1",
+        "comparison_id": comparison_id,
+    }
+    status = _text(value.get("status"), 40)
+    if status in _COMPARISON_STATUSES:
+        out["status"] = status
+    primary_version = _text(value.get("primary_version"), 80)
+    if primary_version:
+        out["primary_version"] = primary_version
+    for key in ("observed_count", "inconclusive_count"):
+        if value.get(key) is not None:
+            out[key] = _safe_int(value.get(key), 0, 0, 128)
+
+    observations: List[Dict[str, Any]] = []
+    for row in value.get("version_observations") or []:
+        if not isinstance(row, dict):
+            continue
+        observation_status = _text(row.get("status"), 40)
+        reason_code = _text(row.get("reason_code"), 60)
+        before = _text(row.get("before"), 80)
+        after = _text(row.get("after"), 80)
+        if (observation_status not in _COMPARISON_OBSERVATION_STATUSES
+                or reason_code not in _COMPARISON_REASON_CODES
+                or not before or not after):
+            continue
+        observations.append({
+            "before": before,
+            "after": after,
+            "safe_mode": bool(row.get("safe_mode", False)),
+            "status": observation_status,
+            "reason_code": reason_code,
+            "claim_status": MEMORY_CLAIM_STATUS,
+        })
+        if len(observations) >= 16:
+            break
+    out["version_observations"] = observations
+
+    source_rows: List[Dict[str, Any]] = []
+    for row in value.get("source_revision_observations") or []:
+        if not isinstance(row, dict):
+            continue
+        role = _text(row.get("role"), 16)
+        ref = _text(row.get("ref"), 80).lower()
+        if (role not in {"before", "after"}
+                or not _COMPARISON_REF_RE.fullmatch(ref)):
+            continue
+        source_rows.append({
+            "role": role,
+            "ref": ref,
+            "status": "not-executed",
+            "reason_code": "source-revision-build-required",
+            "claim_status": MEMORY_CLAIM_STATUS,
+        })
+        if len(source_rows) >= 2:
+            break
+    out["source_revision_observations"] = source_rows
+
+    sibling_rows: List[Dict[str, Any]] = []
+    seen_variants = set()
+    for row in value.get("sibling_observations") or []:
+        if not isinstance(row, dict):
+            continue
+        variant = _text(row.get("variant"), 80).lower()
+        if variant not in _COMPARISON_VARIANTS or variant in seen_variants:
+            continue
+        seen_variants.add(variant)
+        sibling_rows.append({
+            "variant": variant,
+            "status": "not-executed",
+            "reason_code": "requires-sibling-lane",
+            "claim_status": MEMORY_CLAIM_STATUS,
+        })
+        if len(sibling_rows) >= 8:
+            break
+    out["sibling_observations"] = sibling_rows
+    out["claim_status"] = MEMORY_CLAIM_STATUS
+    return out
+
+
+def _comparison_probe_hints(comparison: Dict[str, Any]) -> List[str]:
+    """Turn comparison state into bounded next actions without verdicts."""
+    status = comparison.get("status")
+    hints: List[str] = []
+    if status == "difference-observed":
+        hints.append("保留同一 fixture/lane 做最小复现；版本差异不等于漏洞")
+    elif status == "inconclusive":
+        hints.append("先补齐 comparison cell 或历史构建，不把缺口解释为修复")
+    elif status == "signature-drift":
+        hints.append("区分签名漂移与行为变化，补语义/typed-effect 证据")
+    elif status == "same-observation":
+        hints.append("版本行为一致；继续补 source→sink 与影响证据，不视为安全结论")
+    for row in comparison.get("source_revision_observations") or []:
+        if isinstance(row, dict) and row.get("status") == "not-executed":
+            hints.append("补对应受控历史构建，区分 patch metadata 与实际行为")
+            break
+    for row in comparison.get("sibling_observations") or []:
+        if isinstance(row, dict) and row.get("status") == "not-executed":
+            hints.append("补对应 sibling lane，避免把未覆盖变体当作已排除")
+            break
+    return _bounded_strings(hints, MAX_HINTS, 220)
+
+
 def _fixture_event(item: Dict[str, Any], round_no: int,
                    fixture_index: int = 0,
                    runtime_context: Optional[Dict[str, Any]] = None
@@ -690,6 +825,10 @@ def _fixture_event(item: Dict[str, Any], round_no: int,
     differential = item.get("differential") or {}
     reproduces = item.get("reproduces_expected")
     state, hints = _runtime_state(replay, differential, reproduces)
+    comparison = _normalize_comparison_evidence(item.get("comparison"))
+    if comparison:
+        hints = _bounded_strings(
+            list(hints) + _comparison_probe_hints(comparison), MAX_HINTS, 220)
     differences = []
     for diff in differential.get("differences") or []:
         if not isinstance(diff, dict):
@@ -719,6 +858,8 @@ def _fixture_event(item: Dict[str, Any], round_no: int,
         "reproduces_expected": reproduces if isinstance(reproduces, bool) else None,
         "authz_fixture_id": _text(fixture.get("authz_fixture_id"), 80),
     }
+    if comparison:
+        evidence["comparison"] = comparison
     context = dict(runtime_context or {})
     authz_fixture_id = evidence["authz_fixture_id"]
     if authz_fixture_id:
@@ -1317,6 +1458,9 @@ def _normalize_evidence(value: Any) -> Dict[str, Any]:
     out["differences"] = differences
     out["summary_markers"] = _bounded_strings(
         value.get("summary_markers"), 8, 180)
+    comparison = _normalize_comparison_evidence(value.get("comparison"))
+    if comparison:
+        out["comparison"] = comparison
     context = _normalize_runtime_context(value.get("runtime_context"))
     if context:
         out["runtime_context"] = context

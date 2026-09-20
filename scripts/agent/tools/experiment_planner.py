@@ -19,6 +19,7 @@ from .redaction import redact_text
 from .surface_variants import (build_surface_variant_plan,
                                build_variant_fixture_plan,
                                normalize_surface_variant_plan)
+from .variant_comparisons import build_comparison_contract
 
 
 PLANNER_VERSION = "experiment-planner-v1"
@@ -288,6 +289,8 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
         )
     variant_fixture_plan = build_variant_fixture_plan(
         surface_variant_plan, candidate_id)
+    comparison_contract = build_comparison_contract(
+        candidate, normalized_versions)
     preconditions = [
         redact_text(item)
         for item in _list(
@@ -405,6 +408,8 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
             ["a fix commit by itself is not runtime evidence",
              "missing old runtime is precondition-unavailable, not fixed"],
             version_pairs=version_pairs,
+            comparison_id=(comparison_contract.get("comparison_id", "")
+                           if comparison_contract else ""),
         ))
 
     if effect:
@@ -436,6 +441,7 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
         "residual_contracts": residual_contracts,
         "surface_variant_plan": surface_variant_plan,
         "variant_fixture_plan": variant_fixture_plan,
+        "comparison_contract": comparison_contract,
         "plans": plans,
         "provenance": {
             "producer": "experiment-planner",

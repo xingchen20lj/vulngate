@@ -485,6 +485,8 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
                 "surface_variant_plan", {}),
             "variant_fixture_plan": research_plan.get(
                 "variant_fixture_plan", {}),
+            "comparison_contract": research_plan.get(
+                "comparison_contract", {}),
             "research_strategy": research_plan.get("strategy_tags", []),
         })
     ctx.store.write_artifact("S2", "candidate-matrix.json", matrix)

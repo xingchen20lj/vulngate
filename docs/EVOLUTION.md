@@ -219,6 +219,15 @@ fixture budget can truncate work, and that truncation is explicit rather than
 silently presenting partial coverage as complete. The lane remains a planning
 contract until the PoC emits actual evidence.
 
+For multi-version or fix-completeness candidates, the next deterministic layer
+is `comparison-orchestration-v1`. It binds configured before/after version
+pairs, read-only parent/fixed revision references, and canonical sibling hints
+to the same fixture/lane. S4 classifies only actual paired summaries as bucket
+change, signature drift, same observation, or inconclusive; source revision
+arms remain explicitly build-required and sibling arms remain pending until
+their lane executes. This makes patch-diff reasoning actionable without
+pretending that a commit or an unavailable historical build is evidence.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

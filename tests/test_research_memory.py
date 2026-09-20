@@ -265,6 +265,49 @@ class ResearchMemoryTests(unittest.TestCase):
         self.assertNotIn("secret=do-not-copy", encoded)
         self.assertNotIn("raw_url", encoded)
 
+    def test_comparison_context_is_bounded_and_persisted_as_research_only(self):
+        c = candidate()
+        lab = lab_for("C1")
+        lab["fixtures"][0]["comparison"] = {
+            "schema_version": "comparison-orchestration-v1",
+            "comparison_id": "cmp-" + "a" * 20,
+            "status": "inconclusive",
+            "primary_version": "v2",
+            "observed_count": 1,
+            "inconclusive_count": 2,
+            "version_observations": [{
+                "before": "v1", "after": "v2", "safe_mode": False,
+                "status": "bucket-difference", "reason_code": "bucket-changed",
+                "raw_payload": "secret=do-not-copy",
+            }],
+            "source_revision_observations": [{
+                "role": "before", "ref": "deadbeef",
+                "status": "not-executed",
+            }],
+            "sibling_observations": [{
+                "variant": "alternate-codec", "status": "not-executed",
+            }],
+            "raw_command": "curl --data @payload",
+        }
+        delta = build_round_memory([c], {"C1": {}}, {"C1": "候选"}, lab, 5)
+        event = delta["entries"][0]["events"][0]
+        comparison = event["evidence"]["comparison"]
+        self.assertEqual("inconclusive", comparison["status"])
+        self.assertEqual("cmp-" + "a" * 20, comparison["comparison_id"])
+        self.assertEqual("bucket-difference",
+                         comparison["version_observations"][0]["status"])
+        self.assertEqual("source-revision-build-required",
+                         comparison["source_revision_observations"][0]["reason_code"])
+        self.assertEqual("requires-sibling-lane",
+                         comparison["sibling_observations"][0]["reason_code"])
+        self.assertIn("不把缺口解释为修复", " ".join(
+            event["next_probe_hints"]))
+        self.assertEqual("not-a-finding", comparison["claim_status"])
+        encoded = json.dumps(delta, ensure_ascii=False)
+        self.assertNotIn("do-not-copy", encoded)
+        self.assertNotIn("curl", encoded)
+        self.assertNotIn("raw_command", encoded)
+
     def test_merge_is_idempotent_and_preserves_old_events(self):
         c = candidate()
         first = build_round_memory([c], {"C1": {}}, {"C1": "候选"},

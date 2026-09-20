@@ -51,6 +51,11 @@ S4 runtime lab 会在配置的 fixture 预算内把规范化计划展开为
 一起落盘。预算不足时 artifact 会显式记录截断。environment-gap 仍只是“需要观察缺口”的要求；runner 失败、
 前置条件缺失和安全等价行为仍按不同的真实运行结果处理。
 
+对于存在多个配置版本或修复元数据的候选，S2 还会生成
+`comparison-orchestration-v1`。S4 将比较绑定到同一个 fixture 和 lane，并把真实配对 cell 分类为 bucket
+变化、仅签名漂移、相同观测或 inconclusive；如果没有操作者提供的构建产物，源码 revision 和同族路径会明确
+保持未执行。补丁引用不是运行时结果；旧版本或修复版本缺失时是环境缺口，而不是“修复有效”的证据。
+
 S1 中包含授权边界和危险 Sink 的启发式 Source→Sink 路径会写入
 `composite-chain-candidates.json`，并在 S2 进入与模型候选、控制图候选、同族差分候选相同的调度池。它们始终保留
 `heuristic-nearby` / `requires_manual_dataflow=true`，只能作为审计和 PoC
