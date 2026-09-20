@@ -26,6 +26,7 @@ from .authz import (assert_authz_observations, authz_env, authz_fixture_id,
 from .experiment import (experiment_metadata, normalize_capability_contract,
                          normalize_experiment, normalize_residual_contracts,
                          sequence_trace_status)
+from .surface_variants import normalize_variant_fixture_context
 
 
 RUNNER_POLICY_VERSION = "loopback-only-v2"
@@ -102,6 +103,9 @@ class MatrixCell:
     capability_contract: Dict[str, Any] = field(default_factory=dict)
     # S3 residual closure checklist; also never proof that a residual exists.
     residual_contracts: List[Dict[str, Any]] = field(default_factory=list)
+    # Surface-specific fixture/state-machine context.  This is a bounded
+    # experiment identity, never a payload or a runtime observation.
+    variant_context: Dict[str, Any] = field(default_factory=dict)
     experiment_warnings: List[str] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
@@ -112,12 +116,14 @@ class MatrixCell:
             self.capability_contract)
         self.residual_contracts = normalize_residual_contracts(
             self.residual_contracts)
+        self.variant_context = normalize_variant_fixture_context(
+            self.variant_context)
 
 
 def _cell_experiment_env(cell: MatrixCell) -> Dict[str, str]:
     """Expose only bounded experiment metadata to a PoC process."""
     contract = normalize_capability_contract(cell.capability_contract)
-    return {
+    env = {
         "VULNGATE_SEQUENCE": json.dumps(cell.sequence, ensure_ascii=False),
         "VULNGATE_CONCURRENCY": str(cell.concurrency),
         "VULNGATE_AVAILABILITY_PROBE": (
@@ -140,6 +146,22 @@ def _cell_experiment_env(cell: MatrixCell) -> Dict[str, str]:
             normalize_residual_contracts(cell.residual_contracts)
         ], ensure_ascii=False),
     }
+    variant = normalize_variant_fixture_context(cell.variant_context)
+    if variant:
+        env.update({
+            "VULNGATE_VARIANT_SURFACE": variant["surface"],
+            "VULNGATE_VARIANT_ID": variant["variant_id"],
+            "VULNGATE_VARIANT_LANE": variant["lane"],
+            "VULNGATE_VARIANT_FIXTURE": variant["fixture_key"],
+            "VULNGATE_VARIANT_FAMILY": variant["family"],
+            "VULNGATE_VARIANT_STATE_STEPS": json.dumps(
+                variant["state_steps"], ensure_ascii=False),
+            "VULNGATE_VARIANT_OBSERVATIONS": json.dumps(
+                variant["required_observations"], ensure_ascii=False),
+            "VULNGATE_VARIANT_FALSIFIERS": json.dumps(
+                variant["falsifiers"], ensure_ascii=False),
+        })
+    return env
 
 
 def _cell_metadata(cell: MatrixCell) -> Dict[str, Any]:
@@ -152,6 +174,8 @@ def _cell_metadata(cell: MatrixCell) -> Dict[str, Any]:
         "authz_fixture_id": authz_fixture_id(cell.authz),
         "capability_contract": meta["capability_contract"],
         "residual_contracts": meta["residual_contracts"],
+        "variant_context": normalize_variant_fixture_context(
+            cell.variant_context),
         "experiment": meta,
     }
 

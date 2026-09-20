@@ -17,6 +17,7 @@ from .authz import normalize_authz_case, normalize_authz_cases
 from .experiment import capability_contract_from_candidate
 from .redaction import redact_text
 from .surface_variants import (build_surface_variant_plan,
+                               build_variant_fixture_plan,
                                normalize_surface_variant_plan)
 
 
@@ -285,6 +286,8 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
             candidate.get("attack_class") or candidate.get("category"),
             candidate.get("variant") or candidate.get("variants"),
         )
+    variant_fixture_plan = build_variant_fixture_plan(
+        surface_variant_plan, candidate_id)
     preconditions = [
         redact_text(item)
         for item in _list(
@@ -432,6 +435,7 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
         "capability_contract": capability_contract,
         "residual_contracts": residual_contracts,
         "surface_variant_plan": surface_variant_plan,
+        "variant_fixture_plan": variant_fixture_plan,
         "plans": plans,
         "provenance": {
             "producer": "experiment-planner",

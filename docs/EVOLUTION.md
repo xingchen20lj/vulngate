@@ -209,6 +209,16 @@ machine, route/parser, or native method-body follow-up is not reduced to a
 free-form prompt suggestion. The plan remains a research checklist; only
 executed S4 observations can affect gates or conclusions.
 
+The next layer is `surface-variant-fixture-v1`. The runtime lab expands the
+normalized lanes into bounded fixture/state-machine contexts, preserving fixed
+state-step identifiers and opaque fixture keys. Each replay and version/SafeMode
+comparison receives the selected surface, variant, lane, and observation
+requirements through controlled `VULNGATE_VARIANT_*` variables; the artifact
+records the same context without raw arguments or process output. A configured
+fixture budget can truncate work, and that truncation is explicit rather than
+silently presenting partial coverage as complete. The lane remains a planning
+contract until the PoC emits actual evidence.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

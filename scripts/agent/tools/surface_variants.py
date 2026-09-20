@@ -15,11 +15,14 @@ the S2 experiment planner, and the S4 PoC writer.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import Counter
-from typing import Any, Dict, Iterable, List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Sequence
 
 
 SURFACE_VARIANT_SCHEMA_VERSION = "surface-variant-plan-v1"
+VARIANT_FIXTURE_SCHEMA_VERSION = "surface-variant-fixture-v1"
 SURFACES = frozenset({"web", "protocol", "cloud", "mobile", "native"})
 TARGET_TYPE_TO_SURFACE = {
     "web-app": "web",
@@ -46,7 +49,45 @@ MAX_LANES = MAX_VARIANTS * len(LANES)
 MAX_SIGNALS = 6
 MAX_FALSIFIERS = 5
 MAX_TEXT = 96
+MAX_STATE_STEPS = 8
 CLAIM_STATUS = "not-a-finding"
+
+
+# These are state identifiers, not requests, payloads, commands, or runtime
+# results.  Keeping them in the deterministic library means a malformed plan
+# cannot smuggle arbitrary process instructions into an S4 environment.
+_STATE_STEPS: Dict[str, Sequence[str]] = {
+    "web-tenant-object-boundary":
+        ("entry", "principal", "tenant", "object", "sink"),
+    "web-route-middleware-default":
+        ("route", "middleware", "handler", "sink"),
+    "web-egress-allowlist-redirect":
+        ("entry", "destination", "allowlist", "redirect", "sink"),
+    "protocol-frame-state-order":
+        ("connect", "frame", "state", "replay", "response"),
+    "protocol-parser-type-boundary":
+        ("frame", "length", "type", "parser", "effect"),
+    "protocol-concurrency-availability":
+        ("baseline", "concurrent", "resource", "availability"),
+    "cloud-metadata-identity-boundary":
+        ("identity", "metadata", "credential", "policy", "effect"),
+    "cloud-policy-delegation-boundary":
+        ("principal", "policy", "delegation", "resource", "effect"),
+    "cloud-provider-emulator-replay":
+        ("provider", "identity", "request", "response", "effect"),
+    "mobile-deep-link-lifecycle":
+        ("cold-start", "deep-link", "resume", "authorization", "sink"),
+    "mobile-webview-origin-bridge":
+        ("webview", "origin", "bridge", "ipc", "sink"),
+    "mobile-storage-permission-lifecycle":
+        ("install", "permission", "storage", "lifecycle", "read"),
+    "native-url-scheme-method-body":
+        ("scheme", "selector", "method", "body", "effect"),
+    "native-webview-ipc-origin":
+        ("origin", "message", "ipc", "sink", "effect"),
+    "native-symbol-method-body-runtime":
+        ("symbol", "method-body", "instrumentation", "runtime", "effect"),
+}
 
 
 def _text(value: Any, limit: int = MAX_TEXT) -> str:
@@ -444,15 +485,17 @@ def _variant_score(template: Mapping[str, Any], action: str,
 def _normalized_template(template: Mapping[str, Any], lane: str
                          ) -> Dict[str, Any]:
     raw = template.get(lane) if isinstance(template.get(lane), Mapping) else {}
+    variant_id = _text(template.get("variant_id"), MAX_TEXT)
     signals = [item for item in _bounded(
         raw.get("required_observations"), MAX_SIGNALS, MAX_TEXT)
                if item in OBSERVATION_SIGNALS]
     falsifiers = _bounded(raw.get("falsifiers"), MAX_FALSIFIERS, MAX_TEXT)
     return {
-        "variant_id": _text(template.get("variant_id"), MAX_TEXT),
+        "variant_id": variant_id,
         "family": _text(template.get("family"), MAX_TEXT),
         "axis": _text(template.get("axis"), MAX_TEXT),
         "lane": lane,
+        "state_steps": list(_STATE_STEPS.get(variant_id, ()))[:MAX_STATE_STEPS],
         "required_observations": signals,
         "falsifiers": falsifiers,
         "expected_observation": _text(raw.get("expected_observation"), 48),
@@ -583,3 +626,119 @@ def normalize_surface_variant_plan(raw: Any) -> Dict[str, Any]:
         },
         "claim_status": CLAIM_STATUS,
     }
+
+
+def _canonical(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), default=str)
+
+
+def _fixture_digest(value: Any) -> str:
+    return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
+
+
+def normalize_variant_fixture_context(raw: Any) -> Dict[str, Any]:
+    """Return one allowlisted, credential-free fixture/state context.
+
+    The caller may pass a row loaded from an artifact, so the row is rebuilt
+    from the deterministic template library instead of trusting its free-form
+    observations, state steps, or falsifiers.
+    """
+    if not isinstance(raw, Mapping):
+        return {}
+    surface_value = _surface(raw.get("surface"), raw.get("target_type"))
+    variant_id = _text(raw.get("variant_id"), MAX_TEXT)
+    lane = _text(raw.get("lane"), 24)
+    template = next(
+        (row for row in _LIBRARY.get(surface_value, [])
+         if _text(row.get("variant_id"), MAX_TEXT) == variant_id),
+        None,
+    )
+    if template is None or lane not in LANES:
+        return {}
+    canonical = _normalized_template(template, lane)
+    fixture_key = _text(raw.get("fixture_key"), 80)
+    if not (fixture_key.startswith("vf-")
+            and len(fixture_key) == 23
+            and all(char in "0123456789abcdef" for char in fixture_key[3:])):
+        fixture_key = "vf-" + _fixture_digest({
+            "surface": surface_value,
+            "variant_id": variant_id,
+            "lane": lane,
+        })[:20]
+    return {
+        "fixture_key": fixture_key,
+        "surface": surface_value,
+        "variant_id": canonical["variant_id"],
+        "family": canonical["family"],
+        "axis": canonical["axis"],
+        "lane": canonical["lane"],
+        "state_steps": list(canonical["state_steps"]),
+        "required_observations": list(canonical["required_observations"]),
+        "falsifiers": list(canonical["falsifiers"]),
+        "expected_observation": canonical["expected_observation"],
+        "execution_mode": "gap-check" if lane == "environment-gap" else "probe",
+        "claim_status": CLAIM_STATUS,
+    }
+
+
+def build_variant_fixture_plan(surface_plan: Any,
+                               candidate_id: Any = "") -> Dict[str, Any]:
+    """Expand a surface plan into bounded lane-specific fixture contexts.
+
+    This is still a plan: ``fixture_key`` identifies the intended experiment,
+    while the runner must supply real observations before any S4 summary can
+    use them.  Each selected variant retains all three lanes.
+    """
+    plan = normalize_surface_variant_plan(surface_plan)
+    if not plan:
+        return {}
+    candidate_value = _text(candidate_id, 120)
+    fixtures: List[Dict[str, Any]] = []
+    for row in plan.get("lanes") or []:
+        if not isinstance(row, Mapping):
+            continue
+        seed = {
+            "candidate_id": candidate_value,
+            "surface": plan.get("surface", ""),
+            "variant_id": row.get("variant_id", ""),
+            "lane": row.get("lane", ""),
+        }
+        context = normalize_variant_fixture_context({
+            **dict(row),
+            "surface": plan.get("surface", ""),
+            "fixture_key": "vf-" + _fixture_digest(seed)[:20],
+        })
+        if context:
+            fixtures.append(context)
+        if len(fixtures) >= MAX_LANES:
+            break
+    counts = Counter(row.get("lane") for row in fixtures)
+    return {
+        "schema_version": VARIANT_FIXTURE_SCHEMA_VERSION,
+        "surface": plan.get("surface", ""),
+        "action": plan.get("action", ""),
+        "fixtures": fixtures,
+        "summary": {
+            "fixture_count": len(fixtures),
+            "lane_counts": dict(sorted(counts.items())),
+            "claim_status": CLAIM_STATUS,
+        },
+        "claim_status": CLAIM_STATUS,
+    }
+
+
+def normalize_variant_fixture_plan(raw: Any,
+                                   surface_plan: Any = None,
+                                   candidate_id: Any = "") -> Dict[str, Any]:
+    """Rebuild a fixture plan from its trusted surface-plan identity.
+
+    ``surface_plan`` is preferred.  The fallback accepts a nested surface plan
+    for callers loading a planner artifact, but never trusts raw fixture rows.
+    """
+    source = surface_plan
+    if source is None and isinstance(raw, Mapping):
+        source = raw.get("surface_variant_plan")
+        if source is None and raw.get("schema_version") == SURFACE_VARIANT_SCHEMA_VERSION:
+            source = raw
+    return build_variant_fixture_plan(source, candidate_id)

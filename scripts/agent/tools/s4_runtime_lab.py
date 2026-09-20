@@ -27,6 +27,8 @@ from .redaction import redact_text
 from .runtime_lab import (LAB_SCHEMA_VERSION, MAX_CELLS,
                           summarize_replay, summarize_version_differential)
 from .service_lifecycle import ServiceLifecycle
+from .surface_variants import (normalize_variant_fixture_context,
+                               normalize_variant_fixture_plan)
 
 
 MAX_S4_FIXTURES = 16
@@ -88,6 +90,8 @@ def _safe_cell_context(cell: MatrixCell) -> Dict[str, Any]:
         "concurrency": int(cell.concurrency),
         "availability_probe": bool(cell.availability_probe),
         "capability_digest": _digest(cell.capability_contract),
+        "variant_fixture_key": normalize_variant_fixture_context(
+            cell.variant_context).get("fixture_key", ""),
     }
 
 
@@ -111,11 +115,15 @@ def _spec_identity(spec: Any, kind: str) -> Dict[str, str]:
 
 def build_s4_fixture(candidate: Dict[str, Any], spec: Any, cell: MatrixCell,
                      kind: str, spec_index: int,
-                     template_key: Optional[str] = None) -> Dict[str, Any]:
+                     template_key: Optional[str] = None,
+                     variant_context: Optional[Dict[str, Any]] = None
+                     ) -> Dict[str, Any]:
     """Build a stable ordinary-S4 fixture without persisting raw arguments."""
     candidate_id = str(candidate.get("candidate_id", ""))
     spec_info = _spec_identity(spec, kind)
     context = _safe_cell_context(cell)
+    variant = normalize_variant_fixture_context(
+        variant_context if variant_context is not None else cell.variant_context)
     identity = {
         "kind": kind,
         "candidate_id": candidate_id,
@@ -152,6 +160,7 @@ def build_s4_fixture(candidate: Dict[str, Any], spec: Any, cell: MatrixCell,
         "sequence_digest": context["sequence_digest"],
         "concurrency": context["concurrency"],
         "availability_probe": context["availability_probe"],
+        "variant_context": variant,
         "claim_status": "not-a-finding",
     }
     return fixture
@@ -312,11 +321,15 @@ def build_runtime_context_snapshot(
     }
 
 
-def _clone_cell(cell: MatrixCell, version: str, safe_mode: bool) -> MatrixCell:
+def _clone_cell(cell: MatrixCell, version: str, safe_mode: bool,
+                *, features: Optional[List[str]] = None,
+                sequence: Optional[List[str]] = None,
+                variant_context: Optional[Dict[str, Any]] = None
+                ) -> MatrixCell:
     return MatrixCell(
         version=version,
         safe_mode=safe_mode,
-        features=list(cell.features),
+        features=list(cell.features if features is None else features),
         precondition=cell.precondition,
         args=list(cell.args),
         jvm=dict(cell.jvm),
@@ -325,10 +338,13 @@ def _clone_cell(cell: MatrixCell, version: str, safe_mode: bool) -> MatrixCell:
         required_runtime=cell.required_runtime,
         java_bin=cell.java_bin,
         java_home=cell.java_home,
-        sequence=list(cell.sequence),
+        sequence=list(cell.sequence if sequence is None else sequence),
         concurrency=cell.concurrency,
         availability_probe=cell.availability_probe,
         capability_contract=dict(cell.capability_contract),
+        residual_contracts=list(cell.residual_contracts),
+        variant_context=(dict(cell.variant_context)
+                         if variant_context is None else variant_context),
     )
 
 
@@ -337,6 +353,54 @@ def _cell_groups(cells: Iterable[MatrixCell]) -> Dict[str, List[MatrixCell]]:
     for cell in cells:
         grouped[_template_key(cell)].append(cell)
     return grouped
+
+
+def _variant_contexts(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Resolve the candidate's trusted S2 plan into bounded S4 contexts."""
+    plan = candidate.get("experiment_plan")
+    if not isinstance(plan, dict):
+        return []
+    fixture_plan = normalize_variant_fixture_plan(
+        plan.get("variant_fixture_plan"),
+        plan.get("surface_variant_plan"), candidate.get("candidate_id", ""))
+    rows = []
+    for row in fixture_plan.get("fixtures") or []:
+        context = normalize_variant_fixture_context(row)
+        if context:
+            rows.append(context)
+    return rows
+
+
+def _merge_state_steps(base: Sequence[str], variant: Sequence[str]) -> List[str]:
+    result: List[str] = []
+    for value in list(base) + list(variant):
+        item = _text(value, 80)
+        if item and item not in result:
+            result.append(item)
+        if len(result) >= 16:
+            break
+    return result
+
+
+def _variant_cell(base: MatrixCell,
+                  context: Dict[str, Any]) -> MatrixCell:
+    """Make a lane-specific cell while preserving the base preconditions."""
+    variant = normalize_variant_fixture_context(context)
+    if not variant:
+        return _clone_cell(base, base.version, bool(base.safe_mode))
+    features = list(base.features)
+    for marker in (
+            "surface=" + variant["surface"],
+            "variant=" + variant["variant_id"],
+            "lane=" + variant["lane"]):
+        if marker not in features:
+            features.append(marker)
+    return _clone_cell(
+        base, base.version, bool(base.safe_mode),
+        features=features[:16],
+        sequence=_merge_state_steps(base.sequence, variant["state_steps"]),
+        variant_context=variant,
+    )
 
 
 def _choose_base(cells: List[MatrixCell], primary_version: str) -> MatrixCell:
@@ -452,7 +516,9 @@ def _matrix_signature(row: Dict[str, Any]) -> str:
 
 
 def normalize_matrix_record(row: Dict[str, Any], fixture_id: str = "",
-                            lab_kind: str = "") -> Dict[str, Any]:
+                            lab_kind: str = "",
+                            variant_context: Optional[Dict[str, Any]] = None
+                            ) -> Dict[str, Any]:
     """Reduce one ordinary S4 cell to bounded lab evidence."""
     result = {
         "version": _text(row.get("version", ""), 80),
@@ -471,6 +537,11 @@ def normalize_matrix_record(row: Dict[str, Any], fixture_id: str = "",
         result["fixture_id"] = fixture_id
     if lab_kind:
         result["lab_kind"] = lab_kind
+    context = normalize_variant_fixture_context(
+        variant_context if variant_context is not None
+        else row.get("variant_context"))
+    if context:
+        result["variant_context"] = context
     return result
 
 
@@ -531,19 +602,31 @@ def _run_manifest(kind: str, runner: Any, spec: Any,
 
 
 def _decorate(rows: Iterable[Dict[str, Any]], fixture_id: str,
-              lab_kind: str) -> List[Dict[str, Any]]:
-    return [normalize_matrix_record(row, fixture_id, lab_kind)
-            for row in rows if isinstance(row, dict)]
+              lab_kind: str,
+              variant_context: Optional[Dict[str, Any]] = None
+              ) -> List[Dict[str, Any]]:
+    context = normalize_variant_fixture_context(variant_context)
+    decorated = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        normalized = normalize_matrix_record(row, fixture_id, lab_kind)
+        if context:
+            normalized["variant_context"] = context
+        decorated.append(normalized)
+    return decorated
 
 
 def _failure(version: str, safe_mode: bool, fixture_id: str,
-             lab_kind: str, error: Exception) -> List[Dict[str, Any]]:
+             lab_kind: str, error: Exception,
+             variant_context: Optional[Dict[str, Any]] = None
+             ) -> List[Dict[str, Any]]:
     return [normalize_matrix_record({
         "version": version,
         "safe_mode": safe_mode,
         "precondition": "none",
         "harness_error": "%s: %s" % (type(error).__name__, str(error)[:200]),
-    }, fixture_id, lab_kind)]
+    }, fixture_id, lab_kind, variant_context=variant_context)]
 
 
 def _run_s4_runtime_lab_core(
@@ -571,8 +654,15 @@ def _run_s4_runtime_lab_core(
     primary_version = versions[-1] if versions else ""
     templates = _templates(candidates, java_specs, shell_specs,
                            primary_version, options)
-    templates = templates[:options["max_fixtures"]]
-    if not templates:
+    work_items = []
+    for item in templates:
+        candidate = item[0]
+        contexts = _variant_contexts(candidate) or [{}]
+        for context in contexts:
+            work_items.append((*item, context))
+    work_item_count = len(work_items)
+    work_items = work_items[:options["max_fixtures"]]
+    if not work_items:
         return {
             "schema_version": LAB_SCHEMA_VERSION,
             "scope": "ordinary-s4",
@@ -580,30 +670,37 @@ def _run_s4_runtime_lab_core(
             "replay_runs": options["replay_runs"],
             "version_count": len(versions),
             "fixture_count": 0,
+            "fixture_budget": options["max_fixtures"],
+            "fixture_budget_truncated": False,
             "fixtures": [],
             "claim_status": "not-a-finding",
-        }
+    }
 
     java_runner = (JavaMatrixRunner(workspace, target, round_no, approval=approval)
-                   if any(item[2] == "java" for item in templates) else None)
+                   if any(item[2] == "java" for item in work_items) else None)
     shell_runner = (ShellMatrixRunner(workspace, target, round_no, approval=approval)
-                    if any(item[2] == "shell" for item in templates) else None)
+                    if any(item[2] == "shell" for item in work_items) else None)
     baseline_results = baseline_results or {}
     rows: List[Dict[str, Any]] = []
-    for candidate, spec, kind, spec_index, base, template_key in templates:
-        fixture = build_s4_fixture(candidate, spec, base, kind, spec_index,
-                                    template_key)
+    for (candidate, spec, kind, spec_index, base, template_key,
+         variant_context) in work_items:
+        variant_base = (_variant_cell(base, variant_context)
+                        if variant_context else base)
+        fixture = build_s4_fixture(
+            candidate, spec, variant_base, kind, spec_index, template_key,
+            variant_context=variant_context)
         fixture_id = fixture["fixture_id"]
         candidate_id = str(candidate.get("candidate_id", ""))
         selected_versions = versions or [str(base.version)]
-        primary = (str(base.version) if str(base.version) in selected_versions
+        primary = (str(variant_base.version)
+                   if str(variant_base.version) in selected_versions
                    else selected_versions[-1])
         replay_cells = [
-            _clone_cell(base, primary, bool(base.safe_mode))
+            _clone_cell(variant_base, primary, bool(variant_base.safe_mode))
             for _ in range(options["replay_runs"])
         ]
         differential_cells = [
-            _clone_cell(base, version, safe)
+            _clone_cell(variant_base, version, safe)
             for version in selected_versions for safe in options["safe_modes"]
         ]
         replay_id = "LAB-S4-REPLAY-" + fixture_id
@@ -617,22 +714,24 @@ def _run_s4_runtime_lab_core(
                 raise RuntimeError("runtime lab runner unavailable")
             replay_records = _decorate(
                 _run_manifest(kind, runner, replay_spec, jars_by_version),
-                fixture_id, "replay")
+                fixture_id, "replay", variant_context)
             diff_spec = _clone_spec(spec, kind, diff_id, differential_cells)
             differential_records = _decorate(
                 _run_manifest(kind, runner, diff_spec, jars_by_version),
-                fixture_id, "differential")
+                fixture_id, "differential", variant_context)
         except Exception as exc:  # preserve a typed lab gap, keep S4 usable
-            replay_records = _failure(primary, bool(base.safe_mode), fixture_id,
-                                      "replay", exc)
-            differential_records = _failure(primary, bool(base.safe_mode),
-                                            fixture_id, "differential", exc)
+            replay_records = _failure(
+                primary, bool(variant_base.safe_mode), fixture_id,
+                "replay", exc, variant_context)
+            differential_records = _failure(
+                primary, bool(variant_base.safe_mode), fixture_id,
+                "differential", exc, variant_context)
 
         replay = summarize_replay(replay_records)
         differential = summarize_version_differential(
             differential_records, primary)
         baseline = _baseline_row(baseline_results.get(candidate_id, []),
-                                 spec, kind, base)
+                                 spec, kind, variant_base)
         expected = (normalize_matrix_record(baseline)
                     if baseline is not None else {
                         "status": "unavailable",
@@ -669,6 +768,10 @@ def _run_s4_runtime_lab_core(
         status["replay_statuses"].append(item["replay"].get("status"))
         status["differential_statuses"].append(
             item["differential"].get("status"))
+        lane = (item["fixture"].get("variant_context") or {}).get("lane")
+        if lane:
+            lane_counts = status.setdefault("variant_lane_counts", {})
+            lane_counts[lane] = int(lane_counts.get(lane, 0)) + 1
     return {
         "schema_version": LAB_SCHEMA_VERSION,
         "scope": "ordinary-s4",
@@ -677,6 +780,8 @@ def _run_s4_runtime_lab_core(
         "safe_modes": options["safe_modes"],
         "version_count": len(versions),
         "fixture_count": len(rows),
+        "fixture_budget": options["max_fixtures"],
+        "fixture_budget_truncated": work_item_count > len(work_items),
         "candidate_status": candidate_status,
         "fixtures": rows,
         "claim_status": "not-a-finding",

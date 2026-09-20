@@ -11,13 +11,15 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from agent.orchestrator.config import TargetConfig  # noqa: E402
 from agent.orchestrator.stages import StageContext, run_s4  # noqa: E402
-from agent.tools.build import MatrixCell, POCSpec, ShellPOCSpec  # noqa: E402
+from agent.tools.build import (MatrixCell, POCSpec, ShellPOCSpec,
+                               _cell_experiment_env)  # noqa: E402
 from agent.tools.s4_runtime_lab import (  # noqa: E402
     build_s4_fixture,
     merge_runtime_lab_artifacts,
     normalize_matrix_record,
     run_s4_runtime_lab,
 )
+from agent.tools.surface_variants import build_surface_variant_plan  # noqa: E402
 
 
 class S4RuntimeLabTests(unittest.TestCase):
@@ -121,6 +123,81 @@ class S4RuntimeLabTests(unittest.TestCase):
         )
         self.assertEqual(artifact["status"], "disabled")
         self.assertEqual(artifact["claim_status"], "not-a-finding")
+
+    def test_surface_plan_expands_runtime_lab_into_three_lane_fixtures(self):
+        class FakeJavaRunner:
+            calls = []
+
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def run_manifest(self, specs, _jars):
+                spec = specs[0]
+                self.calls.append(spec)
+                return {spec.candidate_id: [{
+                    "candidate_id": spec.candidate_id,
+                    "poc_class": spec.class_name,
+                    "version": cell.version,
+                    "safe_mode": cell.safe_mode,
+                    "precondition": cell.precondition,
+                    "returncode": 0,
+                    "timed_out": False,
+                    "observations": {"PARSED": "ok"},
+                } for cell in spec.cells]}
+
+        surface_plan = build_surface_variant_plan(
+            "mobile", action="add-negative-control",
+            attack_class="webview origin bridge")
+        candidate = {
+            "candidate_id": "MOBILE-1",
+            "entry": "bridge",
+            "experiment_plan": {"surface_variant_plan": surface_plan},
+        }
+        cfg = TargetConfig(
+            name="variant-lab", discovery_date="2026-09-21",
+            runtime_lab={"max_fixtures": 3, "replay_runs": 1,
+                         "safe_modes": [False]},
+        )
+        base = MatrixCell(version="1.0", safe_mode=False,
+                          args=["--fixture", "fixed"])
+        spec = POCSpec(candidate_id="MOBILE-1", class_name="Probe",
+                       src="Probe.java", cells=[base])
+        FakeJavaRunner.calls = []
+        with tempfile.TemporaryDirectory() as td, patch(
+                "agent.tools.s4_runtime_lab.JavaMatrixRunner", FakeJavaRunner):
+            artifact = run_s4_runtime_lab(
+                Path(td), "variant-lab", 1, cfg, [candidate], [spec], [],
+                {"1.0": [Path("a.jar")]}, version_universe=["1.0"])
+
+        self.assertEqual("completed", artifact["status"])
+        self.assertEqual(3, artifact["fixture_count"])
+        self.assertEqual(
+            {"positive", "negative", "environment-gap"},
+            {(row["fixture"]["variant_context"] or {})["lane"]
+             for row in artifact["fixtures"]},
+        )
+        self.assertEqual(
+            {"positive": 1, "negative": 1, "environment-gap": 1},
+            artifact["candidate_status"]["MOBILE-1"]["variant_lane_counts"],
+        )
+        # Each lane is a real runner invocation with a distinct state-machine
+        # context; the plan still remains metadata and all rows are safe.
+        self.assertEqual(6, len(FakeJavaRunner.calls))
+        self.assertTrue(all(
+            spec.cells[0].variant_context.get("lane") in {
+                "positive", "negative", "environment-gap"
+            } and spec.cells[0].sequence
+            for spec in FakeJavaRunner.calls
+        ))
+        env = _cell_experiment_env(FakeJavaRunner.calls[0].cells[0])
+        self.assertEqual("mobile", env["VULNGATE_VARIANT_SURFACE"])
+        self.assertIn(env["VULNGATE_VARIANT_LANE"],
+                      {"positive", "negative", "environment-gap"})
+        self.assertNotIn("payload", json.dumps(env, ensure_ascii=False).lower())
+        self.assertTrue(all(
+            row["claim_status"] == "not-a-finding"
+            for row in artifact["fixtures"]
+        ))
 
     def test_shell_adapter_reuses_loopback_runner(self):
         with tempfile.TemporaryDirectory() as td:

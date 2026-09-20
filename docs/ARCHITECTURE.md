@@ -49,6 +49,16 @@ each selected variant has positive, negative/safe, and environment-gap lanes.
 The lanes are observation requirements and falsifiers, not observations; a
 complete plan never implies that any lane executed.
 
+The runtime lab expands the normalized plan into `surface-variant-fixture-v1`
+contexts within the configured fixture budget. Each context has an opaque
+fixture key, a fixed state-step sequence, and one of the three lanes. S4 clones
+the base cell, exposes only bounded `VULNGATE_VARIANT_*` environment variables,
+and records the lane context next to redacted replay/differential summaries.
+When the budget truncates a plan, the artifact says so explicitly. An
+environment-gap lane is still only a request to observe a gap: runner failure,
+missing preconditions, and safe-equivalent behavior remain separate runtime
+outcomes.
+
 ## Two operating modes
 
 | Mode | Reasoning | Setup | Typical use |

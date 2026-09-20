@@ -13,6 +13,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from agent.tools.experiment_planner import plan_candidate_experiments  # noqa: E402
 from agent.tools.surface_variants import (  # noqa: E402
     SURFACE_VARIANT_SCHEMA_VERSION,
+    VARIANT_FIXTURE_SCHEMA_VERSION,
+    build_variant_fixture_plan,
     build_surface_variant_plan,
     normalize_surface_variant_plan,
 )
@@ -74,6 +76,24 @@ class SurfaceVariantTests(unittest.TestCase):
             {row["lane"] for row in normalized["lanes"]},
         )
         self.assertEqual("not-a-finding", normalized["claim_status"])
+
+    def test_fixture_plan_expands_each_selected_variant_into_three_lanes(self):
+        surface_plan = build_surface_variant_plan(
+            "native", action="replay-new-variant",
+            attack_class="webview ipc method body")
+        fixture_plan = build_variant_fixture_plan(surface_plan, "NATIVE-1")
+        self.assertEqual(VARIANT_FIXTURE_SCHEMA_VERSION,
+                         fixture_plan["schema_version"])
+        self.assertEqual(6, fixture_plan["summary"]["fixture_count"])
+        self.assertEqual(
+            {"positive", "negative", "environment-gap"},
+            {row["lane"] for row in fixture_plan["fixtures"]},
+        )
+        self.assertEqual(6, len({row["fixture_key"]
+                                 for row in fixture_plan["fixtures"]}))
+        self.assertTrue(all(row["state_steps"] for row in
+                            fixture_plan["fixtures"]))
+        self.assertNotIn("NATIVE-1", json.dumps(fixture_plan, ensure_ascii=False))
 
     def test_experiment_planner_reuses_strategy_surface_plan(self):
         surface_plan = build_surface_variant_plan(

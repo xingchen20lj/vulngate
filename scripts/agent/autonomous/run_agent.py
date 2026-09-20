@@ -99,6 +99,10 @@ SYSTEM_POC = (
     "不能照抄声明或把对象实例化当成终点效果。"
     "若存在 residual contract，只能在实际执行且无副作用时输出"
     "RESIDUAL_ID/RESIDUAL_STATUS=falsified/RESIDUAL_FALSIFIER。"
+    "若存在 surface variant fixture 上下文，读取 VULNGATE_VARIANT_SURFACE、"
+    "VULNGATE_VARIANT_ID、VULNGATE_VARIANT_LANE、VULNGATE_VARIANT_STATE_STEPS；"
+    "positive/negative/environment-gap 只是实验车道，不能直接当成观测或结论，"
+    "只有真实完成的状态步骤和真实证据才能输出 STEP/STATE/typed effect。"
 )
 
 SYSTEM_SECURITY_WEB = (
@@ -121,6 +125,10 @@ SYSTEM_POC_WEB = (
     "TRANSITION=<实际观察到的 from->to>\nTRANSITION_EVIDENCE=<transition 证据>\n"
     "RESIDUAL_ID=<从 VULNGATE_RESIDUAL_IDS 中选择的实际 residual id>\n"
     "RESIDUAL_STATUS=falsified\nRESIDUAL_FALSIFIER=<合同允许的安全反证代码>\n"
+    "若存在 surface variant fixture，读取 VULNGATE_VARIANT_SURFACE、"
+    "VULNGATE_VARIANT_ID、VULNGATE_VARIANT_LANE、"
+    "VULNGATE_VARIANT_STATE_STEPS；车道与要求不是观测，只有真实完成的"
+    "步骤和真实响应/副作用才可输出 STEP/STATE/EVIDENCE。"
     "目标 base URL 必须从环境变量 VULNGATE_TARGET_URL 读取（脚本内使用该变量拼接路径，"
     "禁止硬编码其他主机；网络目标只允许 127.0.0.1/localhost）。"
     "允许使用 curl 与 python3，但只能访问明确的回环 URL；禁止 SSH/SCP/远程 rsync、云 CLI、"
@@ -890,6 +898,10 @@ def generate_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
         "VULNGATE_CONCURRENCY、VULNGATE_AVAILABILITY_PROBE；只有真实执行的步骤"
         "才输出 STEP/STEP_EVIDENCE/STATE，只有实际 worker 饱和与服务不可用才输出"
         "CONCURRENCY/ SERVICE_UNAVAILABLE。"
+        "若环境提供 VULNGATE_VARIANT_SURFACE、VULNGATE_VARIANT_ID、"
+        "VULNGATE_VARIANT_LANE、VULNGATE_VARIANT_STATE_STEPS，必须把它们当作"
+        "当前 fixture 的实验选择器；positive/negative/environment-gap 不等于结果，"
+        "只有真实完成的 state step 和证据才能输出 STEP/STATE/EFFECT。"
         "若候选包含 capability_contract，请读取 VULNGATE_CAPABILITY_CONTRACT、"
         "VULNGATE_CAPABILITIES、VULNGATE_TRANSITIONS；只有实际观察到对应原语、"
         "transition 或 typed effect 才输出 CAPABILITY/CAPABILITY_EVIDENCE/"
@@ -1017,6 +1029,10 @@ def generate_shell_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
         "- 有状态/竞态候选可读取 VULNGATE_SEQUENCE、VULNGATE_CONCURRENCY、"
         "VULNGATE_AVAILABILITY_PROBE；只有真实执行的步骤才输出 STEP/STEP_EVIDENCE/STATE，"
         "不能把声明值直接当作观测值；\n"
+        "- 若存在 VULNGATE_VARIANT_SURFACE/VULNGATE_VARIANT_ID/"
+        "VULNGATE_VARIANT_LANE/VULNGATE_VARIANT_STATE_STEPS，按当前 lane 选择"
+        "fixture 状态机；lane、required observation 和 falsifier 都不是观测，"
+        "只能用真实执行证据输出对应的 STEP/STATE/EFFECT；\n"
         "- 能力链可读取 VULNGATE_CAPABILITY_CONTRACT、VULNGATE_CAPABILITIES、"
         "VULNGATE_TRANSITIONS；只有真实观察到原语和 transition 才输出对应的"
         "CAPABILITY/CAPABILITY_EVIDENCE/TRANSITION/TRANSITION_EVIDENCE，不能照抄声明；\n"
@@ -1644,7 +1660,10 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                                     + [("capability_contract",
                                        (c.get("experiment_plan") or {}).get(
                                            "capability_contract") or
-                                       capability_contract_from_candidate(c))]
+                                       capability_contract_from_candidate(c)),
+                                       ("variant_fixture_plan",
+                                        (c.get("experiment_plan") or {}).get(
+                                            "variant_fixture_plan", {}))]
                                 )
                                 for c in candidates
                             ]})

@@ -45,6 +45,12 @@ S2 复用同一份行动上下文生成 `surface-variant-plan-v1`。计划按 We
 负向/安全等价和环境缺口三条车道。车道只是观测要求与证伪条件，不是已经执行的观测，完整计划也
 不能暗示任一车道已经执行。
 
+S4 runtime lab 会在配置的 fixture 预算内把规范化计划展开为
+`surface-variant-fixture-v1`。每个上下文包含不透明的 fixture key、固定的状态步骤序列和一条车道；S4
+复制基础 cell，只向 PoC 暴露有界的 `VULNGATE_VARIANT_*` 环境变量，并把车道上下文与脱敏后的重放/差分摘要
+一起落盘。预算不足时 artifact 会显式记录截断。environment-gap 仍只是“需要观察缺口”的要求；runner 失败、
+前置条件缺失和安全等价行为仍按不同的真实运行结果处理。
+
 S1 中包含授权边界和危险 Sink 的启发式 Source→Sink 路径会写入
 `composite-chain-candidates.json`，并在 S2 进入与模型候选、控制图候选、同族差分候选相同的调度池。它们始终保留
 `heuristic-nearby` / `requires_manual_dataflow=true`，只能作为审计和 PoC

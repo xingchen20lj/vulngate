@@ -34,6 +34,7 @@
 | 17 | 策略项真实观测回写与信息增益 | 已实现（bounded S4 strategy feedback） | `research-strategy-feedback-v1`、`S8/research-strategy.json`、`S8/research-strategy-feedback.json`、下一轮策略提示/调度证据 | 只用真实 S4 summary 的有界信号更新匹配策略项；记录缺失观测、最新/历史状态和本轮信息增益；重复且无新信号时取消策略加分，不改变候选、CVSS 或 G4/G5 |
 | 18 | 跨轮研究行动与实验替换建议 | 已实现（bounded strategy action guidance） | `research-strategy-guidance-v1`、`state/<target>/coverage/research-guidance.json`、`S8/research-guidance.json`、策略项 `next_action` | 将 S4 观测、人工复核和显式变体覆盖汇合为有限动作；环境缺口优先修复，负向/能力/typed effect 缺口转成定向补证，零信息重复建议换实验；只影响研究调度，不改变候选、CVSS 或 G4/G5 |
 | 19 | 研究面专用变体与三车道实验计划 | 已实现（bounded surface variant matrix） | `surface-variant-plan-v1`、`S2/experiment-plans.json`、`S2/candidate-matrix.json`、策略 guidance 中的 `surface_variant_plan` | Web/协议/云/移动/native 按各自状态机、身份边界、生命周期或方法体验证选择变体；每个变体同时保留正向、负向/安全等价、环境缺口车道；计划不等于执行，不改变 G4/G5 |
+| 20 | 研究面 fixture 与状态机执行上下文 | 已实现（bounded S4 lane expansion） | `surface-variant-fixture-v1`、`VULNGATE_VARIANT_*`、`S4/runtime-lab.json` lane context | 在 fixture 预算内把每个选中变体展开为三车道 runner cell，向 PoC 提供固定状态步骤和脱敏 lane 元数据；显式记录预算截断；车道仍不是观测，不改变 G4/G5/CVSS |
 
 ## 当前阶段：可证伪实验规划
 
@@ -350,10 +351,27 @@ S2→S4→S8 的单向契约：
 - 当当前状态已经执行但连续轮次 `information_gain=0` 时，输出 `replacement_recommended`；已完整或已观察 falsifier 的重复项进入 `hold-for-new-evidence`，只取消研究加分，不删除候选；
 - 目标级和轮次级 guidance 都保持 `claim_status=not-a-finding`。它只是下一步实验编排，不能替代 source review、S4 typed effect、G4/G5 或 CVSS。
 
+## 阶段 20 初步实现：研究面 fixture 与状态机执行上下文
+
+阶段 19 的变体计划已经能告诉宿主 Agent“应该验证什么”，但如果 S4 仍只重放一个没有 lane
+身份的基础 cell，PoC 实际执行时就无法区分正向、负向和环境缺口实验，也无法稳定推进研究面特有的
+状态机。阶段 20 增加 `surface-variant-fixture-v1`：
+
+- 由规范化的 `surface_variant_plan` 生成最多 9 个有界 fixture context；每个 context 只包含不透明
+  `fixture_key`、研究面、变体、lane、固定 `state_steps`、required observations 和 falsifiers；
+  原始 payload、命令、凭据和进程输出不会进入计划或跨轮 artifact；
+- S4 runtime lab 在 `runtime_lab.max_fixtures` 预算内为每个 context 克隆基础 cell，并将
+  `VULNGATE_VARIANT_SURFACE`、`VULNGATE_VARIANT_ID`、`VULNGATE_VARIANT_LANE`、状态步骤、观察要求和
+  falsifier 通过受控环境变量交给 PoC；真实执行仍只由 PoC 输出的机器可读证据决定；
+- `S4/runtime-lab.json` 将 lane context、每个候选的 lane 计数和预算截断状态与脱敏 replay/differential
+  摘要绑定；environment-gap 车道不会被自动标成缺口，runner 失败、前置不可用和安全等价结果仍分开；
+- config-driven 与 autonomous S2 都把 fixture plan 暴露在 `candidate-matrix.json`，因此同一份研究计划能从
+  调度、PoC 生成到 S4 runtime lab 连贯传递；所有新增字段继续是 `claim_status=not-a-finding`。
+
 ## 后续优先级
 
-1. 用真实项目回放校准各类 guidance 的阈值和替换命中率，避免“换实验”本身变成无证据的循环。
-2. 将三车道计划接入更细粒度的 fixture/状态机生成器，同时保留 runner 的回环、审批和资源上限。
-3. 在不扩大 claim 权限的前提下，增加跨版本/跨修复变体的自动对照编排。
+1. 用真实项目回放校准各类 guidance 的阈值和替换命中率，尤其检查 fixture 预算截断后的覆盖解释，避免“换实验”本身变成无证据的循环。
+2. 在不扩大 claim 权限的前提下，增加跨版本/跨修复变体的自动对照编排，并把对照结果与 lane context 绑定。
+3. 用更多细粒度 fixture/state-machine 回放样例校准五类研究面的状态步骤覆盖，保留 runner 的回环、审批和资源上限。
 
 每一阶段都必须同时更新实现、技能契约、回归测试和 CHANGELOG；只有测试、artifact schema 和安全边界一起稳定后，才适合提交为一个独立变更。

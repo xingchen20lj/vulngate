@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- S4 runtime research now consumes the shared surface plan through
+  `surface-variant-fixture-v1`. Within the configured fixture budget, each
+  selected Web/protocol/cloud/mobile/native variant expands into positive,
+  negative/safe, and environment-gap runner cells with fixed state-step
+  identifiers. PoCs receive only bounded `VULNGATE_VARIANT_*` metadata, and
+  `S4/runtime-lab.json` records lane context and truncation explicitly while
+  preserving `not-a-finding`; no lane declaration satisfies G4/G5 or changes
+  CVSS.
+
 - S2 experiment plans now carry a shared `surface-variant-plan-v1` for Web,
   protocol, cloud, mobile, and native research. Each selected state-machine,
   identity-boundary, lifecycle, route, parser, or method-body variant is
