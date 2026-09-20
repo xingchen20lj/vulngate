@@ -94,6 +94,7 @@ Evidence Gates
 - **能力链运行时契约** —— 能力候选会把有界 `capability_contract` 传入 S4 cell；`CAPABILITY`/`TRANSITION` 轨迹会被分类为 `no-trace`、`partial` 或 `complete`，终点 typed effect 仍单独要求真实证据。
 - **运行时研究实验室** —— 定向 fuzz 输入会固化为 corpus fixture 和缩减 reproducer；有界重放与版本 × SafeMode 对照会保留稳定性、差分、签名漂移和前置缺口证据，但不会直接升级为漏洞结论。
 - **普通 S4 fixture 适配器** —— Java 与 Shell PoC cell 可固化为脱敏执行 fixture 并有界重放；`S4/runtime-lab.json` 将稳定性、版本/SafeMode 差异和 harness 缺口与 G4/G5 结论分开。
+- **跨轮研究记忆** —— S8 将稳定机制键、重放/差分状态、环境缺口和 next probe 写入 `state/<target>/research-memory.json`；S2 据此降低完全重复探针、优先处理可行动差异，但不会把记忆升级成漏洞结论。
 - **逐 cell 运行时前置** —— 声明需要的 JDK/runtime 必须真实可用，否则记录 `precondition-unavailable`，不会静默使用其他运行时替代。
 - **S4 证据收敛** —— 已落盘矩阵证据不会被 Agent/spawn 超时元数据覆盖。
 - **保守 Novelty** —— 公开查询失败会保留为不确定状态，而不会被转化为“未发现公开记录”。
@@ -192,7 +193,7 @@ npm install -g @openai/codex
 | S5 | Novelty：上游 issue/PR/fix + 公开披露搜索与覆盖记录 | `S5/novelty.json`、`S5/novelty-coverage.json` | G3 Novelty / 强制降级 |
 | S6 | CVSS + 前置条件/影响一致性 | `S6/severity.json` | G5 一致性 |
 | S7 | 自包含本地发现文档 | `reports/<target>/…` | 披露冻结 |
-| S8 | Evidence Ledger、排除项、轮次汇总 | `ledger/<target>/…` | 最终一致性检查 |
+| S8 | Evidence Ledger、排除项、轮次汇总、跨轮研究记忆 | `ledger/<target>/…`、`state/<target>/research-memory.json`、`S8/research-memory.json` | 最终一致性检查 |
 
 Source→Sink 图刻意保持保守：启发式邻近路径会明确标记为 `heuristic-nearby` 与 `requires_manual_dataflow=true`，不会冒充严格语义数据流证明。包含授权边界和危险 Sink 的路径会进一步生成 `chain-*` S2 候选，交给源码审计和授权/效果矩阵验证，而不是停留在提示文件中。
 

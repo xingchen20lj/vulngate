@@ -41,6 +41,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import coverage as cov
 from .inventory import CoverageStore, load_inventory
+from ..memory.research import (STATE_DECISION_RECORDED, load_research_memory,
+                                memory_match, memory_prompt_rows)
 
 # ---------------------------------------------------------------------------
 # configuration
@@ -155,6 +157,13 @@ CONTROL_PRESENT_UNREVIEWED = 0.8
 #: A candidate that re-covers an already reviewed region is damped, not banned.
 DUPLICATE_DAMPING = 0.3
 
+# Research memory changes the order only when it has an observed runtime state.
+# These are deliberately mild: the memory can avoid repeating a stable probe,
+# but it must not suppress a candidate or turn a lab observation into a verdict.
+RESEARCH_STABLE_DAMPING = 0.55
+RESEARCH_UNSTABLE_DAMPING = 0.85
+RESEARCH_DIFFERENCE_BOOST = 5.0
+
 #: Duplicate threshold, used two ways.  Against a *reviewed region* it is the
 #: fraction of the candidate's own evidence that must already be covered
 #: (one-directional -- the reviewed region is coarser by construction); against
@@ -190,6 +199,7 @@ class ScheduleContext:
     flows: List[Dict[str, Any]] = field(default_factory=list)
     reachability: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     prior_coverage: List[Dict[str, Any]] = field(default_factory=list)
+    research_memory: List[Dict[str, Any]] = field(default_factory=list)
     weights: Dict[str, int] = field(default_factory=lambda: dict(DEFAULT_FACTOR_WEIGHTS))
 
     #: Indexes built on demand (memoised, never mutated afterwards).
@@ -205,7 +215,9 @@ class ScheduleContext:
 
     @classmethod
     def from_store(cls, store: CoverageStore,
-                   weights: Optional[Dict[str, int]] = None) -> "ScheduleContext":
+                   weights: Optional[Dict[str, int]] = None,
+                   research_memory: Optional[Sequence[Dict[str, Any]]] = None
+                   ) -> "ScheduleContext":
         indices = load_inventory(store)
         reachability = {str(r.get("sink_id")): r
                         for r in indices.get("sink-reachability") or []}
@@ -223,6 +235,8 @@ class ScheduleContext:
             flows=list(indices.get("flow-index") or []),
             reachability=reachability,
             prior_coverage=list(indices.get("candidate-coverage") or []),
+            research_memory=[item for item in (research_memory or [])
+                             if isinstance(item, dict)],
             weights=dict(weights or DEFAULT_FACTOR_WEIGHTS),
         )
 
@@ -963,11 +977,34 @@ def score_candidate(candidate: Dict[str, Any], ctx: ScheduleContext,
     weighted = {name: round(factors[name] * float(ctx.weights.get(name, 0)), 4)
                 for name in FACTOR_ORDER}
     total = sum(weighted.values())
+    scale = float(sum(max(0, int(ctx.weights.get(name, 0))) for name in FACTOR_ORDER))
     duplicate = _near_duplicate_of(candidate, ctx, pool, link)
     if duplicate:
         total *= DUPLICATE_DAMPING
         evidence["duplicate"] = {"of": duplicate, "damping": DUPLICATE_DAMPING}
-    scale = float(sum(max(0, int(ctx.weights.get(name, 0))) for name in FACTOR_ORDER))
+    remembered = memory_match(candidate, ctx.research_memory)
+    if remembered:
+        latest = remembered.get("latest_event") or {}
+        state = str(latest.get("state") or STATE_DECISION_RECORDED)
+        adjustment = 1.0
+        if state in ("stable-reproducer", "stable-observation"):
+            total *= RESEARCH_STABLE_DAMPING
+            adjustment = RESEARCH_STABLE_DAMPING
+        elif state == "unstable-replay":
+            total *= RESEARCH_UNSTABLE_DAMPING
+            adjustment = RESEARCH_UNSTABLE_DAMPING
+        elif state == "actionable-difference":
+            before = total
+            total = min(scale, total + RESEARCH_DIFFERENCE_BOOST)
+            adjustment = round(total - before, 4)
+        evidence["research_memory"] = {
+            "research_key": remembered.get("research_key", ""),
+            "latest_state": state,
+            "latest_round": latest.get("round", 0),
+            "next_probe_hints": list(latest.get("next_probe_hints") or [])[:4],
+            "score_adjustment": adjustment,
+            "claim_status": "not-a-finding",
+        }
     return CandidateScore(
         candidate_id=str(candidate.get("candidate_id") or ""),
         category=candidate_category(candidate),
@@ -1180,7 +1217,9 @@ def build_schedule(workspace: Path, target: str,
     coverage: Dict[str, Any] = {}
     if refresh:
         coverage = residual_sweep(store, workspace, target, round_no)
-    ctx = ScheduleContext.from_store(store, weights)
+    memory = load_research_memory(workspace, target)
+    ctx = ScheduleContext.from_store(
+        store, weights, research_memory=memory.get("entries") or [])
     scores = score_candidates(candidates, ctx)
     selected, deferred, requested, filled, relocated = stratified_select(
         scores, slots, quota, pinned)
@@ -1517,7 +1556,20 @@ def prompt_coverage_block(ctx: ScheduleContext, plan: Optional[SchedulePlan] = N
                                        record.get("status"),
                                        record.get("conclusion", "")))
 
+    lines.append("## 跨轮研究记忆 / Cross-round Research Memory")
+    memory_rows = memory_prompt_rows(ctx.research_memory, limit_candidates)
+    if not memory_rows:
+        lines.append("  （暂无可复用的运行时记忆 / no reusable runtime memory）")
+    for row in memory_rows:
+        hints = "; ".join(row.get("next_probe_hints") or []) or "-"
+        lines.append("  %s [%s, round=%s] next=%s claim_status=%s" % (
+            row.get("candidate_id") or row.get("research_key"),
+            row.get("state"), row.get("round", 0), hints,
+            row.get("claim_status", "not-a-finding")))
+
     lines.append("## 覆盖新颖性要求 / Coverage Novelty Requirement")
     lines.append("  优先生成来自未覆盖区域的候选；禁止重复已排除的机制，"
-                 "除非存在新的数据流、安全控制差分或版本差分证据。")
+                 "除非存在新的数据流、安全控制差分或版本差分证据。稳定重放"
+                 "只能减少重复实验，不能证明不存在漏洞；环境缺口必须修复后重试；"
+                 "可行动版本差异应优先转化为最小复现和 source→sink 证据。")
     return "\n".join(lines)

@@ -20,7 +20,7 @@
 | 3 | 可证伪实验规划器 | 本阶段已实现 | `S2/experiment-plans.json`、S3 计划上下文 | 每个候选有必需观测和 falsifier，且 `not-a-finding` |
 | 4 | 能力原语与攻击路径图 | 已实现（含 S4 运行时契约） | `capability-graph.json`、`capability-candidates.json`、`capability_contract`、`CAPABILITY/TRANSITION` 证据 | 低危原语只有在链路、transition 和终点 typed effect 均有观测时才允许继续评估 |
 | 5 | 运行时研究实验室与差分验证 | 已实现（定向 fuzz + 普通 S4） | `fuzz-corpus.json`、`FUZZ/runtime-lab.json`、`S4/runtime-lab.json`、版本/安全模式差分、缩减 reproducer | 固定输入可重复重放；差分、签名漂移与前置/harness 失败分开记录 |
-| 6 | 研究记忆与反馈学习 | 后续 | candidate/finding/negative-result 记忆、重复检测、跨轮 next probe | 不重复跑已证伪路径；新轮次能利用旧证据 |
+| 6 | 研究记忆与反馈学习 | 初步实现（跨轮研究记忆） | `state/<target>/research-memory.json`、`S8/research-memory.json`、稳定重放/差分/环境缺口状态、next probe | 新轮次能利用旧证据；环境缺口不被当成负证据；重复实验只降权不删除 |
 | 7 | 专家级评测基准 | 后续 | 真实/合成案例集、变体集、误报/漏报指标 | 用证据质量、覆盖率、校准度衡量，而不是只看候选数量 |
 
 ## 当前阶段：可证伪实验规划
@@ -83,12 +83,33 @@ digest。触发器经 ddmin 后会形成独立的缩减 reproducer，原始输�
 授权元数据、有状态声明和能力契约生成稳定身份，但 artifact 只保存参数 digest，不落原始
 参数或进程输出。普通 S4 也会复用隔离矩阵执行有限重放与版本 × SafeMode 对照，并把
 `S4/runtime-lab.json` 关联回 `verification-matrix.json`；所有结果仍保持
-`claim_status=not-a-finding`。下一步是跨轮研究记忆与固定服务生命周期的更细粒度适配。
+`claim_status=not-a-finding`。下一步是固定服务生命周期与更细粒度的配置/authz fixture 适配。
+
+## 阶段 6 初步实现：跨轮研究记忆与反馈调度
+
+S8 现在会把本轮候选、稳定研究键和 runtime lab 的有界状态合并到目标级
+`state/<target>/research-memory.json`，并在本轮目录留下
+`S8/research-memory.json` 与汇总文件。研究键由入口、输入形状、机制、代码位置、目标类、
+Source→Sink 摘要和能力契约 digest 组成，不依赖容易变化的 candidate id；原始参数、payload、
+stdout/stderr 不写入跨轮记忆。
+
+记忆只表达下一步研究优先级，不改变 G4/G5：
+
+- `stable-reproducer` 表示固定 fixture 的重放与既有基线一致，提示转向授权边界、Source→Sink
+  和 typed effect 证据；它不是漏洞确认。
+- `actionable-difference` 表示版本或 SafeMode 出现可复核的 bucket 差异，调度器会轻微提高其
+  后续最小复现实验优先级；差异仍需定位和验证。
+- `environment-gap`、`unstable-replay` 和 `inconclusive` 保留为缺口/不确定性；尤其不能把
+  harness、runtime 或前置条件失败解释为“漏洞不存在”。
+
+下一轮 S2 调度会读取这份记忆：稳定观察会降低完全重复探针的分数，差异会提高后续验证优先级，
+环境缺口保持原分数并在 prompt 中提示修复。候选不会被自动删除，所有记忆事件都标记
+`claim_status=not-a-finding`，且合并操作具备幂等性。
 
 ## 后续优先级
 
-1. 增加跨轮研究记忆和反馈学习，利用稳定负结果和差分结果减少重复实验。
-2. 补充固定服务生命周期、配置快照和更细粒度的 authz/tenant fixture adapter。
+1. 补充固定服务生命周期、配置快照和更细粒度的 authz/tenant fixture adapter。
+2. 让研究记忆吸收服务快照、修复变体和人工复核反馈，同时保持事件可回放。
 3. 最后做评测基准，用负结果、重复率、证据完整度和严重性校准反向约束 Agent。
 
 每一阶段都必须同时更新实现、技能契约、回归测试和 CHANGELOG；只有测试、artifact schema 和安全边界一起稳定后，才适合提交为一个独立变更。

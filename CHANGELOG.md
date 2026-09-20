@@ -47,6 +47,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   raw arguments, reuses the isolated matrix runners for replay and version ×
   SafeMode comparison, and writes `S4/runtime-lab.json`; replay and
   differential gaps remain `not-a-finding` evidence.
+- S8 now persists target-scoped cross-round research memory. Stable mechanism
+  keys, bounded replay/differential states, environment gaps, and next-probe
+  hints are merged idempotently into `state/<target>/research-memory.json`;
+  the scheduler dampens exact stable repeats and prioritizes actionable
+  differences while preserving every candidate and keeping the memory
+  `claim_status=not-a-finding`.
 
 ### Documentation
 
@@ -56,6 +62,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   stages.
 - Documented the `capability` CLI report and the additional S1/S2 coverage
   artifacts in the VulnGate audit skill.
+- Documented cross-round research memory, its state taxonomy, and its
+  separation from G4/G5 conclusions in the roadmap, README, evolution notes,
+  and audit skill.
 
 ## [1.1.0] - 2026-09-16
 

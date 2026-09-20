@@ -62,6 +62,16 @@ version × SafeMode comparison. The result is persisted as
 `S4/runtime-lab.json` and linked from the ordinary S4 summary; raw arguments
 and process output are not copied into that artifact.
 
+S8 now closes the feedback loop with a target-scoped
+`state/<target>/research-memory.json`. A stable, round-independent research key
+joins the candidate's bounded mechanism metadata to replay and differential
+states. The next schedule lowers the priority of an exact stable repeat,
+raises a version/SafeMode difference for a focused follow-up, and preserves a
+harness or precondition failure as an environment gap. The memory is
+idempotently merged, excludes raw arguments and process output, and remains
+`claim_status=not-a-finding`; it improves experiment selection without
+changing G4/G5 or asserting that a stable observation proves absence.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

@@ -38,6 +38,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..llm.adapter import BudgetExceeded, LLMClient
 from ..memory.ledger import render_finding_md, write_round_artifacts
+from ..memory.research import (build_round_memory, load_research_memory,
+                                merge_research_memory, write_research_memory)
 from ..orchestrator.config import TargetConfig
 from ..orchestrator.gates import g3_novelty
 from ..sandbox.approval import ApprovalGate
@@ -517,8 +519,11 @@ def _coverage_prompt_block(ctx: AutoCtx, round_no: int) -> str:
     try:
         from ..analysis import scheduler as sched
         from ..analysis.inventory import CoverageStore
+        from ..memory.research import load_research_memory
         store = CoverageStore(ctx.root, ctx.cfg.name)
-        sctx = sched.ScheduleContext.from_store(store)
+        memory = load_research_memory(ctx.root, ctx.cfg.name)
+        sctx = sched.ScheduleContext.from_store(
+            store, research_memory=memory.get("entries") or [])
         if not sctx.entries and not sctx.sinks:
             return ""
         plan = sched.load_schedule(store, round_no)
@@ -1772,6 +1777,46 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         store.save_stage("S7", {"finding_docs": written})
 
     # ---- S8: ledger (resumable) ---------------------------------------
+    # Build the research-memory delta before the resumable ledger branch.  On
+    # resume this remains idempotent, while an interrupted S8 still leaves the
+    # runtime feedback available to the next scheduling round.
+    runtime_lab = {}
+    runtime_lab_path = (ctx.root / "state" / ctx.cfg.name
+                        / ("round-%02d" % round_no) / "S4" / "runtime-lab.json")
+    if runtime_lab_path.exists():
+        try:
+            loaded_lab = json.loads(runtime_lab_path.read_text(encoding="utf-8"))
+            if isinstance(loaded_lab, dict):
+                runtime_lab = loaded_lab
+        except (OSError, ValueError, TypeError):
+            runtime_lab = {}
+    memory_summaries = {
+        str(row.get("candidate", {}).get("candidate_id")): row.get("summary", {})
+        for row in rows if isinstance(row, dict) and isinstance(row.get("candidate"), dict)
+    }
+    memory_conclusions = {
+        str(row.get("candidate", {}).get("candidate_id")): row.get("conclusion", "")
+        for row in rows if isinstance(row, dict) and isinstance(row.get("candidate"), dict)
+    }
+    for item in excluded:
+        cid = str(item.get("candidate_id", ""))
+        if cid:
+            memory_summaries.setdefault(cid, item.get("evidence", {}))
+            memory_conclusions.setdefault(cid, item.get("conclusion", ""))
+    memory_delta = build_round_memory(
+        candidates, memory_summaries, memory_conclusions, runtime_lab, round_no)
+    memory = merge_research_memory(
+        load_research_memory(ctx.root, ctx.cfg.name), memory_delta)
+    memory_file = write_research_memory(ctx.root, ctx.cfg.name, memory)
+    ctx.write_artifact(round_no, "S8", "research-memory.json", memory_delta)
+    ctx.write_artifact(round_no, "S8", "research-memory-summary.json", memory["summary"])
+    research_memory_info = {
+        "artifact": str(memory_file.relative_to(ctx.root.resolve())),
+        "round_entries": len(memory_delta.get("entries", [])),
+        "total_entries": len(memory.get("entries", [])),
+        "states": memory.get("summary", {}).get("states", {}),
+        "claim_status": "not-a-finding",
+    }
     s8 = store.load_stage("S8")
     if s8 and not force:
         print("[round-%02d] S8 resume: ledger already written" % round_no)
@@ -1798,13 +1843,29 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                 "LLM tokens": ctx.llm.usage.total_tokens,
             },
             "next_round": [],
+            "research_memory": research_memory_info,
         }
+        by_candidate_memory = {
+            str(entry.get("candidate_id")): entry
+            for entry in memory_delta.get("entries", [])
+        }
+        for row in ledger_rows:
+            entry = by_candidate_memory.get(str(row.get("candidate_id")))
+            if entry:
+                row["research"] = {
+                    "research_key": entry.get("research_key", ""),
+                    "states": sorted({str(event.get("state")) for event in
+                                       entry.get("events", []) if event.get("state")}),
+                    "claim_status": "not-a-finding",
+                }
         write_round_artifacts(ctx.root, ctx.cfg.name, round_no, ledger_rows, excluded,
                               summary, lang=ctx.cfg.output_lang)
         ctx.write_artifact(round_no, "S8", "llm-usage.json", ctx.llm.usage.to_dict())
-        store.save_stage("S8", {"ledger_rows": len(ledger_rows), "excluded": len(excluded)})
+        store.save_stage("S8", {"ledger_rows": len(ledger_rows), "excluded": len(excluded),
+                                "research_memory": research_memory_info})
     print("[round-%02d] done: 确认=%d 排除=%d" % (round_no, len(rows), len(excluded)))
-    return {"next_candidates": _propose_next(ctx, candidates, rows)}
+    return {"next_candidates": _propose_next(ctx, candidates, rows),
+            "research_memory": research_memory_info}
 
 
 def _repro_text(row: Dict[str, Any]) -> str:

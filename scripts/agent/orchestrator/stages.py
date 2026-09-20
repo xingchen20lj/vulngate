@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..memory.ledger import render_finding_md, write_round_artifacts
+from ..memory.research import (build_round_memory, load_research_memory,
+                                merge_research_memory, write_research_memory)
 from ..memory.state import CheckpointStore
 from ..analysis.languages import ALL_SUFFIXES
 from ..sandbox.approval import ApprovalGate
@@ -1041,10 +1043,44 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
         "metrics": metrics,
         "next_round": next_round or ["复测 2.0.65（#7753 发布后）", "扩展模块轮（HTTP/Redis/JSONB 集成面）"],
     }
+    # S8 closes the round's durable research loop.  This is deliberately
+    # separate from the finding ledger: a stable replay or a version
+    # difference is useful feedback, but neither is a vulnerability verdict.
+    runtime_lab = ctx.store.read_artifact("S4", "runtime-lab.json") or {}
+    memory_delta = build_round_memory(
+        ctx.config.candidates, summaries,
+        {r["candidate_id"]: r.get("conclusion", "") for r in rows},
+        runtime_lab, ctx.round_no)
+    memory = merge_research_memory(
+        load_research_memory(ctx.workspace, ctx.target), memory_delta)
+    memory_file = write_research_memory(ctx.workspace, ctx.target, memory)
+    ctx.store.write_artifact("S8", "research-memory.json", memory_delta)
+    ctx.store.write_artifact("S8", "research-memory-summary.json", memory["summary"])
+    by_candidate_memory = {
+        str(entry.get("candidate_id")): entry for entry in memory_delta.get("entries", [])
+    }
+    for row in rows:
+        entry = by_candidate_memory.get(str(row.get("candidate_id")))
+        if not entry:
+            continue
+        row["research"] = {
+            "research_key": entry.get("research_key", ""),
+            "states": sorted({str(event.get("state")) for event in
+                               entry.get("events", []) if event.get("state")}),
+            "claim_status": "not-a-finding",
+        }
+    summary["research_memory"] = {
+        "artifact": str(memory_file.relative_to(ctx.workspace.resolve())),
+        "round_entries": len(memory_delta.get("entries", [])),
+        "total_entries": len(memory.get("entries", [])),
+        "states": memory.get("summary", {}).get("states", {}),
+        "claim_status": "not-a-finding",
+    }
     out_dir = write_round_artifacts(ctx.workspace, ctx.target, ctx.round_no, rows, excluded,
                                     summary, lang=ctx.config.output_lang)
     return {"ledger_dir": str(out_dir.relative_to(ctx.workspace)), "rows": len(rows),
-            "excluded": len(excluded), "metrics": metrics}
+            "excluded": len(excluded), "metrics": metrics,
+            "research_memory": summary["research_memory"]}
 
 
 def _precondition_distribution(rows: List[Dict[str, Any]]) -> str:

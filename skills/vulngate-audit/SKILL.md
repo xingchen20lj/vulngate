@@ -400,6 +400,34 @@ verification summary, but keep every replay/differential result at
 `claim_status=not-a-finding`; a missing baseline, service, runtime or harness
 must remain an explicit gap.
 
+#### Cross-round research memory
+
+At S8, merge a bounded research-only delta into
+`state/<target>/research-memory.json` and write the round delta to
+`state/<target>/round-NN/S8/research-memory.json`. Derive a stable mechanism
+key from the candidate's entry, input shape, mechanism, source location,
+target classes, source-to-sink digest and capability-contract digest; do not
+use a changing candidate id as the only identity. Never copy raw arguments,
+fuzz payloads, stdout/stderr or secrets into this memory.
+
+Use the following state meanings:
+
+- `stable-reproducer`: the bounded replay is stable and matches the recorded
+  baseline. This is a research observation, not a confirmed vulnerability.
+- `actionable-difference`: a version or SafeMode bucket difference was
+  observed; schedule a focused minimal reproduction and path review.
+- `environment-gap`: a runtime, harness, gate or precondition prevented a
+  comparable observation. It is never negative evidence.
+- `unstable-replay` / `inconclusive`: keep the uncertainty and propose a
+  bounded stabilizing probe.
+
+The next S2 schedule reads the target memory. Stable observations may damp an
+exact repeat, actionable differences may receive a small follow-up boost, and
+environment gaps keep their candidate eligible with a remediation hint. Never
+delete a candidate solely because memory exists, and never let memory satisfy
+G4 or G5. Every memory entry and scheduler memory evidence must remain
+`claim_status=not-a-finding`; merges must be idempotent across S8 resume.
+
 Keep every cell, including harness failures and negative observations.
 
 #### Typed execution states
@@ -1001,6 +1029,25 @@ cell。所有产物都是 `claim_status=not-a-finding` 的研究证据，不得�
 SafeMode 对照，聚合结果写入 `S4/runtime-lab.json`，并从 S4 verification summary
 关联到候选。所有重放/差分结果仍必须是 `claim_status=not-a-finding`；缺少基线、服务、
 runtime 或 harness 时必须保留为显式缺口。
+
+#### 跨轮研究记忆
+
+S8 结束时，把有界的研究增量幂等合并到
+`state/<target>/research-memory.json`，并把本轮增量写入
+`state/<target>/round-NN/S8/research-memory.json`。研究键应由候选的入口、输入形状、
+机制、代码位置、目标类、Source→Sink digest 和 capability-contract digest 构成；不能只用
+会变化的 candidate id。跨轮记忆禁止复制原始参数、fuzz payload、stdout/stderr 或 secret。
+
+状态语义必须保持分离：
+
+- `stable-reproducer`：有界重放稳定且与已记录基线一致，只是研究观察，不是确认漏洞；
+- `actionable-difference`：版本或 SafeMode 出现 bucket 差异，应安排最小复现和路径复核；
+- `environment-gap`：runtime、harness、gate 或前置条件导致无法比较，绝不是负证据；
+- `unstable-replay` / `inconclusive`：保留不确定性，生成有界稳定化探针。
+
+下一轮 S2 调度会读取目标级记忆：稳定观察可以降低完全重复的优先级，可行动差异可以获得
+小幅 follow-up 提升，环境缺口保持候选可选并带修复提示。记忆不能单独删除候选，也不能满足
+G4/G5；所有记忆和调度证据保持 `claim_status=not-a-finding`，S8 恢复必须幂等。
 
 所有 cell 都保留，包括 harness error 和负向观测。
 
