@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- S2 experiment plans now carry a shared `surface-variant-plan-v1` for Web,
+  protocol, cloud, mobile, and native research. Each selected state-machine,
+  identity-boundary, lifecycle, route, parser, or method-body variant is
+  expanded into positive, negative/safe, and environment-gap lanes with fixed
+  observation signals and falsifier codes. Strategy guidance, config-driven
+  S2, and autonomous S2 reuse the same bounded plan; it remains
+  `not-a-finding` metadata and cannot satisfy G4/G5.
+
 - S8/S2 now produce `research-strategy-guidance-v1`: a bounded next-action layer
   that joins real strategy observations, latest human review status, and
   explicit portfolio variant gaps. It can recommend environment repair,

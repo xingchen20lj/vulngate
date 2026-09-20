@@ -301,6 +301,13 @@ class ResearchStrategyTests(unittest.TestCase):
                          item["guidance"]["variant_gaps"])
         self.assertIn("human-review", item["guidance"]["sources"])
         self.assertIn("variant-coverage", item["guidance"]["sources"])
+        variant_plan = item["guidance"]["surface_variant_plan"]
+        self.assertEqual("surface-variant-plan-v1",
+                         variant_plan["schema_version"])
+        self.assertEqual(
+            {"positive", "negative", "environment-gap"},
+            {row["lane"] for row in variant_plan["lanes"]},
+        )
         self.assertEqual(STRATEGY_GUIDANCE_SCHEMA_VERSION,
                          guidance["schema_version"])
         self.assertGreaterEqual(

@@ -27,6 +27,8 @@ from ..evaluation.benchmark import normalize_benchmark_feedback
 from ..tools.redaction import redact_text
 from ..memory.portfolio import normalize_research_portfolio
 from ..memory.research import research_key, residual_meta
+from ..tools.surface_variants import (build_surface_variant_plan,
+                                      normalize_surface_variant_plan)
 from .threat_model import normalize_threat_model
 
 
@@ -446,6 +448,8 @@ def _normalize_guidance(value: Any) -> Dict[str, Any]:
         {"accepted", "rejected", "needs-evidence", "scope-corrected"}, "")
     observation_status = _code(
         value.get("observation_status"), STRATEGY_OBSERVATION_STATUSES, "")
+    surface_variant_plan = normalize_surface_variant_plan(
+        value.get("surface_variant_plan"))
     return {
         "next_action": action,
         "priority_delta": _int(value.get("priority_delta"), 0, 0, 3),
@@ -458,6 +462,7 @@ def _normalize_guidance(value: Any) -> Dict[str, Any]:
         "review_status": review_status,
         "observation_status": observation_status,
         "last_round": _int(value.get("last_round"), 0, 0, 1000000),
+        "surface_variant_plan": surface_variant_plan,
         "claim_status": STRATEGY_CLAIM_STATUS,
     }
 
@@ -648,6 +653,10 @@ def _item_guidance(item: Mapping[str, Any], portfolio: Mapping[str, Any],
     if variant_gaps and "variant-coverage" not in sources:
         add_source("variant-coverage")
 
+    surface_variant_plan = build_surface_variant_plan(
+        item.get("research_surface"), item.get("target_type"), action,
+        item.get("attack_class"), item.get("variant"))
+
     return {
         "next_action": action,
         "priority_delta": priority_delta,
@@ -659,6 +668,7 @@ def _item_guidance(item: Mapping[str, Any], portfolio: Mapping[str, Any],
         "review_status": review_status,
         "observation_status": status,
         "last_round": _int(round_no, 0, 0, 1000000),
+        "surface_variant_plan": surface_variant_plan,
         "claim_status": STRATEGY_CLAIM_STATUS,
     }
 
@@ -1056,6 +1066,8 @@ def apply_research_guidance(
             "review_status": guidance.get("review_status", ""),
             "observation_status": guidance.get("observation_status", ""),
             "last_round": guidance.get("last_round", round_value),
+            "surface_variant_plan": normalize_surface_variant_plan(
+                guidance.get("surface_variant_plan")),
             "claim_status": STRATEGY_CLAIM_STATUS,
         })
     normalized["summary"] = _summary(
@@ -1086,6 +1098,38 @@ def apply_research_guidance(
         "claim_status": STRATEGY_CLAIM_STATUS,
     }
     return normalized, guidance
+
+
+def strategy_guidance_for_candidate(strategy: Mapping[str, Any],
+                                    candidate: Mapping[str, Any]
+                                    ) -> Dict[str, Any]:
+    """Return guidance for an exact candidate/research-key match.
+
+    S2 planners use this bridge to carry the same surface-specific plan into
+    the candidate's experiment artifact.  It intentionally refuses fuzzy
+    prose matching; an unmatched candidate receives the planner's generic
+    surface plan instead.
+    """
+    normalized = normalize_research_strategy(strategy)
+    if not normalized or not isinstance(candidate, Mapping):
+        return {}
+    candidate_id = _text(candidate.get("candidate_id"), 120)
+    try:
+        candidate_key = research_key(dict(candidate))
+    except Exception:  # pragma: no cover - defensive identity boundary
+        candidate_key = ""
+    residual_ids = _candidate_residual_ids(dict(candidate))
+    for item in normalized.get("items") or []:
+        if not isinstance(item, Mapping):
+            continue
+        if (candidate_id and candidate_id == _text(item.get("candidate_id"), 120)):
+            return _normalize_guidance(item.get("guidance"))
+        if (candidate_key and candidate_key == _text(
+                item.get("research_key"), 80)):
+            return _normalize_guidance(item.get("guidance"))
+        if _text(item.get("residual_id"), 80) in residual_ids:
+            return _normalize_guidance(item.get("guidance"))
+    return {}
 
 
 def _surface(target_type: Any) -> str:
@@ -1657,6 +1701,7 @@ def normalize_research_guidance(raw: Any) -> Dict[str, Any]:
             "review_status": row.get("review_status"),
             "observation_status": row.get("observation_status"),
             "last_round": row.get("last_round"),
+            "surface_variant_plan": row.get("surface_variant_plan"),
         })
         items.append({
             "strategy_id": strategy_id,

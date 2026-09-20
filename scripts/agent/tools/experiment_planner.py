@@ -16,6 +16,8 @@ from ..memory.research import residual_meta
 from .authz import normalize_authz_case, normalize_authz_cases
 from .experiment import capability_contract_from_candidate
 from .redaction import redact_text
+from .surface_variants import (build_surface_variant_plan,
+                               normalize_surface_variant_plan)
 
 
 PLANNER_VERSION = "experiment-planner-v1"
@@ -243,7 +245,9 @@ def apply_benchmark_feedback(research_plan: Dict[str, Any],
 
 def plan_candidate_experiments(candidate: Dict[str, Any],
                                versions: Sequence[Any] = (),
-                               benchmark_feedback: Optional[Dict[str, Any]] = None
+                               benchmark_feedback: Optional[Dict[str, Any]] = None,
+                               research_guidance: Optional[Dict[str, Any]] = None,
+                               target_type: str = ""
                                ) -> Dict[str, Any]:
     """Return a stable, bounded experiment plan for one candidate.
 
@@ -269,6 +273,18 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
 
     normalized_versions = _versions(versions)
     residual_contracts = _residual_contracts(candidate)
+    guidance = research_guidance if isinstance(research_guidance, dict) else {}
+    action = _text(guidance.get("next_action"), 48).lower()
+    surface_variant_plan = normalize_surface_variant_plan(
+        guidance.get("surface_variant_plan"))
+    if not surface_variant_plan:
+        surface_variant_plan = build_surface_variant_plan(
+            _candidate_research_surface(candidate) or target_type,
+            candidate.get("target_type") or target_type,
+            action,
+            candidate.get("attack_class") or candidate.get("category"),
+            candidate.get("variant") or candidate.get("variants"),
+        )
     preconditions = [
         redact_text(item)
         for item in _list(
@@ -415,6 +431,7 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
         },
         "capability_contract": capability_contract,
         "residual_contracts": residual_contracts,
+        "surface_variant_plan": surface_variant_plan,
         "plans": plans,
         "provenance": {
             "producer": "experiment-planner",

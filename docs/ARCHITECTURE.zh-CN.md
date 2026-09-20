@@ -40,6 +40,11 @@ S8 还会生成有界的 `research-strategy-guidance-v1` 视图，只汇合策�
 和显式变体覆盖率，并映射为有限的下一步动作类别。它可以调整研究调度或建议替换零信息增益的实验，
 但绝不是证据、漏洞结论、CVSS 输入，也不能覆盖 G4/G5。
 
+S2 复用同一份行动上下文生成 `surface-variant-plan-v1`。计划按 Web、协议、云、移动端和 native
+分别选择状态机、身份边界、生命周期、路由、解析器或方法体变体；每个变体始终对称地包含正向、
+负向/安全等价和环境缺口三条车道。车道只是观测要求与证伪条件，不是已经执行的观测，完整计划也
+不能暗示任一车道已经执行。
+
 S1 中包含授权边界和危险 Sink 的启发式 Source→Sink 路径会写入
 `composite-chain-candidates.json`，并在 S2 进入与模型候选、控制图候选、同族差分候选相同的调度池。它们始终保留
 `heuristic-nearby` / `requires_manual_dataflow=true`，只能作为审计和 PoC

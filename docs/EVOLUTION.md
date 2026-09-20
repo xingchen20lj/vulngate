@@ -198,6 +198,17 @@ snapshot is `S8/research-guidance.json`; all fields are bounded metadata with
 `claim_status=not-a-finding`, and none can alter a candidate verdict, CVSS,
 G4, or G5.
 
+S2 now consumes the action context through a shared
+`surface-variant-plan-v1` library. It selects a bounded surface-specific
+variant for Web, protocol, cloud, mobile, or native targets and expands it into
+three mandatory comparison lanes: `positive`, `negative`, and
+`environment-gap`. The lane definitions carry only allowlisted observation
+signals and falsifier codes. Config-driven and autonomous planning reuse the
+same normalized plan, so a lifecycle, identity-boundary, protocol state
+machine, route/parser, or native method-body follow-up is not reduced to a
+free-form prompt suggestion. The plan remains a research checklist; only
+executed S4 observations can affect gates or conclusions.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

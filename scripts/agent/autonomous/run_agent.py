@@ -47,6 +47,7 @@ from ..memory.portfolio import (build_research_portfolio,
 from ..analysis.research_strategy import (apply_strategy_observations,
                                            apply_research_guidance,
                                            load_research_strategy,
+                                           strategy_guidance_for_candidate,
                                            write_research_guidance,
                                            write_research_strategy)
 from ..orchestrator.config import TargetConfig
@@ -616,13 +617,17 @@ def _attach_experiment_plans(ctx: AutoCtx, round_no: int,
     selected_ids = {str(c.get("candidate_id")) for c in candidates}
     plan_candidates = pool if pool is not None else candidates
     benchmark_feedback = ctx.benchmark_feedback()
+    strategy = load_research_strategy(ctx.root, ctx.cfg.name)
     if benchmark_feedback:
         ctx.write_artifact(round_no, "S2", "benchmark-feedback.json",
                            benchmark_feedback)
     plans = []
     for candidate in plan_candidates:
         research_plan = plan_candidate_experiments(
-            candidate, versions, benchmark_feedback=benchmark_feedback)
+            candidate, versions, benchmark_feedback=benchmark_feedback,
+            research_guidance=strategy_guidance_for_candidate(
+                strategy, candidate),
+            target_type=ctx.cfg.target_type)
         candidate["experiment_plan"] = research_plan
         plan_row = dict(research_plan)
         plan_row["scheduled"] = (str(candidate.get("candidate_id")) in selected_ids

@@ -19,6 +19,7 @@ from ..memory.portfolio import (build_research_portfolio,
 from ..analysis.research_strategy import (apply_strategy_observations,
                                            apply_research_guidance,
                                            load_research_strategy,
+                                           strategy_guidance_for_candidate,
                                            write_research_guidance,
                                            write_research_strategy)
 from ..memory.state import CheckpointStore
@@ -446,9 +447,13 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
         ctx.store.write_artifact("S2", "benchmark-feedback.json",
                                  benchmark_feedback)
     experiment_plans = []
+    scheduled_strategy = plan.research_strategy if plan is not None else {}
     for cand in pool:
         research_plan = plan_candidate_experiments(
-            cand, versions, benchmark_feedback=benchmark_feedback)
+            cand, versions, benchmark_feedback=benchmark_feedback,
+            research_guidance=strategy_guidance_for_candidate(
+                scheduled_strategy, cand),
+            target_type=ctx.config.target_type)
         cand["experiment_plan"] = research_plan
         plan_row = dict(research_plan)
         plan_row["scheduled"] = str(cand.get("candidate_id")) in selected_ids
@@ -476,6 +481,8 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
             "chain_components": cand.get("chain_components", []),
             "experiment_plan_ids": [p.get("plan_id") for p in
                                     research_plan.get("plans", [])],
+            "surface_variant_plan": research_plan.get(
+                "surface_variant_plan", {}),
             "research_strategy": research_plan.get("strategy_tags", []),
         })
     ctx.store.write_artifact("S2", "candidate-matrix.json", matrix)

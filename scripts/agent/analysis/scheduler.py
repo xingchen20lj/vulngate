@@ -69,6 +69,7 @@ from .research_strategy import (
     write_research_guidance,
     write_research_strategy,
 )
+from ..tools.surface_variants import normalize_surface_variant_plan
 from .threat_model import load_threat_model
 
 # ---------------------------------------------------------------------------
@@ -751,6 +752,28 @@ def _research_strategy_guidance(candidate: Dict[str, Any],
         "review_status": str(raw_guidance.get("review_status") or "")[:32],
         "claim_status": "not-a-finding",
     }
+    variant_plan = normalize_surface_variant_plan(
+        raw_guidance.get("surface_variant_plan"))
+    if variant_plan:
+        guidance["surface_variant_plan"] = {
+            "schema_version": variant_plan.get("schema_version"),
+            "surface": variant_plan.get("surface"),
+            "action": variant_plan.get("action"),
+            "selected_variants": [
+                str(row.get("variant_id"))
+                for row in variant_plan.get("selected_variants") or []
+                if isinstance(row, dict) and row.get("variant_id")
+            ][:3],
+            "lanes": [{
+                "variant_id": row.get("variant_id"),
+                "lane": row.get("lane"),
+                "required_observations": list(
+                    row.get("required_observations") or [])[:6],
+                "falsifiers": list(row.get("falsifiers") or [])[:5],
+            } for row in variant_plan.get("lanes") or []
+              if isinstance(row, dict)][:6],
+            "claim_status": "not-a-finding",
+        }
     return {
         "match_kind": item.get("_match_kind", "path"),
         "strategy_id": str(item.get("strategy_id") or ""),
@@ -2142,10 +2165,19 @@ def prompt_coverage_block(ctx: ScheduleContext, plan: Optional[SchedulePlan] = N
         for item in strategy.get("items", []):
             observation = item.get("observation") or {}
             guidance = item.get("guidance") or {}
+            variant_plan = guidance.get("surface_variant_plan") or {}
+            variant_ids = ",".join(
+                str(value) for value in variant_plan.get(
+                    "selected_variants") or []) or "-"
+            lane_names = ",".join(sorted({
+                str(row.get("lane")) for row in variant_plan.get("lanes") or []
+                if isinstance(row, dict) and row.get("lane")
+            })) or "-"
             lines.append("  [priority=%s] %s kind=%s state=%s "
                          "path=%s residual=%s objective=%s observe=%s "
                          "falsify=%s observation=%s gain=%s missing=%s "
                          "next_action=%s replace=%s action_reasons=%s "
+                         "surface_variants=%s lanes=%s "
                          "claim_status=%s" % (
                              item.get("priority", 0),
                              item.get("strategy_id"), item.get("kind"),
@@ -2162,6 +2194,7 @@ def prompt_coverage_block(ctx: ScheduleContext, plan: Optional[SchedulePlan] = N
                              "yes" if guidance.get(
                                  "replacement_recommended") else "no",
                              ";".join(guidance.get("reason_codes") or []) or "-",
+                             variant_ids, lane_names,
                              item.get("claim_status", "not-a-finding")))
 
     lines.append("## 评测反馈 / Benchmark Feedback")

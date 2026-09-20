@@ -43,6 +43,12 @@ coverage, then maps them to finite next-action classes. Guidance can adjust
 research scheduling or recommend replacing a zero-yield experiment, but it is
 never evidence, a finding verdict, a CVSS input, or a G4/G5 override.
 
+The S2 planner consumes the same action context through
+`surface-variant-plan-v1`. A plan is surface-specific but always symmetric:
+each selected variant has positive, negative/safe, and environment-gap lanes.
+The lanes are observation requirements and falsifiers, not observations; a
+complete plan never implies that any lane executed.
+
 ## Two operating modes
 
 | Mode | Reasoning | Setup | Typical use |

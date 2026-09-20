@@ -33,6 +33,7 @@
 | 16 | Residual falsifier 闭合 | 已实现（contract-bound S4 closure） | `S2/experiment-plans.json` residual contracts、`S4/residual-closure.json`、`research-memory-v1` 的 `residual-falsified` | 只有声明过的 residual contract、匹配 ID、显式 allowlisted falsifier、成功执行且无副作用的 cell 才能闭合；环境失败、门控和实际 effect 保持 pending，且不改变 G4/G5 |
 | 17 | 策略项真实观测回写与信息增益 | 已实现（bounded S4 strategy feedback） | `research-strategy-feedback-v1`、`S8/research-strategy.json`、`S8/research-strategy-feedback.json`、下一轮策略提示/调度证据 | 只用真实 S4 summary 的有界信号更新匹配策略项；记录缺失观测、最新/历史状态和本轮信息增益；重复且无新信号时取消策略加分，不改变候选、CVSS 或 G4/G5 |
 | 18 | 跨轮研究行动与实验替换建议 | 已实现（bounded strategy action guidance） | `research-strategy-guidance-v1`、`state/<target>/coverage/research-guidance.json`、`S8/research-guidance.json`、策略项 `next_action` | 将 S4 观测、人工复核和显式变体覆盖汇合为有限动作；环境缺口优先修复，负向/能力/typed effect 缺口转成定向补证，零信息重复建议换实验；只影响研究调度，不改变候选、CVSS 或 G4/G5 |
+| 19 | 研究面专用变体与三车道实验计划 | 已实现（bounded surface variant matrix） | `surface-variant-plan-v1`、`S2/experiment-plans.json`、`S2/candidate-matrix.json`、策略 guidance 中的 `surface_variant_plan` | Web/协议/云/移动/native 按各自状态机、身份边界、生命周期或方法体验证选择变体；每个变体同时保留正向、负向/安全等价、环境缺口车道；计划不等于执行，不改变 G4/G5 |
 
 ## 当前阶段：可证伪实验规划
 
@@ -351,8 +352,8 @@ S2→S4→S8 的单向契约：
 
 ## 后续优先级
 
-1. 将 `next_action` 与协议状态机、云身份边界、移动端生命周期和 native 方法体验证的合成变体对齐，并为每类维持正向、负向和环境缺口对照。
-2. 用真实项目回放校准各类 guidance 的阈值和替换命中率，避免“换实验”本身变成无证据的循环。
-3. 在不扩大 claim 权限的前提下，把行动建议接入更细粒度的实验模板/fixture 生成器。
+1. 用真实项目回放校准各类 guidance 的阈值和替换命中率，避免“换实验”本身变成无证据的循环。
+2. 将三车道计划接入更细粒度的 fixture/状态机生成器，同时保留 runner 的回环、审批和资源上限。
+3. 在不扩大 claim 权限的前提下，增加跨版本/跨修复变体的自动对照编排。
 
 每一阶段都必须同时更新实现、技能契约、回归测试和 CHANGELOG；只有测试、artifact schema 和安全边界一起稳定后，才适合提交为一个独立变更。

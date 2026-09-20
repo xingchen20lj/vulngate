@@ -101,6 +101,13 @@ class CompositeChainCandidateTests(unittest.TestCase):
             chain_plan = next(item for item in experiment_plans
                               if item["candidate_id"].startswith("chain-"))
             self.assertTrue(chain_plan["scheduled"])
+            self.assertEqual("surface-variant-plan-v1",
+                             chain_plan["surface_variant_plan"]["schema_version"])
+            self.assertEqual(
+                {"positive", "negative", "environment-gap"},
+                {row["lane"] for row in chain_plan["surface_variant_plan"][
+                    "lanes"]},
+            )
             self.assertIn("authorization-boundary",
                           {item["kind"] for item in chain_plan["plans"]})
             s3 = run_s3(ctx)
