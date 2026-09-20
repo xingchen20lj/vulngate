@@ -20,7 +20,7 @@
 | 3 | 可证伪实验规划器 | 本阶段已实现 | `S2/experiment-plans.json`、S3 计划上下文 | 每个候选有必需观测和 falsifier，且 `not-a-finding` |
 | 4 | 能力原语与攻击路径图 | 已实现（含 S4 运行时契约） | `capability-graph.json`、`capability-candidates.json`、`capability_contract`、`CAPABILITY/TRANSITION` 证据 | 低危原语只有在链路、transition 和终点 typed effect 均有观测时才允许继续评估 |
 | 5 | 运行时研究实验室与差分验证 | 已实现（定向 fuzz + 普通 S4） | `fuzz-corpus.json`、`FUZZ/runtime-lab.json`、`S4/runtime-lab.json`、版本/安全模式差分、缩减 reproducer | 固定输入可重复重放；差分、签名漂移与前置/harness 失败分开记录 |
-| 6 | 研究记忆与反馈学习 | 初步实现（跨轮研究记忆） | `state/<target>/research-memory.json`、`S8/research-memory.json`、稳定重放/差分/环境缺口状态、next probe | 新轮次能利用旧证据；环境缺口不被当成负证据；重复实验只降权不删除 |
+| 6 | 研究记忆与反馈学习 | 已实现（跨轮记忆 + S4 服务上下文） | `state/<target>/research-memory.json`、`S8/research-memory.json`、`S4/runtime-lab.json`、`S4/processes.json`、配置快照、authz fixture | 新轮次能利用旧证据；服务/配置/授权上下文可复现；环境缺口不被当成负证据；重复实验只降权不删除 |
 | 7 | 专家级评测基准 | 后续 | 真实/合成案例集、变体集、误报/漏报指标 | 用证据质量、覆盖率、校准度衡量，而不是只看候选数量 |
 
 ## 当前阶段：可证伪实验规划
@@ -78,12 +78,18 @@ digest。触发器经 ddmin 后会形成独立的缩减 reproducer，原始输�
 - 将脱敏后的结果写入 `FUZZ/runtime-lab.json`，并在 `fuzz_spec.runtime_lab` 中留下
   artifact 引用；所有实验结果仍是 `claim_status=not-a-finding`。
 
-这一步已经把“定向 fuzz 发现”与“可复现、可差分的研究证据”连接起来；下一步是把同一
-套 fixture adapter 扩展到了普通 Java/Shell S4 候选：从既有 cell 的参数、前置条件、
-授权元数据、有状态声明和能力契约生成稳定身份，但 artifact 只保存参数 digest，不落原始
-参数或进程输出。普通 S4 也会复用隔离矩阵执行有限重放与版本 × SafeMode 对照，并把
-`S4/runtime-lab.json` 关联回 `verification-matrix.json`；所有结果仍保持
-`claim_status=not-a-finding`。下一步是固定服务生命周期与更细粒度的配置/authz fixture 适配。
+这一步已经把“定向 fuzz 发现”与“可复现、可差分的研究证据”连接起来；同一套 fixture
+adapter 也已扩展到普通 Java/Shell S4 候选：从既有 cell 的参数、前置条件、授权元数据、
+有状态声明和能力契约生成稳定身份，但 artifact 只保存参数 digest，不落原始参数或进程输出。
+普通 S4 会复用隔离矩阵执行有限重放与版本 × SafeMode 对照，并把 `S4/runtime-lab.json`
+关联回 `verification-matrix.json`；所有结果仍保持 `claim_status=not-a-finding`。
+
+本阶段进一步补上了固定服务生命周期和运行上下文快照。`runtime_lab.service` 只接受
+workspace 内的 argv 命令，必须配置回环 healthcheck；健康实例可复用，VulnGate 自己启动的
+完整进程组会在轮次结束回收，PID/端口状态写入 `S4/processes.json`。服务未就绪时，矩阵
+明确记为 `precondition-unavailable`，不把环境失败当作漏洞不存在。`S4/runtime-lab.json`
+同时保存脱敏的 `runtime-context-v1`：版本/目标 URL digest、有效 runtime-lab 选项、服务
+配置 digest，以及跨 case rename 稳定的 `authz_fixture_id`，用于细粒度租户/对象对照。
 
 ## 阶段 6 初步实现：跨轮研究记忆与反馈调度
 
@@ -108,8 +114,7 @@ stdout/stderr 不写入跨轮记忆。
 
 ## 后续优先级
 
-1. 补充固定服务生命周期、配置快照和更细粒度的 authz/tenant fixture adapter。
-2. 让研究记忆吸收服务快照、修复变体和人工复核反馈，同时保持事件可回放。
-3. 最后做评测基准，用负结果、重复率、证据完整度和严重性校准反向约束 Agent。
+1. 让研究记忆吸收服务快照、修复变体和人工复核反馈，同时保持事件可回放。
+2. 最后做评测基准，用负结果、重复率、证据完整度和严重性校准反向约束 Agent。
 
 每一阶段都必须同时更新实现、技能契约、回归测试和 CHANGELOG；只有测试、artifact schema 和安全边界一起稳定后，才适合提交为一个独立变更。

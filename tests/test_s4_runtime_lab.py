@@ -129,21 +129,35 @@ class S4RuntimeLabTests(unittest.TestCase):
             src.mkdir(parents=True)
             (src / "probe.sh").write_text(
                 "#!/bin/sh\nprintf 'PARSED=ok\\n'\n", encoding="utf-8")
+            case = {"case_id": "cross-tenant", "principal": "u1",
+                    "role": "user", "tenant_id": "a", "object_id": "o7",
+                    "expected_http_codes": [403], "expected_authz": "deny",
+                    "token": "do-not-persist"}
             cfg = TargetConfig(
                 name="shell-lab", discovery_date="2026-09-21",
+                target_urls={"local": "http://127.0.0.1:8080/?token=secret-value"},
                 runtime_lab={"max_fixtures": 1, "replay_runs": 2},
             )
-            cell = MatrixCell(version="local", safe_mode=False)
+            cell = MatrixCell(version="local", safe_mode=False, authz=case)
             spec = ShellPOCSpec(
                 candidate_id="C1", script="probe.sh", cells=[cell],
                 urls={"local": ""},
             )
             artifact = run_s4_runtime_lab(
-                root, "shell-lab", 1, cfg, [{"candidate_id": "C1"}],
+                root, "shell-lab", 1,
+                cfg, [{"candidate_id": "C1", "authz_cases": [case]}],
                 [], [spec], {}, version_universe=["local"],
             )
         self.assertEqual(artifact["status"], "completed")
         self.assertEqual(artifact["fixtures"][0]["replay"]["status"], "stable")
+        self.assertEqual(artifact["configuration"]["schema_version"],
+                         "runtime-context-v1")
+        self.assertTrue(artifact["configuration"]["authz_fixtures"][0]["fixture_id"].startswith("azfx-"))
+        encoded = json.dumps(artifact["configuration"], ensure_ascii=False)
+        self.assertNotIn("secret-value", encoded)
+        self.assertNotIn("do-not-persist", encoded)
+        self.assertEqual(artifact["fixtures"][0]["fixture"]["authz_fixture_id"],
+                         artifact["configuration"]["authz_fixtures"][0]["fixture_id"])
 
     def test_normalization_and_merge_retain_typed_gaps(self):
         row = normalize_matrix_record({
@@ -208,6 +222,30 @@ class S4RuntimeLabTests(unittest.TestCase):
         self.assertEqual(
             result["summaries"]["C1"]["runtime_lab"]["claim_status"],
             "not-a-finding")
+
+    def test_config_pipeline_records_service_precondition_gap(self):
+        cfg = TargetConfig(
+            name="service-gap", discovery_date="2026-09-21",
+            target_urls={"local": "http://127.0.0.1:1/"},
+            runtime_lab={"service": {
+                "healthcheck_url": "http://127.0.0.1:1/health",
+            }},
+            candidates=[{
+                "candidate_id": "C1", "surface": "web handler",
+                "pocs": [{"script": "probe.sh", "cells": [
+                    {"version": "local", "safe_mode": False},
+                ]}],
+            }],
+        )
+        with tempfile.TemporaryDirectory() as td:
+            result = run_s4(StageContext(Path(td), "service-gap", 1, cfg,
+                                         offline=True))
+        self.assertEqual(result["summaries"]["C1"]["execution_state"],
+                         "precondition-unavailable")
+        self.assertEqual(result["runtime_lab"]["status"],
+                         "precondition-unavailable")
+        self.assertEqual(result["runtime_lab"]["configuration"]["service_lifecycle"]["status"],
+                         "precondition-unavailable")
 
 
 if __name__ == "__main__":

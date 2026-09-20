@@ -20,7 +20,8 @@ from typing import Any, Dict, List, Optional
 
 from ..sandbox.approval import ApprovalGate
 from ..sandbox.runner import CommandRunner, RunResult, minimal_poc_env
-from .authz import assert_authz_observations, authz_env, authz_jvm_props, normalize_authz_case
+from .authz import (assert_authz_observations, authz_env, authz_fixture_id,
+                    authz_jvm_props, normalize_authz_case)
 from .experiment import (experiment_metadata, normalize_capability_contract,
                          normalize_experiment, sequence_trace_status)
 
@@ -135,6 +136,7 @@ def _cell_metadata(cell: MatrixCell) -> Dict[str, Any]:
         "sequence": meta["sequence"],
         "concurrency": meta["concurrency"],
         "availability_probe": meta["availability_probe"],
+        "authz_fixture_id": authz_fixture_id(cell.authz),
         "capability_contract": meta["capability_contract"],
         "experiment": meta,
     }

@@ -400,6 +400,37 @@ verification summary, but keep every replay/differential result at
 `claim_status=not-a-finding`; a missing baseline, service, runtime or harness
 must remain an explicit gap.
 
+#### Bounded service lifecycle and context snapshot
+
+Stateful web/middleware experiments may add a target-level
+`runtime_lab.service` mapping:
+
+```json
+{
+  "runtime_lab": {
+    "service": {
+      "start_command": ["python3", "-m", "http.server", "8080", "--bind", "127.0.0.1"],
+      "healthcheck_url": "http://127.0.0.1:8080/",
+      "startup_timeout": 20,
+      "shutdown_timeout": 8
+    }
+  }
+}
+```
+
+Commands are argv-only, must remain inside the workspace, and cannot use shell
+`-c`, remote/cloud tools, or non-loopback targets. An explicit loopback URL or
+an inspected local health command is required before a service can start. A
+healthy existing instance is reused; only a process group started by this run
+is terminated. Persist PID/port lifecycle and stop status in `S4/processes.json`.
+Never put tokens, cookies, passwords, or raw command values in the research
+artifact. `S4/runtime-lab.json` carries a `runtime-context-v1` snapshot with
+URL/configuration digests and bounded service metadata. It also carries stable
+credential-free `authz_fixture_id` values for principal/role/tenant/object
+cases. A missing or failed healthcheck is `precondition-unavailable` (or
+`policy-denied`), not a negative finding; all service metadata remains
+`claim_status=not-a-finding`.
+
 #### Cross-round research memory
 
 At S8, merge a bounded research-only delta into
@@ -1029,6 +1060,32 @@ cell。所有产物都是 `claim_status=not-a-finding` 的研究证据，不得�
 SafeMode 对照，聚合结果写入 `S4/runtime-lab.json`，并从 S4 verification summary
 关联到候选。所有重放/差分结果仍必须是 `claim_status=not-a-finding`；缺少基线、服务、
 runtime 或 harness 时必须保留为显式缺口。
+
+#### 有界服务生命周期与上下文快照
+
+有状态 Web/中间件实验可以在目标级配置中声明 `runtime_lab.service`：
+
+```json
+{
+  "runtime_lab": {
+    "service": {
+      "start_command": ["python3", "-m", "http.server", "8080", "--bind", "127.0.0.1"],
+      "healthcheck_url": "http://127.0.0.1:8080/",
+      "startup_timeout": 20,
+      "shutdown_timeout": 8
+    }
+  }
+}
+```
+
+命令只能是 argv 数组，工作目录必须在 workspace 内，禁止 shell `-c`、远程/云工具和非回环
+目标；启动前必须有显式回环 URL 或经过检查的本地 health command。已健康实例可以复用，
+只有本轮自己启动的完整进程组会被回收；PID/Port 生命周期和停止状态写入
+`S4/processes.json`。禁止把 Token、Cookie、Password 或原始命令写进研究产物。
+`S4/runtime-lab.json` 的 `runtime-context-v1` 快照只保留 URL/configuration digest、有界服务
+元数据，以及用于主体/角色/租户/对象对照的无凭据 `authz_fixture_id`。健康检查失败必须记录为
+`precondition-unavailable`（或 `policy-denied`），不能当作负面漏洞结论；所有服务元数据仍是
+`claim_status=not-a-finding`。
 
 #### 跨轮研究记忆
 

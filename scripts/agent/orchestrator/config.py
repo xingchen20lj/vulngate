@@ -26,7 +26,8 @@ class TargetConfig:
     fuzzer: Dict[str, Any] = field(default_factory=dict)  # directed fuzz config (plan 2.1)
     # Bounded ordinary-S4 fixture replay/differential evidence.  The adapter
     # is enabled by default and can be disabled per target or candidate when a
-    # PoC is intentionally non-repeatable.
+    # PoC is intentionally non-repeatable.  An optional ``service`` mapping
+    # owns a workspace-local argv-only process with a loopback healthcheck.
     runtime_lab: Dict[str, Any] = field(default_factory=dict)
     public_scan: Dict[str, Any] = field(default_factory=dict)  # internet novelty scan (plan 2.7)
     jars: List[Dict[str, str]] = field(default_factory=list)

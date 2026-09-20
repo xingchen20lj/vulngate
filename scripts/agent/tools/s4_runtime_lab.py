@@ -18,19 +18,23 @@ import hashlib
 import json
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 
-from .authz import normalize_authz_case
+from .authz import authz_fixture_id, normalize_authz_case, normalize_authz_cases
 from .build import (JavaMatrixRunner, MatrixCell, POCSpec, ShellMatrixRunner,
                     ShellPOCSpec)
 from .redaction import redact_text
 from .runtime_lab import (LAB_SCHEMA_VERSION, MAX_CELLS,
                           summarize_replay, summarize_version_differential)
+from .service_lifecycle import ServiceLifecycle
 
 
 MAX_S4_FIXTURES = 16
 MAX_S4_REPLAY_RUNS = 5
 MAX_S4_SAFE_MODES = 4
 MAX_FIELD_LENGTH = 160
+MAX_CONTEXT_AUTHZ_FIXTURES = 128
+CONTEXT_SCHEMA_VERSION = "runtime-context-v1"
 
 
 def _text(value: Any, limit: int = MAX_FIELD_LENGTH) -> str:
@@ -75,6 +79,7 @@ def _safe_cell_context(cell: MatrixCell) -> Dict[str, Any]:
             for key, value in sorted(cell.jvm.items())[:16]
         },
         "authz": normalize_authz_case(cell.authz),
+        "authz_fixture_id": authz_fixture_id(cell.authz),
         "required_runtime": _text(cell.required_runtime, 80),
         "java_bin": _text(cell.java_bin, 160),
         "java_home": _text(cell.java_home, 160),
@@ -142,6 +147,7 @@ def build_s4_fixture(candidate: Dict[str, Any], spec: Any, cell: MatrixCell,
         "args_count": context["args_count"],
         "args_digest": context["args_digest"],
         "authz": context["authz"],
+        "authz_fixture_id": context["authz_fixture_id"],
         "sequence_count": context["sequence_count"],
         "sequence_digest": context["sequence_digest"],
         "concurrency": context["concurrency"],
@@ -194,6 +200,115 @@ def _options(config: Any) -> Dict[str, Any]:
         "candidate_ids": {str(item) for item in candidate_ids if str(item)},
         "include_java": raw.get("include_java", True) is not False,
         "include_shell": raw.get("include_shell", True) is not False,
+    }
+
+
+def _config_value(config: Any, key: str, default: Any = None) -> Any:
+    if isinstance(config, dict):
+        return config.get(key, default)
+    return getattr(config, key, default) if config is not None else default
+
+
+def _version_set(jars_by_version: Dict[str, List[Any]],
+                 version_universe: Optional[Sequence[str]]) -> List[str]:
+    versions = sorted({str(item) for item in (version_universe or []) if str(item)})
+    if not versions:
+        versions = sorted({str(item) for item in jars_by_version if str(item)})
+    return versions
+
+
+def _safe_url_snapshot(value: Any) -> Dict[str, Any]:
+    """Describe a target URL without persisting query values or credentials."""
+    raw = _text(value, 500)
+    if not raw:
+        return {"configured": False}
+    try:
+        parsed = urlparse(raw)
+        host = parsed.hostname or ""
+        port = parsed.port
+    except ValueError:
+        return {"configured": True, "valid": False,
+                "url_digest": _digest(raw)[:20]}
+    return {
+        "configured": True,
+        "valid": bool(parsed.scheme in {"http", "https"} and host
+                       and not parsed.username and not parsed.password),
+        "scheme": _text(parsed.scheme, 16),
+        "host_digest": _digest(host.lower())[:20] if host else "",
+        "port": port or (443 if parsed.scheme == "https" else 80),
+        "path_digest": _digest(parsed.path or "/")[:20],
+        "url_digest": _digest(raw)[:20],
+    }
+
+
+def _safe_authz_fixture(case: Any, candidate_id: str) -> Dict[str, Any]:
+    normalized = normalize_authz_case(case)
+    return {
+        "candidate_id": _text(candidate_id, 120),
+        "fixture_id": authz_fixture_id(normalized),
+        "case_id": _text(normalized.get("case_id", ""), 80),
+        "principal": _text(normalized.get("principal", ""), 80),
+        "role": _text(normalized.get("role", ""), 80),
+        "tenant_id": _text(normalized.get("tenant_id", ""), 80),
+        "object_id": _text(normalized.get("object_id", ""), 80),
+        "object_tenant_id": _text(normalized.get("object_tenant_id", ""), 80),
+        "expected_authz": normalized.get("expected_authz", ""),
+        "expected_http_codes": list(normalized.get("expected_http_codes", [])),
+        "expected_object_mutated": normalized.get("expected_object_mutated"),
+    }
+
+
+def build_runtime_context_snapshot(
+        config: Any, versions: Sequence[str], candidates: Sequence[Dict[str, Any]],
+        options: Dict[str, Any], service_info: Optional[Dict[str, Any]] = None
+        ) -> Dict[str, Any]:
+    """Build a deterministic, credential-free snapshot of an S4 run context."""
+    target_urls = _config_value(config, "target_urls", {})
+    if not isinstance(target_urls, dict):
+        target_urls = {}
+    authz_fixtures: List[Dict[str, Any]] = []
+    seen = set()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        cid = str(candidate.get("candidate_id", ""))
+        for case in normalize_authz_cases(candidate.get("authz_cases")):
+            fixture = _safe_authz_fixture(case, cid)
+            key = (fixture["candidate_id"], fixture["fixture_id"])
+            if key not in seen:
+                seen.add(key)
+                authz_fixtures.append(fixture)
+            if len(authz_fixtures) >= MAX_CONTEXT_AUTHZ_FIXTURES:
+                break
+        if len(authz_fixtures) >= MAX_CONTEXT_AUTHZ_FIXTURES:
+            break
+    service = service_info or {
+        "schema_version": "service-lifecycle-v1",
+        "configured": False,
+        "enabled": False,
+        "claim_status": "not-a-finding",
+    }
+    return {
+        "schema_version": CONTEXT_SCHEMA_VERSION,
+        "target_type": _text(_config_value(config, "target_type", "library"), 40),
+        "versions": sorted({str(item) for item in versions if str(item)}),
+        "target_urls": {
+            _text(version, 80): _safe_url_snapshot(url)
+            for version, url in sorted(target_urls.items(), key=lambda item: str(item[0]))
+            if str(version)
+        },
+        "runtime_lab": {
+            "enabled": bool(options.get("enabled")),
+            "max_fixtures": int(options.get("max_fixtures", 0) or 0),
+            "replay_runs": int(options.get("replay_runs", 0) or 0),
+            "safe_modes": list(options.get("safe_modes", [])),
+            "include_java": bool(options.get("include_java")),
+            "include_shell": bool(options.get("include_shell")),
+            "candidate_ids": sorted(str(item) for item in options.get("candidate_ids", set())),
+        },
+        "authz_fixtures": authz_fixtures,
+        "service_lifecycle": service,
+        "claim_status": "not-a-finding",
     }
 
 
@@ -431,7 +546,7 @@ def _failure(version: str, safe_mode: bool, fixture_id: str,
     }, fixture_id, lab_kind)]
 
 
-def run_s4_runtime_lab(
+def _run_s4_runtime_lab_core(
         workspace: Any, target: str, round_no: int, config: Any,
         candidates: Sequence[Dict[str, Any]],
         java_specs: Sequence[POCSpec], shell_specs: Sequence[ShellPOCSpec],
@@ -568,6 +683,109 @@ def run_s4_runtime_lab(
     }
 
 
+def _runtime_lab_gap(status: str, options: Dict[str, Any],
+                     versions: Sequence[str], reason: str,
+                     service_info: Dict[str, Any], config: Any,
+                     candidates: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    service_record = dict(service_info)
+    artifact = {
+        "schema_version": LAB_SCHEMA_VERSION,
+        "scope": "ordinary-s4",
+        "status": status,
+        "reason": _text(reason, 240),
+        "replay_runs": options["replay_runs"],
+        "safe_modes": options["safe_modes"],
+        "version_count": len(versions),
+        "fixture_count": 0,
+        "candidate_status": {},
+        "fixtures": [],
+        "service_lifecycle": service_record,
+        "claim_status": "not-a-finding",
+    }
+    artifact["configuration"] = build_runtime_context_snapshot(
+        config, versions, candidates, options, service_record)
+    return artifact
+
+
+def run_s4_runtime_lab(
+        workspace: Any, target: str, round_no: int, config: Any,
+        candidates: Sequence[Dict[str, Any]],
+        java_specs: Sequence[POCSpec], shell_specs: Sequence[ShellPOCSpec],
+        jars_by_version: Dict[str, List[Any]],
+        baseline_results: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        approval: Any = None,
+        version_universe: Optional[Sequence[str]] = None,
+        service_lifecycle: Optional[ServiceLifecycle] = None) -> Dict[str, Any]:
+    """Run ordinary S4 lab experiments with a bounded service context."""
+    options = _options(config)
+    versions = _version_set(jars_by_version, version_universe)
+    owns_lifecycle = service_lifecycle is None
+    lifecycle = service_lifecycle or ServiceLifecycle(
+        workspace, target, round_no, config, approval=approval)
+    service_info = (lifecycle.snapshot() if owns_lifecycle
+                    else lifecycle.result())
+
+    # Do not start a target service when the configured candidates do not have
+    # any repeatable fixture.  The core function still owns the exact
+    # disabled/no-fixture artifact shape.
+    primary_version = versions[-1] if versions else ""
+    templates = _templates(candidates, java_specs, shell_specs,
+                           primary_version, options)[:options["max_fixtures"]]
+    if options["enabled"] and templates and lifecycle.configured and lifecycle.enabled:
+        try:
+            if "ready" not in service_info:
+                service_info = lifecycle.ensure_ready()
+        except Exception as exc:
+            stop_info = (lifecycle.stop() if owns_lifecycle else {
+                "status": "managed-by-caller", "stopped": False,
+                "claim_status": "not-a-finding",
+            })
+            service_info = lifecycle.snapshot()
+            service_info.update({
+                "status": "run-failed", "ready": False,
+                "reason": "%s: %s" % (type(exc).__name__, str(exc)[:180]),
+                "stop": stop_info,
+            })
+            return _runtime_lab_gap(
+                "run-failed", options, versions, service_info["reason"],
+                service_info, config, candidates)
+        if not service_info.get("ready"):
+            stop_info = (lifecycle.stop() if owns_lifecycle else {
+                "status": "managed-by-caller", "stopped": False,
+                "claim_status": "not-a-finding",
+            })
+            service_info = dict(service_info)
+            service_info["stop"] = stop_info
+            return _runtime_lab_gap(
+                "precondition-unavailable" if service_info.get("status") != "policy-denied"
+                else "policy-denied",
+                options, versions,
+                service_info.get("reason", "service healthcheck did not become ready"),
+                service_info, config, candidates)
+
+    try:
+        artifact = _run_s4_runtime_lab_core(
+            workspace, target, round_no, config, candidates, java_specs,
+            shell_specs, jars_by_version, baseline_results=baseline_results,
+            approval=approval, version_universe=version_universe)
+    finally:
+        # An external-ready service is deliberately not owned by this run;
+        # a process started above is always stopped in the same turn. When a
+        # caller owns the lifecycle, it holds the service lock across the
+        # baseline and lab so autonomous workers cannot race one service.
+        stop_info = (lifecycle.stop() if owns_lifecycle else {
+            "status": "managed-by-caller", "stopped": False,
+            "claim_status": "not-a-finding",
+        })
+
+    service_record = dict(service_info)
+    service_record["stop"] = stop_info
+    artifact["service_lifecycle"] = service_record
+    artifact["configuration"] = build_runtime_context_snapshot(
+        config, versions, candidates, options, service_record)
+    return artifact
+
+
 def merge_runtime_lab_artifacts(artifacts: Iterable[Dict[str, Any]],
                                 scope: str = "ordinary-s4") -> Dict[str, Any]:
     """Merge per-worker autonomous lab artifacts without losing gaps."""
@@ -577,6 +795,8 @@ def merge_runtime_lab_artifacts(artifacts: Iterable[Dict[str, Any]],
     replay_runs = 0
     versions = 0
     statuses = []
+    configurations = []
+    service_lifecycles = []
     for item in items:
         fixtures.extend(item.get("fixtures", []) or [])
         try:
@@ -588,11 +808,15 @@ def merge_runtime_lab_artifacts(artifacts: Iterable[Dict[str, Any]],
         except (TypeError, ValueError):
             pass
         statuses.append(item.get("status"))
+        if isinstance(item.get("configuration"), dict):
+            configurations.append(item["configuration"])
+        if isinstance(item.get("service_lifecycle"), dict):
+            service_lifecycles.append(item["service_lifecycle"])
         for cid, status in (item.get("candidate_status") or {}).items():
             candidate_status[str(cid)] = status
     if not items:
         status = "no-fixtures"
-    elif any(value in {"run-failed", "precondition-unavailable"}
+    elif any(value in {"run-failed", "precondition-unavailable", "policy-denied"}
              for value in statuses):
         status = "completed-with-gaps"
     elif fixtures:
@@ -608,5 +832,7 @@ def merge_runtime_lab_artifacts(artifacts: Iterable[Dict[str, Any]],
         "fixture_count": len(fixtures),
         "candidate_status": candidate_status,
         "fixtures": fixtures,
+        "configuration": configurations[0] if configurations else {},
+        "service_lifecycle": service_lifecycles[0] if service_lifecycles else {},
         "claim_status": "not-a-finding",
     }

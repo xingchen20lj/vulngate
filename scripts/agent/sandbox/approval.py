@@ -31,6 +31,8 @@ DEFAULT_RULES: List[ApprovalRule] = [
                  "Version matrix + static audit inputs"),
     ApprovalRule("loopback_connect", True, "127.0.0.1 only, mechanism-level PoC",
                  "JNDI/HTTP connect attempts must not leave the host"),
+    ApprovalRule("service_lifecycle", True, "workspace-local process with loopback healthcheck",
+                 "Bounded target service start/stop for stateful research"),
     ApprovalRule("port_listen", False, "loopback only, requires explicit per-run approval",
                  "LDAP/HTTP listeners for network side-effect evidence"),
     ApprovalRule("external_egress", False, "denied",

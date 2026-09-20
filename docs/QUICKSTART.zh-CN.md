@@ -91,6 +91,28 @@ Feature）——它决定了每一条发现的前置分级。
 有意不可重复，可在目标配置中设置 `runtime_lab.enabled=false`，或在候选上关闭；默认
 适配器会把稳定重放、版本 × SafeMode 差异和 harness 缺口与 G4/G5 结论分开保存。
 
+有状态 Web/中间件 PoC 可以让 VulnGate 管理一个本地服务。命令必须是 argv 数组，工作目录
+必须在 workspace 内，并且必须提供回环健康检查；不要把 Token、Cookie 或 Password 放入配置：
+
+```json
+{
+  "runtime_lab": {
+    "service": {
+      "start_command": ["python3", "-m", "http.server", "8080", "--bind", "127.0.0.1"],
+      "healthcheck_url": "http://127.0.0.1:8080/",
+      "startup_timeout": 20,
+      "shutdown_timeout": 8
+    }
+  }
+}
+```
+
+运行时会复用已健康的本地实例，只回收本轮自己启动的进程组；PID/端口生命周期写入
+`S4/processes.json`。`S4/runtime-lab.json` 的 `configuration` 是脱敏快照，授权/租户/对象
+用例会生成稳定的 `authz_fixture_id`；服务未就绪只记录为
+`precondition-unavailable`，不会被解释成漏洞不存在。禁止使用 shell `-c`、远程命令或非回环
+健康地址。
+
 ## 5. 运行管线（自主模式）
 
 需要无人值守运行，并愿意使用自己的 LLM API Key 时：

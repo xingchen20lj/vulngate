@@ -62,6 +62,18 @@ version × SafeMode comparison. The result is persisted as
 `S4/runtime-lab.json` and linked from the ordinary S4 summary; raw arguments
 and process output are not copied into that artifact.
 
+S4 now also has an optional bounded service context for stateful web and
+middleware experiments. A target may provide an argv-only `runtime_lab.service`
+with a workspace-local working directory and an explicit loopback healthcheck.
+The runner reuses a healthy instance, starts only a local process group when
+needed, records the PID/port lifecycle in `S4/processes.json`, and tears down
+processes it owns. A failed healthcheck is a typed precondition gap, never a
+negative result. `S4/runtime-lab.json` carries a `runtime-context-v1` snapshot:
+target URL digests, effective runtime-lab options, service configuration
+digests, and stable credential-free `authz_fixture_id` records for principal /
+role / tenant / object comparisons. Raw commands, URL queries, credentials,
+arguments, and process output remain outside the research artifact.
+
 S8 now closes the feedback loop with a target-scoped
 `state/<target>/research-memory.json`. A stable, round-independent research key
 joins the candidate's bounded mechanism metadata to replay and differential

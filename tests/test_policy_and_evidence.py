@@ -12,7 +12,8 @@ from agent.sandbox.approval import ApprovalGate  # noqa: E402
 from agent.sandbox.runner import (CommandRunner, validate_global_command,
                                   validate_poc_command)  # noqa: E402
 from agent.tools.authz import (assert_authz_observations, authz_env,
-                               authz_jvm_props, normalize_authz_case)  # noqa: E402
+                               authz_fixture_id, authz_jvm_props,
+                               normalize_authz_case)  # noqa: E402
 from agent.tools.build import (MatrixCell, ShellMatrixRunner, ShellPOCSpec,
                                scan_source_egress, summarize_candidate)  # noqa: E402
 from agent.tools.patch_variants import analyze_patch_history  # noqa: E402
@@ -187,6 +188,17 @@ class EvidenceTests(unittest.TestCase):
         self.assertNotIn("must-not-be-persisted", str(case))
         self.assertNotIn("token", " ".join(authz_env(case)))
         self.assertTrue(any("vulngate.authz.case" in p for p in authz_jvm_props(case)))
+
+    def test_authz_fixture_id_is_stable_across_case_renames(self):
+        first = {"case_id": "owner-v1", "principal": "user-1",
+                 "role": "user", "tenant_id": "tenant-a",
+                 "object_id": "doc-7", "expected_authz": "deny",
+                 "token": "must-not-enter-id"}
+        renamed = dict(first, case_id="cross-tenant")
+        other_tenant = dict(renamed, tenant_id="tenant-b")
+        self.assertEqual(authz_fixture_id(first), authz_fixture_id(renamed))
+        self.assertNotEqual(authz_fixture_id(renamed), authz_fixture_id(other_tenant))
+        self.assertNotIn("must-not-enter-id", authz_fixture_id(first))
 
     def test_authz_deny_contract_passes(self):
         case = {

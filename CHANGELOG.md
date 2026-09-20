@@ -47,6 +47,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   raw arguments, reuses the isolated matrix runners for replay and version ×
   SafeMode comparison, and writes `S4/runtime-lab.json`; replay and
   differential gaps remain `not-a-finding` evidence.
+- Stateful S4 runs can now declare a bounded local `runtime_lab.service`.
+  Service commands are argv-only and workspace-local, health checks are
+  loopback-only, owned process groups are always torn down, and
+  `S4/processes.json` records PID/port lifecycle without command or secret
+  values. `S4/runtime-lab.json` also records a credential-free configuration
+  snapshot and stable `authz_fixture_id` values for tenant/object comparisons.
 - S8 now persists target-scoped cross-round research memory. Stable mechanism
   keys, bounded replay/differential states, environment gaps, and next-probe
   hints are merged idempotently into `state/<target>/research-memory.json`;
@@ -65,6 +71,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Documented cross-round research memory, its state taxonomy, and its
   separation from G4/G5 conclusions in the roadmap, README, evolution notes,
   and audit skill.
+- Documented the bounded service lifecycle, configuration snapshot, process
+  registry, and credential-free authz fixture contract in the roadmap, README,
+  quickstart, evolution notes, and audit skill.
 
 ## [1.1.0] - 2026-09-16
 

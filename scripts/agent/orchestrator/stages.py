@@ -20,7 +20,8 @@ from ..tools import search as srch
 from ..tools.build import (JavaMatrixRunner, MatrixCell, POCSpec,
                            ShellMatrixRunner, ShellPOCSpec, summarize_candidate,
                            converge_s4_cells)
-from ..tools.authz import normalize_authz_case, normalize_authz_cases
+from ..tools.authz import (assert_authz_observations, authz_fixture_id,
+                           normalize_authz_case, normalize_authz_cases)
 from ..tools.conclusion import conclusion_status, derive_conclusion, is_confirmed_conclusion
 from ..tools.cvss import base_score, check_impact_consistency
 from ..tools.source_evidence import (DANGER_PATTERNS, build_source_sink_graph,
@@ -31,6 +32,7 @@ from ..tools.experiment_planner import plan_candidate_experiments
 from ..tools.experiment import capability_contract_from_candidate
 from ..tools.research_strategies import composite_chain_candidates
 from ..tools.s4_runtime_lab import run_s4_runtime_lab
+from ..tools.service_lifecycle import ServiceLifecycle
 from ..tools.target_rules import collect_target_rule_hits, composite_chain_hints
 from ..tools.novelty import (Disclosure, NoveltyChecker, UpstreamRef,
                              mechanism_audit_llm)
@@ -635,37 +637,91 @@ def _stage_pocs(ctx: StageContext) -> None:
             target.write_text(f.read_text(encoding="utf-8"), encoding="utf-8")
 
 
+def _service_gap_row(spec: Any, cell: MatrixCell,
+                     service_info: Dict[str, Any], kind: str) -> Dict[str, Any]:
+    """Represent a missing target service as a typed S4 precondition gap."""
+    name = getattr(spec, "class_name", "") if kind == "java" else getattr(spec, "script", "")
+    result = {
+        "candidate_id": str(getattr(spec, "candidate_id", "")),
+        "poc_class" if kind == "java" else "poc_script": name,
+        "version": cell.version,
+        "safe_mode": cell.safe_mode,
+        "features": list(cell.features),
+        "precondition": cell.precondition,
+        "required_runtime": cell.required_runtime,
+        "authz": normalize_authz_case(cell.authz),
+        "authz_fixture_id": authz_fixture_id(cell.authz),
+        "returncode": None,
+        "timed_out": False,
+        "precondition_status": "precondition-unavailable",
+        "observations": {"GATE_BLOCKED": "precondition-unavailable"},
+        "authz_assertion": assert_authz_observations(cell.authz, {}),
+        "harness_error": "service precondition unavailable: %s" % (
+            service_info.get("reason") or service_info.get("status") or "unknown"),
+        "lang": kind,
+        "claim_status": "not-a-finding",
+    }
+    return result
+
+
 def run_s4(ctx: StageContext) -> Dict[str, Any]:
     """Minimal PoC + verification matrix: version x safe-mode x precondition."""
     _stage_pocs(ctx)
     jars_by_version = ctx.config.resolve_jars(ctx.workspace)
     results = {}
     java_specs = _poc_specs(ctx)
-    if java_specs:
-        matrix_runner = JavaMatrixRunner(ctx.workspace, ctx.target, ctx.round_no, ctx.approval)
-        for cid, cells in matrix_runner.run_manifest(java_specs, jars_by_version).items():
-            results.setdefault(cid, []).extend(cells)
     shell_specs = _shell_poc_specs(ctx)
-    if shell_specs:
-        shell_runner = ShellMatrixRunner(ctx.workspace, ctx.target, ctx.round_no, ctx.approval)
-        for cid, cells in shell_runner.run_manifest(shell_specs).items():
-            results.setdefault(cid, []).extend(cells)
+    service = ServiceLifecycle(ctx.workspace, ctx.target, ctx.round_no,
+                               ctx.config, approval=ctx.approval)
+    service_info = service.snapshot()
     try:
-        runtime_lab = run_s4_runtime_lab(
-            ctx.workspace, ctx.target, ctx.round_no, ctx.config,
-            ctx.config.candidates, java_specs, shell_specs, jars_by_version,
-            baseline_results=results, approval=ctx.approval,
-            version_universe=sorted(set(jars_by_version)
-                                    | set(ctx.config.target_urls)))
-    except Exception as exc:  # keep ordinary S4 usable while preserving gap
-        runtime_lab = {
-            "schema_version": "runtime-lab-v1",
-            "scope": "ordinary-s4",
-            "status": "run-failed",
-            "reason": "%s: %s" % (type(exc).__name__, str(exc)[:240]),
-            "fixtures": [],
-            "claim_status": "not-a-finding",
-        }
+        if service.configured and service.enabled and (java_specs or shell_specs):
+            service_info = service.ensure_ready()
+        service_unavailable = (
+            service.configured and service.enabled
+            and not service_info.get("ready", False))
+
+        if java_specs:
+            matrix_runner = JavaMatrixRunner(ctx.workspace, ctx.target, ctx.round_no, ctx.approval)
+            if service_unavailable:
+                for spec in java_specs:
+                    cells = [_service_gap_row(spec, cell, service_info, "java")
+                             for cell in spec.cells]
+                    matrix_runner._write_cells(spec.candidate_id, cells)
+                    results.setdefault(spec.candidate_id, []).extend(cells)
+            else:
+                for cid, cells in matrix_runner.run_manifest(java_specs, jars_by_version).items():
+                    results.setdefault(cid, []).extend(cells)
+        if shell_specs:
+            shell_runner = ShellMatrixRunner(ctx.workspace, ctx.target, ctx.round_no, ctx.approval)
+            if service_unavailable:
+                for spec in shell_specs:
+                    cells = [_service_gap_row(spec, cell, service_info, "shell")
+                             for cell in spec.cells]
+                    shell_runner._write_cells(spec.candidate_id, cells)
+                    results.setdefault(spec.candidate_id, []).extend(cells)
+            else:
+                for cid, cells in shell_runner.run_manifest(shell_specs).items():
+                    results.setdefault(cid, []).extend(cells)
+        try:
+            runtime_lab = run_s4_runtime_lab(
+                ctx.workspace, ctx.target, ctx.round_no, ctx.config,
+                ctx.config.candidates, java_specs, shell_specs, jars_by_version,
+                baseline_results=results, approval=ctx.approval,
+                version_universe=sorted(set(jars_by_version)
+                                        | set(ctx.config.target_urls)),
+                service_lifecycle=service)
+        except Exception as exc:  # keep ordinary S4 usable while preserving gap
+            runtime_lab = {
+                "schema_version": "runtime-lab-v1",
+                "scope": "ordinary-s4",
+                "status": "run-failed",
+                "reason": "%s: %s" % (type(exc).__name__, str(exc)[:240]),
+                "fixtures": [],
+                "claim_status": "not-a-finding",
+            }
+    finally:
+        service.stop()
     runtime_lab_ref = "state/%s/round-%02d/S4/runtime-lab.json" % (
         ctx.target, ctx.round_no)
     ctx.store.write_artifact("S4", "runtime-lab.json", runtime_lab)
