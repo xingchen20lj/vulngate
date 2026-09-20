@@ -19,10 +19,12 @@ from agent.evaluation.benchmark import (  # noqa: E402
     BENCHMARK_FEEDBACK_CLAIM_STATUS,
     BENCHMARK_FEEDBACK_FACTORS,
     BENCHMARK_FEEDBACK_SCHEMA_VERSION,
+    compare_benchmark_results,
     derive_benchmark_feedback,
     evaluate_benchmark,
     load_benchmark_json,
     normalize_benchmark_feedback,
+    normalize_benchmark_trend,
     validate_manifest,
 )
 
@@ -227,6 +229,70 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(0.0, guidance["metric_snapshot"]["unsafe_confirmation_rate"])
         self.assertNotIn("case_results", guidance)
 
+    def test_benchmark_trend_detects_global_and_surface_regression(self):
+        baseline = {
+            "benchmark_id": "baseline",
+            "metrics": {
+                "case_observation_coverage": 1.0,
+                "confirmed_precision": 1.0,
+                "negative_result_fidelity": 1.0,
+                "environment_gap_fidelity": 1.0,
+                "evidence_completeness": 1.0,
+                "severity_calibration": {
+                    "overstatement_rate": 0.0,
+                    "mean_absolute_error": 0.0,
+                },
+                "coverage_by_surface": {
+                    "web": {
+                        "observation_coverage": 1.0,
+                        "unsafe_confirmation_rate": 0.0,
+                        "environment_gap_fidelity": 1.0,
+                        "evidence_completeness": 1.0,
+                    },
+                },
+            },
+        }
+        current = {
+            "benchmark_id": "current",
+            "metrics": {
+                "case_observation_coverage": 0.8,
+                "confirmed_precision": 0.9,
+                "negative_result_fidelity": 0.8,
+                "environment_gap_fidelity": 0.8,
+                "evidence_completeness": 0.8,
+                "severity_calibration": {
+                    "overstatement_rate": 0.2,
+                    "mean_absolute_error": 1.0,
+                },
+                "coverage_by_surface": {
+                    "web": {
+                        "observation_coverage": 1.0,
+                        "unsafe_confirmation_rate": 0.2,
+                        "environment_gap_fidelity": 1.0,
+                        "evidence_completeness": 0.7,
+                    },
+                },
+            },
+        }
+        trend = compare_benchmark_results(current, baseline)
+        self.assertEqual("research-benchmark-trend-v1",
+                         trend["schema_version"])
+        self.assertEqual("regressed", trend["status"])
+        self.assertIn("evidence_completeness",
+                      {item["metric"] for item in trend["regressions"]})
+        self.assertEqual("web", trend["surface_regressions"][0]["surface"])
+        normalized = normalize_benchmark_trend(trend)
+        self.assertEqual(len(trend["regressions"]),
+                         len(normalized["regressions"]))
+        feedback = derive_benchmark_feedback(dict(current, trend=trend))
+        self.assertIn("benchmark-regression",
+                      {item["code"] for item in feedback["alerts"]})
+        web_guidance = next(item for item in feedback["surface_guidance"]
+                            if item["surface"] == "web")
+        self.assertIn("benchmark-regression-control",
+                      web_guidance["strategy_tags"])
+        self.assertGreaterEqual(web_guidance["priority_delta"], 2)
+
     def test_sample_manifest_and_cli_are_machine_readable(self):
         gold = load_benchmark_json(ROOT / "benchmarks" / "research-benchmark-v1.json")
         run = load_benchmark_json(ROOT / "benchmarks" / "research-benchmark-sample-run.json")
@@ -241,12 +307,15 @@ class BenchmarkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="vulngate-benchmark-") as td:
             out_path = Path(td) / "result.json"
             feedback_path = Path(td) / "feedback.json"
+            baseline_path = Path(td) / "baseline.json"
+            baseline_path.write_text(json.dumps(result), encoding="utf-8")
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
                 code = agent_cli.main([
                     "benchmark", "--manifest",
                     str(ROOT / "benchmarks" / "research-benchmark-v1.json"),
                     "--run", str(ROOT / "benchmarks" / "research-benchmark-sample-run.json"),
+                    "--baseline", str(baseline_path),
                     "--out", str(out_path), "--feedback-out", str(feedback_path),
                     "--json",
                 ])
@@ -258,6 +327,7 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(BENCHMARK_FEEDBACK_SCHEMA_VERSION,
                              feedback["schema_version"])
             self.assertIn("feedback", json.loads(stdout.getvalue()))
+            self.assertEqual("stable", json.loads(stdout.getvalue())["trend"]["status"])
             self.assertIn("case_results", stdout.getvalue())
 
     def test_cross_surface_manifest_preserves_profile_and_gap_contract(self):

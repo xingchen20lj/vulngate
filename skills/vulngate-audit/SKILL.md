@@ -679,6 +679,11 @@ python3 scripts/agent_cli.py benchmark --manifest <gold.json> \
   --feedback-out <research-benchmark-feedback.json> --json
 ```
 
+For longitudinal regression checks, pass a previous bounded result with
+`--baseline <previous-benchmark-result.json>`. The command emits the bounded
+`research-benchmark-trend-v1` comparison and feeds only allowlisted regression
+signals into the feedback path.
+
 The manifest declares each case's `truth` (`vulnerable`, `negative`, or
 `environment-gap`), expected claim status, required evidence fields and, when
 applicable, expected severity. A run supplies only bounded case status,

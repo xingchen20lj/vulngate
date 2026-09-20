@@ -134,6 +134,13 @@ surface's fixed observations and falsifiers to its baseline checklist. This
 turns a cross-surface score into targeted follow-up work without changing a
 candidate status, CVSS, runtime evidence or G4/G5.
 
+Benchmark CLI runs can now take a previous bounded result through
+`--baseline`. `research-benchmark-trend-v1` compares fixed aggregate metrics
+and common surface metrics, retaining only bounded deltas and regression
+signals. A regression becomes the same allowlisted feedback/guidance path as
+an absolute deficit; it does not copy case rows, PoC output or conclusions and
+does not change G4/G5 or CVSS.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

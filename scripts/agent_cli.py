@@ -531,6 +531,7 @@ def cmd_deps(args: argparse.Namespace) -> int:
 def cmd_benchmark(args: argparse.Namespace) -> int:
     """Score a deterministic research run against a gold benchmark manifest."""
     from agent.evaluation.benchmark import (evaluate_benchmark,
+                                             compare_benchmark_results,
                                              derive_benchmark_feedback,
                                              load_benchmark_json,
                                              normalize_manifest,
@@ -556,6 +557,11 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
             else:
                 runs.append(loaded)
         result = evaluate_benchmark(manifest, runs if runs else None)
+        if args.baseline:
+            baseline = load_benchmark_json(Path(args.baseline))
+            trend = compare_benchmark_results(result, baseline)
+            if trend:
+                result["trend"] = trend
         feedback = derive_benchmark_feedback(result)
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         _out({"error": "%s: %s" % (type(exc).__name__, exc)})
@@ -1285,7 +1291,9 @@ def build_parser() -> argparse.ArgumentParser:
     bm.add_argument("--out", default=None,
                     help="write the bounded result JSON to this path")
     bm.add_argument("--feedback-out", default=None,
-                    help="write deterministic scheduler/planner feedback JSON")
+                     help="write deterministic scheduler/planner feedback JSON")
+    bm.add_argument("--baseline", default=None,
+                    help="previous bounded benchmark result for trend comparison")
     bm.add_argument("--json", action="store_true",
                     help="machine-readable output")
     bm.set_defaults(fn=cmd_benchmark)

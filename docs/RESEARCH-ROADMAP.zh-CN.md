@@ -25,6 +25,7 @@
 | 8 | 评测驱动的自适应研究闭环 | 已实现（有界反馈接入） | `research-benchmark-feedback-v1`、调度权重快照、`benchmark-guidance` 实验提示 | 评测指标只能改变下一轮研究优先级和必需观测；默认行为可回归，且不改变 G4/G5/CVSS |
 | 9 | 跨攻击面变体基准 | 已实现（五类研究面 + 三态契约） | `benchmarks/research-benchmark-surfaces-v1.json`、`benchmarks/research-benchmark-surfaces-sample-run.json`、`research_profile`、`coverage_by_surface` | Web、协议、云、移动端、native 均覆盖 vulnerable/negative/environment-gap；环境缺口不被误判为负向，结果保持 `not-a-finding` |
 | 10 | 研究面级自适应调度与规划 | 已实现（有界 surface guidance） | `surface_guidance`、候选级面向证据调度、面级 `benchmark_guidance` | 只对显式匹配研究面的候选加小幅优先级；计划补观测/证伪条件；默认无反馈行为不变，不改变 G4/G5/CVSS |
+| 11 | 纵向评测退化检测 | 已实现（bounded trend comparison） | `research-benchmark-trend-v1`、`--baseline`、趋势反馈 | 跨轮只比较固定聚合指标；全局/研究面退化进入有界 guidance；不复制 case、运行时输出或结论 |
 
 ## 当前阶段：可证伪实验规划
 
@@ -219,9 +220,28 @@ class、必需证据和期望 claim status，不保存 payload、命令或进程
 `surface` 不会通过 substring 猜测而获得 boost。规划器只给匹配研究面追加 baseline 观测与 falsifier，
 所有结果仍是 `not-a-finding`，不会确认/排除候选，也不会修改 CVSS 或 G4/G5。
 
+## 阶段 11 初步实现：纵向评测退化检测
+
+评测不能只看单轮绝对分数。可以把上一轮的 bounded benchmark result 作为 baseline：
+
+```bash
+python3 scripts/agent_cli.py benchmark \
+  --manifest benchmarks/research-benchmark-surfaces-v1.json \
+  --run benchmarks/research-benchmark-surfaces-sample-run.json \
+  --baseline state/previous-research-surfaces-result.json \
+  --out state/research-surfaces-result.json \
+  --feedback-out state/research-benchmark-feedback.json --json
+```
+
+比较器只处理固定的观测覆盖、precision/recall、负向安全、环境缺口保真度、证据完整度、重复率、
+决策稳定性和严重性校准指标，并对共同研究面计算独立 delta。退化会形成
+`research-benchmark-trend-v1`，进一步转成 `benchmark-regression` 和面级 guidance；baseline/current
+case、PoC、stdout/stderr 都不会被复制。趋势仍是 `not-a-finding`，只要求下一轮用独立观测定位回归，
+不能改变候选状态、CVSS 或 G4/G5。
+
 ## 后续优先级
 
-1. 将跨面 benchmark 与真实项目的多轮历史、人工复核和变体覆盖率做纵向对比，校准 guidance 阈值但不放宽证据闸门。
+1. 将纵向趋势与真实项目的多轮历史、人工复核和变体覆盖率做关联，校准 guidance 阈值但不放宽证据闸门。
 2. 继续扩展协议状态机、云身份边界、移动端生命周期和 native 方法体验证的合成变体，并为每类维持正向、负向和环境缺口对照。
 
 每一阶段都必须同时更新实现、技能契约、回归测试和 CHANGELOG；只有测试、artifact schema 和安全边界一起稳定后，才适合提交为一个独立变更。

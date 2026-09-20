@@ -84,6 +84,7 @@ SEVERITY_ORDER = {"none": 0, "low": 1, "medium": 2, "high": 3,
 # scheduler module so the evaluator stays usable by offline tooling.
 BENCHMARK_FEEDBACK_SCHEMA_VERSION = "research-benchmark-feedback-v1"
 BENCHMARK_FEEDBACK_CLAIM_STATUS = BENCHMARK_CLAIM_STATUS
+BENCHMARK_TREND_SCHEMA_VERSION = "research-benchmark-trend-v1"
 BENCHMARK_FEEDBACK_FACTORS = (
     "reachability", "attacker_control", "security_boundary", "sink_impact",
     "control_gap", "evidence_quality", "coverage_novelty",
@@ -98,21 +99,43 @@ SURFACE_FEEDBACK_METRICS = (
     "observation_coverage", "unsafe_confirmation_rate",
     "environment_gap_fidelity", "evidence_completeness",
 )
+TREND_METRICS = (
+    "case_observation_coverage", "confirmed_precision", "confirmed_recall",
+    "resolution_accuracy", "unsafe_confirmation_rate",
+    "negative_result_fidelity", "environment_gap_fidelity",
+    "evidence_completeness", "decision_stability", "repeat_rate",
+    "unjustified_repeat_rate", "severity_overstatement_rate",
+    "severity_ordinal_overstatement_rate", "severity_mean_absolute_error",
+)
+TREND_HIGHER_IS_BETTER = frozenset({
+    "case_observation_coverage", "confirmed_precision", "confirmed_recall",
+    "resolution_accuracy", "negative_result_fidelity",
+    "environment_gap_fidelity", "evidence_completeness", "decision_stability",
+})
+TREND_REGRESSION_THRESHOLDS = {
+    "unsafe_confirmation_rate": 0.0,
+    "severity_overstatement_rate": 0.05,
+    "severity_ordinal_overstatement_rate": 0.05,
+    "severity_mean_absolute_error": 0.5,
+}
+MAX_TREND_REGRESSIONS = 16
 BENCHMARK_FEEDBACK_ALERT_CODES = frozenset({
     "unsafe-confirmation", "evidence-completeness-low",
     "unjustified-repeat-high", "environment-gap-fidelity-low",
     "severity-overstatement-high", "decision-stability-low",
+    "benchmark-regression",
 })
 BENCHMARK_FEEDBACK_ACTIONS = frozenset({
     "tighten-confirmation-evidence", "require-missing-evidence",
     "increase-novelty-differential-probes", "preserve-and-probe-preconditions",
     "tighten-severity-calibration", "stabilize-resolution-evidence",
+    "stabilize-regression",
 })
 BENCHMARK_FEEDBACK_TAGS = frozenset({
     "benchmark-confirmation-safety", "benchmark-evidence-completeness",
     "benchmark-novelty-followup", "benchmark-precondition-probe",
     "benchmark-severity-calibration", "benchmark-decision-stability",
-    "benchmark-surface-coverage",
+    "benchmark-surface-coverage", "benchmark-regression-control",
 })
 BENCHMARK_FEEDBACK_OBSERVATIONS = frozenset({
     "TYPED_EFFECT must match the claimed impact before confirmation",
@@ -122,6 +145,7 @@ BENCHMARK_FEEDBACK_OBSERVATIONS = frozenset({
     "severity must be consistent with observed typed effect and precondition tier",
     "repeat the decision only with an independent bounded observation",
     "each research surface needs an observed status or explicit execution gap",
+    "compare a regression with an independent bounded observation",
 })
 BENCHMARK_FEEDBACK_FALSIFIERS = frozenset({
     "a missing typed effect keeps the case candidate/pending",
@@ -131,6 +155,7 @@ BENCHMARK_FEEDBACK_FALSIFIERS = frozenset({
     "an unobserved stronger effect keeps the conservative severity",
     "a status change without new evidence is not a valid resolution",
     "unobserved surface coverage is not evidence of absence",
+    "an isolated trend delta is not runtime proof",
 })
 BENCHMARK_FEEDBACK_HINTS = frozenset({
     "存在错误确认：下一轮优先补齐与声明影响一致的 typed effect，不能靠改阈值掩盖。",
@@ -139,6 +164,7 @@ BENCHMARK_FEEDBACK_HINTS = frozenset({
     "环境缺口保真度偏低：先补 runtime/前置条件探针，再解释负结果。",
     "严重性夸大偏高：下一轮补 typed effect 与前置一致性检查；不自动改 CVSS。",
     "决策稳定性偏低：为状态变化补独立、可复核的观测。",
+    "纵向评测出现退化：下一轮用独立、可复核的观测定位回归；不自动改变漏洞结论。",
 })
 
 
@@ -249,6 +275,210 @@ def _expected_severity(raw: Dict[str, Any]) -> Dict[str, Any]:
     except (TypeError, ValueError):
         pass
     return out
+
+
+def _benchmark_metric_snapshot(result: Dict[str, Any]) -> Dict[str, float]:
+    """Extract only comparable aggregate metrics from a benchmark result."""
+    metrics = result.get("metrics") if isinstance(result, dict) else None
+    if not isinstance(metrics, dict):
+        return {}
+    snapshot: Dict[str, float] = {}
+    for name in TREND_METRICS:
+        value: Any = metrics.get(name)
+        if name == "repeat_rate":
+            repeat = metrics.get("repeat")
+            value = repeat.get(name) if isinstance(repeat, dict) else None
+        elif name == "unjustified_repeat_rate":
+            repeat = metrics.get("repeat")
+            value = repeat.get(name) if isinstance(repeat, dict) else None
+        elif name == "severity_overstatement_rate":
+            severity = metrics.get("severity_calibration")
+            value = severity.get("overstatement_rate") \
+                if isinstance(severity, dict) else None
+        elif name == "severity_ordinal_overstatement_rate":
+            severity = metrics.get("severity_calibration")
+            value = severity.get("ordinal_overstatement_rate") \
+                if isinstance(severity, dict) else None
+        elif name == "severity_mean_absolute_error":
+            severity = metrics.get("severity_calibration")
+            value = severity.get("mean_absolute_error") \
+                if isinstance(severity, dict) else None
+        number = _finite_number(value)
+        if number is not None:
+            snapshot[name] = round(max(0.0, min(10.0, number)), 4)
+    return snapshot
+
+
+def _trend_regressed(metric: str, delta: float) -> bool:
+    threshold = float(TREND_REGRESSION_THRESHOLDS.get(metric, 0.05))
+    if metric in TREND_HIGHER_IS_BETTER:
+        return delta < -threshold
+    return delta > threshold
+
+
+def compare_benchmark_results(current: Dict[str, Any],
+                              baseline: Dict[str, Any]) -> Dict[str, Any]:
+    """Compare two bounded benchmark results without copying case evidence.
+
+    The result is a research-quality trend artifact.  It records only fixed
+    aggregate metric names, bounded numbers and allowlisted surfaces; it never
+    treats a regression as a finding or as proof about a target.
+    """
+    if not isinstance(current, dict) or not isinstance(baseline, dict):
+        return {}
+    current_metrics = _benchmark_metric_snapshot(current)
+    baseline_metrics = _benchmark_metric_snapshot(baseline)
+    if not current_metrics or not baseline_metrics:
+        return {}
+
+    metric_deltas: Dict[str, Dict[str, Any]] = {}
+    regressions: List[Dict[str, Any]] = []
+    for metric in TREND_METRICS:
+        if metric not in current_metrics or metric not in baseline_metrics:
+            continue
+        before = baseline_metrics[metric]
+        after = current_metrics[metric]
+        delta = round(after - before, 4)
+        threshold = float(TREND_REGRESSION_THRESHOLDS.get(metric, 0.05))
+        regression = _trend_regressed(metric, delta)
+        metric_deltas[metric] = {
+            "baseline": before,
+            "current": after,
+            "delta": delta,
+            "threshold": threshold,
+            "regression": regression,
+        }
+        if regression:
+            regressions.append({
+                "metric": metric,
+                "baseline": before,
+                "current": after,
+                "delta": delta,
+                "threshold": threshold,
+                "claim_status": BENCHMARK_CLAIM_STATUS,
+            })
+
+    current_by_surface = (current.get("metrics", {}).get("coverage_by_surface")
+                          if isinstance(current.get("metrics"), dict) else {})
+    baseline_by_surface = (baseline.get("metrics", {}).get("coverage_by_surface")
+                           if isinstance(baseline.get("metrics"), dict) else {})
+    surface_deltas: Dict[str, Dict[str, Any]] = {}
+    surface_regressions: List[Dict[str, Any]] = []
+    if isinstance(current_by_surface, dict) and isinstance(baseline_by_surface, dict):
+        for surface in sorted(set(current_by_surface) & set(baseline_by_surface)):
+            if surface not in RESEARCH_SURFACES:
+                continue
+            current_row = current_by_surface.get(surface)
+            baseline_row = baseline_by_surface.get(surface)
+            if not isinstance(current_row, dict) or not isinstance(baseline_row, dict):
+                continue
+            row_metrics: Dict[str, Dict[str, Any]] = {}
+            row_regressions: List[str] = []
+            for metric in SURFACE_FEEDBACK_METRICS:
+                before = _finite_number(baseline_row.get(metric))
+                after = _finite_number(current_row.get(metric))
+                if before is None or after is None:
+                    continue
+                before = round(max(0.0, min(1.0, before)), 4)
+                after = round(max(0.0, min(1.0, after)), 4)
+                delta = round(after - before, 4)
+                threshold = float(TREND_REGRESSION_THRESHOLDS.get(metric, 0.05))
+                regression = _trend_regressed(metric, delta)
+                row_metrics[metric] = {
+                    "baseline": before,
+                    "current": after,
+                    "delta": delta,
+                    "threshold": threshold,
+                    "regression": regression,
+                }
+                if regression:
+                    row_regressions.append(metric)
+                    surface_regressions.append({
+                        "surface": surface,
+                        "metric": metric,
+                        "baseline": before,
+                        "current": after,
+                        "delta": delta,
+                        "threshold": threshold,
+                        "claim_status": BENCHMARK_CLAIM_STATUS,
+                    })
+            if row_metrics:
+                surface_deltas[surface] = {
+                    "metrics": row_metrics,
+                    "regressions": row_regressions,
+                    "claim_status": BENCHMARK_CLAIM_STATUS,
+                }
+
+    return {
+        "schema_version": BENCHMARK_TREND_SCHEMA_VERSION,
+        "baseline_benchmark_id": _text(baseline.get("benchmark_id"), 120)
+                                  or "baseline",
+        "current_benchmark_id": _text(current.get("benchmark_id"), 120)
+                                 or "current",
+        "metric_deltas": metric_deltas,
+        "surface_deltas": surface_deltas,
+        "regressions": regressions[:MAX_TREND_REGRESSIONS],
+        "surface_regressions": surface_regressions[:MAX_TREND_REGRESSIONS],
+        "status": ("regressed" if regressions or surface_regressions
+                    else "stable"),
+        "claim_status": BENCHMARK_CLAIM_STATUS,
+    }
+
+
+def normalize_benchmark_trend(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep only bounded regression signals usable by feedback consumers."""
+    if not isinstance(raw, dict) or raw.get("schema_version") != BENCHMARK_TREND_SCHEMA_VERSION:
+        return {}
+    regressions: List[Dict[str, Any]] = []
+    for item in raw.get("regressions") or []:
+        if not isinstance(item, dict) or item.get("metric") not in TREND_METRICS:
+            continue
+        values = {name: _finite_number(item.get(name))
+                  for name in ("baseline", "current", "delta", "threshold")}
+        if any(value is None for value in values.values()):
+            continue
+        regressions.append({
+            "metric": item["metric"],
+            "baseline": round(max(0.0, min(10.0, values["baseline"])), 4),
+            "current": round(max(0.0, min(10.0, values["current"])), 4),
+            "delta": round(max(-10.0, min(10.0, values["delta"])), 4),
+            "threshold": round(max(0.0, min(10.0, values["threshold"])), 4),
+        })
+        if len(regressions) >= MAX_TREND_REGRESSIONS:
+            break
+    surface_regressions: List[Dict[str, Any]] = []
+    for item in raw.get("surface_regressions") or []:
+        if not isinstance(item, dict):
+            continue
+        surface = _text(item.get("surface"), 32).lower()
+        metric = item.get("metric")
+        if surface not in RESEARCH_SURFACES or metric not in SURFACE_FEEDBACK_METRICS:
+            continue
+        values = {name: _finite_number(item.get(name))
+                  for name in ("baseline", "current", "delta", "threshold")}
+        if any(value is None for value in values.values()):
+            continue
+        surface_regressions.append({
+            "surface": surface,
+            "metric": metric,
+            "baseline": round(max(0.0, min(1.0, values["baseline"])), 4),
+            "current": round(max(0.0, min(1.0, values["current"])), 4),
+            "delta": round(max(-1.0, min(1.0, values["delta"])), 4),
+            "threshold": round(max(0.0, min(1.0, values["threshold"])), 4),
+        })
+        if len(surface_regressions) >= MAX_TREND_REGRESSIONS:
+            break
+    if not regressions and not surface_regressions:
+        return {}
+    return {
+        "schema_version": BENCHMARK_TREND_SCHEMA_VERSION,
+        "baseline_benchmark_id": _text(raw.get("baseline_benchmark_id"), 120),
+        "current_benchmark_id": _text(raw.get("current_benchmark_id"), 120),
+        "regressions": regressions,
+        "surface_regressions": surface_regressions,
+        "status": "regressed",
+        "claim_status": BENCHMARK_CLAIM_STATUS,
+    }
 
 
 def normalize_case(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -948,6 +1178,7 @@ def normalize_benchmark_feedback(raw: Dict[str, Any]) -> Dict[str, Any]:
         if len(surface_guidance) >= MAX_FEEDBACK_SURFACE_GUIDANCE:
             break
     surface_guidance.sort(key=lambda item: str(item.get("surface")))
+    trend = normalize_benchmark_trend(raw.get("trend") or {})
     hints = _bounded_strings(
         [item for item in (raw.get("prompt_hints") or [])
          if isinstance(item, str) and item in BENCHMARK_FEEDBACK_HINTS],
@@ -967,6 +1198,7 @@ def normalize_benchmark_feedback(raw: Dict[str, Any]) -> Dict[str, Any]:
         "weight_deltas": deltas,
         "planner_guidance": planner_guidance,
         "surface_guidance": surface_guidance,
+        "trend": trend,
         "prompt_hints": hints,
         "claim_status": BENCHMARK_FEEDBACK_CLAIM_STATUS,
     }
@@ -1091,6 +1323,18 @@ def derive_benchmark_feedback(result: Dict[str, Any]) -> Dict[str, Any]:
             "a status change without new evidence is not a valid resolution",
             "决策稳定性偏低：为状态变化补独立、可复核的观测。")
 
+    trend = normalize_benchmark_trend(result.get("trend") or {})
+    if trend.get("regressions"):
+        regression_count = float(len(trend["regressions"]))
+        add("benchmark-regression", "medium", "trend_regression_count",
+            regression_count, 0.0, "gt", "stabilize-regression",
+            {"evidence_quality": 2, "coverage_novelty": 2,
+             "sink_impact": -1},
+            "benchmark-regression-control",
+            "compare a regression with an independent bounded observation",
+            "an isolated trend delta is not runtime proof",
+            "纵向评测出现退化：下一轮用独立、可复核的观测定位回归；不自动改变漏洞结论。")
+
     # A healthy global score can hide one weak research surface.  Keep this
     # guidance separate from global weight deltas so only candidates explicitly
     # identified with the affected surface receive a small follow-up boost.
@@ -1166,6 +1410,40 @@ def derive_benchmark_feedback(result: Dict[str, Any]) -> Dict[str, Any]:
                 "claim_status": BENCHMARK_FEEDBACK_CLAIM_STATUS,
             })
 
+    # A surface can regress while still remaining above the absolute quality
+    # thresholds.  Merge those longitudinal signals into the same bounded
+    # surface guidance rather than hiding them in a global score.
+    for regression in trend.get("surface_regressions") or []:
+        surface = regression.get("surface")
+        metric = regression.get("metric")
+        if surface not in RESEARCH_SURFACES or metric not in SURFACE_FEEDBACK_METRICS:
+            continue
+        item = next((entry for entry in surface_guidance
+                     if entry.get("surface") == surface), None)
+        if item is None:
+            item = {
+                "surface": surface,
+                "priority_delta": 0,
+                "metric_snapshot": {},
+                "strategy_tags": [],
+                "required_observations": [],
+                "falsifiers": [],
+                "claim_status": BENCHMARK_FEEDBACK_CLAIM_STATUS,
+            }
+            surface_guidance.append(item)
+        item["priority_delta"] = min(
+            MAX_FEEDBACK_SURFACE_DELTA,
+            int(item.get("priority_delta") or 0) + 2)
+        item.setdefault("metric_snapshot", {})[metric] = regression.get("current")
+        if "benchmark-regression-control" not in item["strategy_tags"]:
+            item["strategy_tags"].append("benchmark-regression-control")
+        if "compare a regression with an independent bounded observation" not in item["required_observations"]:
+            item["required_observations"].append(
+                "compare a regression with an independent bounded observation")
+        if "an isolated trend delta is not runtime proof" not in item["falsifiers"]:
+            item["falsifiers"].append("an isolated trend delta is not runtime proof")
+    surface_guidance.sort(key=lambda item: str(item.get("surface")))
+
     raw = {
         "schema_version": BENCHMARK_FEEDBACK_SCHEMA_VERSION,
         "benchmark_id": _text(result.get("benchmark_id"), 120) or "benchmark",
@@ -1188,6 +1466,7 @@ def derive_benchmark_feedback(result: Dict[str, Any]) -> Dict[str, Any]:
             "falsifiers": sorted(set(falsifiers))[:MAX_FEEDBACK_GUIDANCE_ITEMS],
         },
         "surface_guidance": surface_guidance[:MAX_FEEDBACK_SURFACE_GUIDANCE],
+        "trend": trend,
         "prompt_hints": hints[:MAX_FEEDBACK_HINTS],
         "claim_status": BENCHMARK_FEEDBACK_CLAIM_STATUS,
     }

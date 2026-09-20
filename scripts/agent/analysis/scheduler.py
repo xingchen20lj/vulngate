@@ -1771,6 +1771,7 @@ def prompt_coverage_block(ctx: ScheduleContext, plan: Optional[SchedulePlan] = N
                        if isinstance(item, dict)],
             "weight_adjustments": ctx.weight_adjustments,
             "surface_guidance": list(feedback.get("surface_guidance") or [])[:8],
+            "trend": feedback.get("trend") or {},
             "prompt_hints": list(feedback.get("prompt_hints") or [])[:8],
             "claim_status": feedback.get("claim_status", "not-a-finding"),
         }, ensure_ascii=False))

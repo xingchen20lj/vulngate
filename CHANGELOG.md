@@ -90,6 +90,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   receive a small scheduler priority delta, and matching experiment plans gain
   the corresponding observations/falsifiers. Findings, CVSS and G4/G5 remain
   unchanged.
+- Added bounded longitudinal benchmark comparison via `--baseline`. The new
+  `research-benchmark-trend-v1` artifact compares fixed aggregate and common
+  surface metrics, turns regressions into allowlisted feedback, and preserves
+  all benchmark safety boundaries.
 
 ### Documentation
 
@@ -117,6 +121,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   than becoming negative evidence.
 - Documented surface-aware scheduling/planning, exact metadata matching, and
   the bounded `surface_guidance` safety boundary.
+- Documented `--baseline`, trend artifacts, fixed comparison metrics, and the
+  rule that regressions are research guidance rather than findings.
 
 ## [1.1.0] - 2026-09-16
 
