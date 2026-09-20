@@ -1143,7 +1143,9 @@ def _verify_web_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
         runtime_lab = run_s4_runtime_lab(
             ctx.root, ctx.cfg.name, round_no, ctx.cfg, [cand], [], [spec], {},
             baseline_results=results, approval=approval,
-            version_universe=sorted(ctx.cfg.target_urls))
+            version_universe=sorted(ctx.cfg.target_urls),
+            source_revision_artifacts=ctx.cfg.resolve_source_revision_artifacts(
+                ctx.root))
     except Exception as exc:
         runtime_lab = {
             "schema_version": "runtime-lab-v1", "scope": "ordinary-s4",
@@ -1343,7 +1345,9 @@ def verify_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
         runtime_lab = run_s4_runtime_lab(
             ctx.root, ctx.cfg.name, round_no, ctx.cfg, [cand], [spec], [],
             ctx.jars_by_version(), baseline_results=results, approval=approval,
-            version_universe=sorted(ctx.jars_by_version()))
+            version_universe=sorted(ctx.jars_by_version()),
+            source_revision_artifacts=ctx.cfg.resolve_source_revision_artifacts(
+                ctx.root))
     except Exception as exc:
         runtime_lab = {
             "schema_version": "runtime-lab-v1", "scope": "ordinary-s4",

@@ -23,6 +23,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   cells, and unexecuted source/sibling arms; S8 retains the bounded comparison
   state as research-only memory; all comparison output remains `not-a-finding`.
 
+- S4 now supports explicit `source_revision_artifacts` arms for exact before/
+  after commit references. Workspace-local JAR/WAR/ZIP files are validated and
+  fingerprinted, then executed through the existing isolated Java runner on
+  the same fixture/lane; VulnGate never performs checkout or builds source.
+  Missing, invalid, non-Java, or unavailable artifacts remain explicit
+  `precondition-unavailable`/`inconclusive` research gaps, and executed source
+  comparisons remain `not-a-finding` metadata.
+
 - S4 runtime research now consumes the shared surface plan through
   `surface-variant-fixture-v1`. Within the configured fixture budget, each
   selected Web/protocol/cloud/mobile/native variant expands into positive,

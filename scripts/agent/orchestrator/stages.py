@@ -757,6 +757,8 @@ def run_s4(ctx: StageContext) -> Dict[str, Any]:
     """Minimal PoC + verification matrix: version x safe-mode x precondition."""
     _stage_pocs(ctx)
     jars_by_version = ctx.config.resolve_jars(ctx.workspace)
+    source_revision_artifacts = ctx.config.resolve_source_revision_artifacts(
+        ctx.workspace)
     results = {}
     java_specs = _poc_specs(ctx)
     shell_specs = _shell_poc_specs(ctx)
@@ -799,7 +801,8 @@ def run_s4(ctx: StageContext) -> Dict[str, Any]:
                 baseline_results=results, approval=ctx.approval,
                 version_universe=sorted(set(jars_by_version)
                                         | set(ctx.config.target_urls)),
-                service_lifecycle=service)
+                service_lifecycle=service,
+                source_revision_artifacts=source_revision_artifacts)
         except Exception as exc:  # keep ordinary S4 usable while preserving gap
             runtime_lab = {
                 "schema_version": "runtime-lab-v1",

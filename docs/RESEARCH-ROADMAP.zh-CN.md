@@ -37,6 +37,7 @@
 | 20 | 研究面 fixture 与状态机执行上下文 | 已实现（bounded S4 lane expansion） | `surface-variant-fixture-v1`、`VULNGATE_VARIANT_*`、`S4/runtime-lab.json` lane context | 在 fixture 预算内把每个选中变体展开为三车道 runner cell，向 PoC 提供固定状态步骤和脱敏 lane 元数据；显式记录预算截断；车道仍不是观测，不改变 G4/G5/CVSS |
 | 21 | 跨版本与修复变体自动对照编排 | 已实现（bounded comparison orchestration） | `comparison-orchestration-v1`、S2 comparison contract、S4 `comparison` summaries | 将配置版本对、只读 patch parent/fixed 引用和同族变体提示绑定到同一 fixture/lane；区分 bucket 变化、签名漂移、环境缺口和未执行 arm；差异仍不是漏洞结论 |
 | 22 | 真实项目回放校准与替换阈值 | 已实现（bounded replay calibration） | `research-replay-calibration-v1`、`state/<target>/coverage/research-replay-calibration.json`、`S8/research-replay-calibration.json`、`replay-calibrate` CLI | 只从有界 guidance/feedback/runtime-lab 快照计算替换命中率、环境恢复、fixture 截断和 comparison gap；样本不足保持默认，样本充分时阈值最多为 1/2 轮；不改变候选、CVSS、G4/G5 |
+| 23 | 受控历史构建产物与 source-revision arm 执行 | 已实现（bounded artifact adapter） | `source-revision-artifacts-v1`、`source_revision_artifacts`、S4 source arm records/comparison、S8 research memory | 操作者显式提供 workspace 内匹配 commit ref 的 JAR/WAR/ZIP；校验路径、大小、类型和 digest 后复用隔离 Java runner；不 checkout/构建/远程执行；缺失或损坏产物保持 environment gap/inconclusive，不改变 G4/G5/CVSS |
 
 ## 已实现基础：可证伪实验规划
 
@@ -398,10 +399,27 @@ S2→S4→S8 的单向契约：
 - 只有至少三条已匹配回放、且替换命中率低并伴随高无信息重复时，才把零增益阈值从 1 调整到 2；fixture
   截断或 comparison gap 只生成恢复/预算告警，不会把计划缺口当成负向证据；所有产物继续保持 `not-a-finding`。
 
+## 阶段 23 初步实现：受控历史构建产物与 source-revision arm 执行
+
+阶段 21 已经能生成 source-revision comparison contract，但“有 patch ref”仍不足以复现修复前后的真实行为。
+阶段 23 增加显式的 `source-revision-artifacts-v1` 适配器：
+
+- 配置通过 `source_revision_artifacts.enabled=true` 显式开启，并为 exact `before`/`after` commit ref 提供有限数量的
+  workspace-local `.jar`、`.war` 或 `.zip`；路径必须落在 workspace 内，文件必须是非空且不超过大小上限；
+- 适配器只做规范化、路径/类型/大小校验和 SHA-256 指纹，不执行 `git checkout`、构建命令、远程下载或部署；
+  产物路径只以有界相对路径进入脱敏快照，runner 使用的绝对路径留在进程内；
+- Java source arm 复用既有隔离 `JavaMatrixRunner`，沿用同一 fixture/lane、SafeMode 和 comparison 分类；Shell 或
+  缺失/损坏/不匹配的 arm 明确保持 `precondition-unavailable`/`inconclusive`；
+- 实际 source arm 观测及 before/after pair 只进入 bounded comparison 与 S8 research memory，统一保持
+  `claim_status=not-a-finding`，不会改变候选结论、CVSS、G4 或 G5；
+- 回归测试同时覆盖 workspace 边界、指纹脱敏、无 checkout/build 副作用、真实 source arm 差异以及记忆归一化后的
+  持久化，保证“未执行”“环境缺口”和“已观察差异”不混淆。
+
 ## 后续优先级
 
-1. 在操作者提供受控历史构建产物后，补充 source-revision arm 的执行适配器，同时保持 checkout、审批和资源边界。
-2. 用更多细粒度 fixture/state-machine 回放样例校准五类研究面的状态步骤覆盖，保留 runner 的回环、审批和资源上限。
+1. 用更多细粒度 fixture/state-machine 回放样例校准五类研究面的状态步骤覆盖，保留 runner 的回环、审批和资源上限。
+2. 增加更多受控历史产物格式与 project replay 样本，但继续禁止自动 checkout、构建和远程执行，把 artifact provenance 与
+   comparison gap 分开统计。
 3. 继续积累跨项目回放样本，分别校准 environment recovery、comparison gap 和 fixture budget 的告警边界，避免把样本偏差固化为调度规则。
 
 每一阶段都必须同时更新实现、技能契约、回归测试和 CHANGELOG；只有测试、artifact schema 和安全边界一起稳定后，才适合提交为一个独立变更。

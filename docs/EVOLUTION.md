@@ -228,6 +228,16 @@ arms remain explicitly build-required and sibling arms remain pending until
 their lane executes. This makes patch-diff reasoning actionable without
 pretending that a commit or an unavailable historical build is evidence.
 
+The source-revision gap can now be narrowed by an explicit artifact adapter.
+The operator may declare workspace-local JAR/WAR/ZIP files for the exact
+`before` and `after` refs in `source_revision_artifacts`. VulnGate validates
+paths, size, type, and SHA-256 fingerprints, then aliases those artifacts into
+the existing isolated Java matrix on the same fixture/lane. It does not
+checkout a revision, invoke a build, or reach a remote artifact service. An
+available pair becomes an actual source-arm observation; missing or invalid
+artifacts remain `precondition-unavailable`/`inconclusive`, and all source-arm
+comparison state remains `not-a-finding` research metadata.
+
 S8 now adds `research-replay-calibration-v1` for the next feedback loop. It
 reads only bounded round snapshots of guidance, strategy feedback, and the
 runtime lab, then measures replacement hit rate, unproductive repeats,

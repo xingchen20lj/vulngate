@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
 from .authz import authz_fixture_id, normalize_authz_case, normalize_authz_cases
@@ -29,6 +29,9 @@ from .runtime_lab import (LAB_SCHEMA_VERSION, MAX_CELLS,
 from .service_lifecycle import ServiceLifecycle
 from .surface_variants import (normalize_variant_fixture_context,
                                normalize_variant_fixture_plan)
+from .source_revisions import (source_revision_index,
+                               source_revision_paths,
+                               source_revision_snapshot)
 from .variant_comparisons import (build_comparison_contract,
                                   normalize_comparison_contract,
                                   summarize_comparison_observations)
@@ -664,6 +667,73 @@ def _unique_comparison_contracts(rows: Iterable[Dict[str, Any]]) -> List[Dict[st
     return result
 
 
+def _source_revision_execution_plan(
+        contract: Mapping[str, Any], resolved: Any, base: MatrixCell,
+        safe_modes: Sequence[bool], kind: str
+        ) -> Tuple[List[MatrixCell], Dict[str, Dict[str, str]],
+                   List[Dict[str, Any]]]:
+    """Create source-arm cells only for validated operator artifacts."""
+    index = source_revision_index(resolved)
+    cells: List[MatrixCell] = []
+    aliases: Dict[str, Dict[str, str]] = {}
+    gaps: List[Dict[str, Any]] = []
+    for arm in contract.get("source_revision") or []:
+        role = str(arm.get("role") or "")
+        ref = str(arm.get("ref") or "")
+        entry = index.get((role, ref))
+        if entry is None:
+            continue
+        if entry.get("status") != "available":
+            gaps.append({
+                "source_revision": {"role": role, "ref": ref},
+                "status": "precondition-unavailable",
+                "reason_code": "source-revision-artifact-unavailable",
+                "claim_status": "not-a-finding",
+            })
+            continue
+        if kind != "java":
+            gaps.append({
+                "source_revision": {"role": role, "ref": ref},
+                "status": "precondition-unavailable",
+                "reason_code": "source-revision-java-adapter-only",
+                "claim_status": "not-a-finding",
+            })
+            continue
+        paths = source_revision_paths(entry)
+        if not paths:
+            gaps.append({
+                "source_revision": {"role": role, "ref": ref},
+                "status": "precondition-unavailable",
+                "reason_code": "source-revision-artifact-unavailable",
+                "claim_status": "not-a-finding",
+            })
+            continue
+        alias = "source-" + role
+        aliases[alias] = {"role": role, "ref": ref}
+        for safe_mode in safe_modes:
+            cells.append(_clone_cell(base, alias, bool(safe_mode)))
+    return cells, aliases, gaps
+
+
+def _annotate_source_revision_rows(rows: Iterable[Dict[str, Any]],
+                                   aliases: Mapping[str, Mapping[str, str]]) \
+        -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        alias = str(row.get("version") or "")
+        marker = aliases.get(alias)
+        if marker:
+            row = dict(row)
+            row["source_revision"] = {
+                "role": str(marker.get("role") or ""),
+                "ref": str(marker.get("ref") or ""),
+            }
+        result.append(row)
+    return result
+
+
 def _run_s4_runtime_lab_core(
         workspace: Any, target: str, round_no: int, config: Any,
         candidates: Sequence[Dict[str, Any]],
@@ -671,14 +741,20 @@ def _run_s4_runtime_lab_core(
         jars_by_version: Dict[str, List[Any]],
         baseline_results: Optional[Dict[str, List[Dict[str, Any]]]] = None,
         approval: Any = None,
-        version_universe: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+        version_universe: Optional[Sequence[str]] = None,
+        source_revision_artifacts: Optional[Dict[str, Any]] = None
+        ) -> Dict[str, Any]:
     """Run bounded replay/differential experiments for ordinary S4 specs."""
+    source_revision_artifacts = source_revision_artifacts or {}
+    source_revision_artifact_view = source_revision_snapshot(
+        source_revision_artifacts)
     options = _options(config)
     if not options["enabled"]:
         return {
             "schema_version": LAB_SCHEMA_VERSION,
             "scope": "ordinary-s4",
             "status": "disabled",
+            "source_revision_artifacts": source_revision_artifact_view,
             "fixtures": [],
             "claim_status": "not-a-finding",
         }
@@ -708,6 +784,7 @@ def _run_s4_runtime_lab_core(
             "fixture_budget": options["max_fixtures"],
             "fixture_budget_truncated": False,
             "comparison_contracts": [],
+            "source_revision_artifacts": source_revision_artifact_view,
             "fixtures": [],
             "claim_status": "not-a-finding",
     }
@@ -716,6 +793,7 @@ def _run_s4_runtime_lab_core(
                    if any(item[2] == "java" for item in work_items) else None)
     shell_runner = (ShellMatrixRunner(workspace, target, round_no, approval=approval)
                     if any(item[2] == "shell" for item in work_items) else None)
+    source_revision_entries = source_revision_index(source_revision_artifacts)
     baseline_results = baseline_results or {}
     rows: List[Dict[str, Any]] = []
     for (candidate, spec, kind, spec_index, base, template_key,
@@ -765,11 +843,46 @@ def _run_s4_runtime_lab_core(
                 primary, bool(variant_base.safe_mode), fixture_id,
                 "differential", exc, variant_context)
 
+        source_revision_records: List[Dict[str, Any]] = []
+        source_revision_gaps: List[Dict[str, Any]] = []
+        source_cells, source_aliases, source_revision_gaps = (
+            _source_revision_execution_plan(
+                comparison_contract, source_revision_artifacts, variant_base,
+                options["safe_modes"], kind))
+        if source_cells:
+            try:
+                source_spec = _clone_spec(
+                    spec, kind, "LAB-S4-SOURCE-" + fixture_id, source_cells)
+                source_jars = dict(jars_by_version)
+                for alias, marker in source_aliases.items():
+                    entry = source_revision_entries.get(
+                        (marker["role"], marker["ref"]), {})
+                    source_jars[alias] = source_revision_paths(entry)
+                source_revision_records = _annotate_source_revision_rows(
+                    _decorate(
+                        _run_manifest(kind, java_runner, source_spec,
+                                      source_jars),
+                        fixture_id, "source-revision", variant_context),
+                    source_aliases)
+            except Exception as exc:  # preserve source-arm execution gaps
+                for marker in source_aliases.values():
+                    source_revision_gaps.append({
+                        "source_revision": {
+                            "role": marker["role"], "ref": marker["ref"],
+                        },
+                        "status": "run-failed",
+                        "reason_code": "source-revision-run-failed",
+                        "harness_error": type(exc).__name__,
+                        "claim_status": "not-a-finding",
+                    })
+
         replay = summarize_replay(replay_records)
         differential = summarize_version_differential(
             differential_records, primary)
         comparison = summarize_comparison_observations(
-            comparison_contract, differential_records, primary)
+            comparison_contract, differential_records, primary,
+            source_revision_records=source_revision_records
+            + source_revision_gaps)
         baseline = _baseline_row(baseline_results.get(candidate_id, []),
                                  spec, kind, variant_base)
         expected = (normalize_matrix_record(baseline)
@@ -793,6 +906,7 @@ def _run_s4_runtime_lab_core(
             "differential": differential,
             "comparison": comparison,
             "differential_records": differential_records[:MAX_CELLS],
+            "source_revision_records": source_revision_records[:MAX_CELLS],
             "claim_status": "not-a-finding",
         })
 
@@ -829,6 +943,7 @@ def _run_s4_runtime_lab_core(
         "fixture_count": len(rows),
         "fixture_budget": options["max_fixtures"],
         "fixture_budget_truncated": work_item_count > len(work_items),
+        "source_revision_artifacts": source_revision_artifact_view,
         "comparison_contracts": _unique_comparison_contracts(rows),
         "candidate_status": candidate_status,
         "fixtures": rows,
@@ -839,7 +954,9 @@ def _run_s4_runtime_lab_core(
 def _runtime_lab_gap(status: str, options: Dict[str, Any],
                      versions: Sequence[str], reason: str,
                      service_info: Dict[str, Any], config: Any,
-                     candidates: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+                     candidates: Sequence[Dict[str, Any]],
+                     source_revision_artifacts: Optional[Dict[str, Any]] = None
+                     ) -> Dict[str, Any]:
     service_record = dict(service_info)
     artifact = {
         "schema_version": LAB_SCHEMA_VERSION,
@@ -853,6 +970,8 @@ def _runtime_lab_gap(status: str, options: Dict[str, Any],
         "fixture_budget": options["max_fixtures"],
         "fixture_budget_truncated": False,
         "candidate_status": {},
+        "source_revision_artifacts": source_revision_snapshot(
+            source_revision_artifacts or {}),
         "fixtures": [],
         "comparison_contracts": [
             contract for contract in (
@@ -876,8 +995,15 @@ def run_s4_runtime_lab(
         baseline_results: Optional[Dict[str, List[Dict[str, Any]]]] = None,
         approval: Any = None,
         version_universe: Optional[Sequence[str]] = None,
-        service_lifecycle: Optional[ServiceLifecycle] = None) -> Dict[str, Any]:
+        service_lifecycle: Optional[ServiceLifecycle] = None,
+        source_revision_artifacts: Optional[Dict[str, Any]] = None
+        ) -> Dict[str, Any]:
     """Run ordinary S4 lab experiments with a bounded service context."""
+    if source_revision_artifacts is None:
+        from .source_revisions import resolve_source_revision_artifacts
+
+        source_revision_artifacts = resolve_source_revision_artifacts(
+            workspace, config)
     options = _options(config)
     versions = _version_set(jars_by_version, version_universe)
     owns_lifecycle = service_lifecycle is None
@@ -909,7 +1035,7 @@ def run_s4_runtime_lab(
             })
             return _runtime_lab_gap(
                 "run-failed", options, versions, service_info["reason"],
-                service_info, config, candidates)
+                service_info, config, candidates, source_revision_artifacts)
         if not service_info.get("ready"):
             stop_info = (lifecycle.stop() if owns_lifecycle else {
                 "status": "managed-by-caller", "stopped": False,
@@ -922,13 +1048,14 @@ def run_s4_runtime_lab(
                 else "policy-denied",
                 options, versions,
                 service_info.get("reason", "service healthcheck did not become ready"),
-                service_info, config, candidates)
+                service_info, config, candidates, source_revision_artifacts)
 
     try:
         artifact = _run_s4_runtime_lab_core(
             workspace, target, round_no, config, candidates, java_specs,
             shell_specs, jars_by_version, baseline_results=baseline_results,
-            approval=approval, version_universe=version_universe)
+            approval=approval, version_universe=version_universe,
+            source_revision_artifacts=source_revision_artifacts)
     finally:
         # An external-ready service is deliberately not owned by this run;
         # a process started above is always stopped in the same turn. When a
@@ -944,6 +1071,8 @@ def run_s4_runtime_lab(
     artifact["service_lifecycle"] = service_record
     artifact["configuration"] = build_runtime_context_snapshot(
         config, versions, candidates, options, service_record)
+    artifact["source_revision_artifacts"] = source_revision_snapshot(
+        source_revision_artifacts)
     return artifact
 
 
@@ -959,6 +1088,7 @@ def merge_runtime_lab_artifacts(artifacts: Iterable[Dict[str, Any]],
     configurations = []
     service_lifecycles = []
     comparison_contracts: Dict[str, Dict[str, Any]] = {}
+    source_revision_view: Dict[str, Any] = {}
     fixture_budget = 0
     fixture_budget_truncated = False
     for item in items:
@@ -983,6 +1113,10 @@ def merge_runtime_lab_artifacts(artifacts: Iterable[Dict[str, Any]],
             configurations.append(item["configuration"])
         if isinstance(item.get("service_lifecycle"), dict):
             service_lifecycles.append(item["service_lifecycle"])
+        if not source_revision_view and isinstance(
+                item.get("source_revision_artifacts"), dict):
+            source_revision_view = source_revision_snapshot(
+                item["source_revision_artifacts"])
         for contract in item.get("comparison_contracts") or []:
             normalized = normalize_comparison_contract(contract)
             if normalized:
@@ -1007,6 +1141,7 @@ def merge_runtime_lab_artifacts(artifacts: Iterable[Dict[str, Any]],
         "fixture_count": len(fixtures),
         "fixture_budget": fixture_budget,
         "fixture_budget_truncated": fixture_budget_truncated,
+        "source_revision_artifacts": source_revision_view,
         "comparison_contracts": list(comparison_contracts.values())[:16],
         "candidate_status": candidate_status,
         "fixtures": fixtures,

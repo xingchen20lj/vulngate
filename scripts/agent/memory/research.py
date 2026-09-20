@@ -109,6 +109,24 @@ _COMPARISON_REASON_CODES = frozenset({
     "bucket-changed", "signature-changed", "bucket-and-signature-match",
     "cell-unavailable-or-gated", "missing-comparison-cell",
 })
+_SOURCE_REVISION_STATUSES = frozenset({
+    "observed", "environment-gap", "not-executed",
+})
+_SOURCE_REVISION_REASON_CODES = frozenset({
+    "source-revision-artifact-executed",
+    "source-revision-artifact-unavailable",
+    "source-revision-build-required",
+    "source-revision-cell-unavailable",
+    "source-revision-java-adapter-only",
+    "source-revision-run-failed",
+})
+_SOURCE_REVISION_PAIR_STATUSES = frozenset({
+    "bucket-difference", "signature-drift", "same-observation",
+    "environment-gap", "inconclusive",
+})
+_SOURCE_REVISION_PAIR_REASONS = _COMPARISON_REASON_CODES | frozenset({
+    "missing-source-revision-cell",
+})
 _COMPARISON_REF_RE = re.compile(r"^[0-9a-f]{7,64}$", re.I)
 _COMPARISON_ID_RE = re.compile(r"^cmp-[0-9a-f]{20}$")
 _COMPARISON_VARIANTS = frozenset({
@@ -760,16 +778,60 @@ def _normalize_comparison_evidence(value: Any) -> Dict[str, Any]:
         if (role not in {"before", "after"}
                 or not _COMPARISON_REF_RE.fullmatch(ref)):
             continue
-        source_rows.append({
+        source_status = _text(row.get("status"), 40).lower()
+        if source_status not in _SOURCE_REVISION_STATUSES:
+            source_status = "not-executed"
+        source_reason = _text(row.get("reason_code"), 80).lower()
+        if source_reason not in _SOURCE_REVISION_REASON_CODES:
+            source_reason = ("source-revision-artifact-executed"
+                             if source_status == "observed"
+                             else "source-revision-build-required")
+        source_row: Dict[str, Any] = {
             "role": role,
             "ref": ref,
-            "status": "not-executed",
-            "reason_code": "source-revision-build-required",
+            "status": source_status,
+            "reason_code": source_reason,
+            "observed_count": _safe_int(row.get("observed_count"), 0, 0, 16),
+            "safe_modes": [bool(mode) for mode in row.get("safe_modes", [])
+                           if isinstance(mode, bool)][:4],
             "claim_status": MEMORY_CLAIM_STATUS,
-        })
+        }
+        source_rows.append(source_row)
         if len(source_rows) >= 2:
             break
     out["source_revision_observations"] = source_rows
+
+    source_comparison = value.get("source_revision_comparison")
+    if isinstance(source_comparison, dict):
+        pair_rows: List[Dict[str, Any]] = []
+        for row in source_comparison.get("pairs") or []:
+            if not isinstance(row, dict):
+                continue
+            pair_status = _text(row.get("status"), 40).lower()
+            pair_reason = _text(row.get("reason_code"), 80).lower()
+            if (pair_status not in _SOURCE_REVISION_PAIR_STATUSES
+                    or pair_reason not in _SOURCE_REVISION_PAIR_REASONS):
+                continue
+            pair_rows.append({
+                "safe_mode": bool(row.get("safe_mode", False)),
+                "status": pair_status,
+                "reason_code": pair_reason,
+                "claim_status": MEMORY_CLAIM_STATUS,
+            })
+            if len(pair_rows) >= 4:
+                break
+        pair_status = _text(source_comparison.get("status"), 40).lower()
+        if pair_status not in _COMPARISON_STATUSES:
+            pair_status = "unobserved"
+        out["source_revision_comparison"] = {
+            "status": pair_status,
+            "pairs": pair_rows,
+            "observed_count": _safe_int(
+                source_comparison.get("observed_count"), 0, 0, 16),
+            "inconclusive_count": _safe_int(
+                source_comparison.get("inconclusive_count"), 0, 0, 16),
+            "claim_status": MEMORY_CLAIM_STATUS,
+        }
 
     sibling_rows: List[Dict[str, Any]] = []
     seen_variants = set()
@@ -806,7 +868,8 @@ def _comparison_probe_hints(comparison: Dict[str, Any]) -> List[str]:
     elif status == "same-observation":
         hints.append("版本行为一致；继续补 source→sink 与影响证据，不视为安全结论")
     for row in comparison.get("source_revision_observations") or []:
-        if isinstance(row, dict) and row.get("status") == "not-executed":
+        if (isinstance(row, dict)
+                and row.get("status") in {"not-executed", "environment-gap"}):
             hints.append("补对应受控历史构建，区分 patch metadata 与实际行为")
             break
     for row in comparison.get("sibling_observations") or []:

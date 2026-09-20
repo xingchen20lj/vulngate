@@ -56,6 +56,25 @@ S4 runtime lab 会在配置的 fixture 预算内把规范化计划展开为
 变化、仅签名漂移、相同观测或 inconclusive；如果没有操作者提供的构建产物，源码 revision 和同族路径会明确
 保持未执行。补丁引用不是运行时结果；旧版本或修复版本缺失时是环境缺口，而不是“修复有效”的证据。
 
+操作者可以显式提供 workspace 内的历史构建产物来补齐 source-revision build gap：
+
+```json
+{
+  "source_revision_artifacts": {
+    "enabled": true,
+    "arms": [
+      {"role": "before", "ref": "<commit-sha>", "jars": ["build/before.jar"]},
+      {"role": "after", "ref": "<commit-sha>", "jars": ["build/after.jar"]}
+    ]
+  }
+}
+```
+
+适配器只接受与 comparison contract 精确匹配、位于 workspace 内且类型受限的 JAR/WAR/ZIP，先做大小/路径
+校验和指纹，再复用同一 fixture/lane 的隔离 Java runner。它不会 checkout、调用构建命令或使用远程产物；缺失、
+损坏、非 Java 或 ref 不匹配仍记录为 `precondition-unavailable`/`inconclusive`。真实 source arm 观测仍是
+`claim_status=not-a-finding` 的研究元数据，不能单独满足 G4/G5。
+
 S8 还会从目标的有界轮次快照生成 `research-replay-calibration-v1`。它测量替换动作是否带来新信息、环境
 缺口是否恢复，以及 fixture 预算或 comparison arm 是否造成覆盖不完整。只有至少三条匹配回放时，结果才可
 将后续 guidance 的零增益阈值在一轮与两轮之间选择；样本不足时保持默认值。校准产物不包含原始 payload、命令、

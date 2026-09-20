@@ -411,6 +411,37 @@ verification summary, but keep every replay/differential result at
 `claim_status=not-a-finding`; a missing baseline, service, runtime or harness
 must remain an explicit gap.
 
+#### Explicit source-revision artifact arms
+
+When a comparison contract contains exact `before`/`after` source refs, an
+operator may opt in to historical runtime execution by adding this bounded
+target configuration:
+
+```json
+{
+  "source_revision_artifacts": {
+    "enabled": true,
+    "arms": [
+      {"role": "before", "ref": "<commit-sha>", "jars": ["build/before.jar"]},
+      {"role": "after", "ref": "<commit-sha>", "jars": ["build/after.jar"]}
+    ]
+  }
+}
+```
+
+This is an artifact adapter, not a build or checkout facility. The
+deterministic layer accepts only bounded workspace-local non-empty JAR/WAR/ZIP
+files whose refs match the comparison contract, validates their type, size,
+containment and SHA-256 digest, and reuses the isolated Java matrix runner on
+the same fixture/lane. It never executes `git checkout`, a build command, a
+remote download, or a deployment. Shell candidates, missing/invalid artifacts,
+and ref mismatches remain `precondition-unavailable` or `inconclusive`; they
+are never negative evidence. Only actual runner rows can produce an observed
+source-arm comparison, and every source-arm artifact remains
+`claim_status=not-a-finding` with no effect on G4/G5, CVSS, or candidate
+conclusions. S8 may retain only bounded role/ref/status/reason, relative paths,
+and digests for the next research round.
+
 #### Bounded service lifecycle and context snapshot
 
 Stateful web/middleware experiments may add a target-level
@@ -1214,6 +1245,29 @@ cell。所有产物都是 `claim_status=not-a-finding` 的研究证据，不得�
 SafeMode 对照，聚合结果写入 `S4/runtime-lab.json`，并从 S4 verification summary
 关联到候选。所有重放/差分结果仍必须是 `claim_status=not-a-finding`；缺少基线、服务、
 runtime 或 harness 时必须保留为显式缺口。
+
+#### 显式 source-revision 构建产物 arm
+
+当 comparison contract 含有精确的 `before`/`after` source ref 时，操作者可以通过下面的有界配置显式提供历史运行时产物：
+
+```json
+{
+  "source_revision_artifacts": {
+    "enabled": true,
+    "arms": [
+      {"role": "before", "ref": "<commit-sha>", "jars": ["build/before.jar"]},
+      {"role": "after", "ref": "<commit-sha>", "jars": ["build/after.jar"]}
+    ]
+  }
+}
+```
+
+这只是 artifact adapter，不是构建或 checkout 设施。确定性层只接受 workspace 内、非空且类型受限的
+JAR/WAR/ZIP，验证 ref、路径边界、大小、类型和 SHA-256 digest 后，复用同一 fixture/lane 的隔离 Java runner。
+它不会执行 `git checkout`、构建命令、远程下载或部署。Shell 候选、缺失/损坏产物和 ref 不匹配保持
+`precondition-unavailable` 或 `inconclusive`，绝不能变成负向证据。只有 runner 的真实行才能产生 observed
+source-arm comparison；所有 source-arm artifact 都保持 `claim_status=not-a-finding`，不影响 G4/G5、CVSS 或候选结论。
+S8 只可保留有界的 role/ref/status/reason、相对路径和 digest 供下一轮研究。
 
 #### 有界服务生命周期与上下文快照
 

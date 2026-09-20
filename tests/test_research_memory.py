@@ -308,6 +308,44 @@ class ResearchMemoryTests(unittest.TestCase):
         self.assertNotIn("curl", encoded)
         self.assertNotIn("raw_command", encoded)
 
+    def test_executed_source_revision_comparison_survives_memory_normalization(self):
+        c = candidate()
+        lab = lab_for("C1")
+        lab["fixtures"][0]["comparison"] = {
+            "schema_version": "comparison-orchestration-v1",
+            "comparison_id": "cmp-" + "b" * 20,
+            "status": "difference-observed",
+            "source_revision_observations": [{
+                "role": "before", "ref": "a" * 40,
+                "status": "observed",
+                "reason_code": "source-revision-artifact-executed",
+                "observed_count": 1, "safe_modes": [False],
+            }, {
+                "role": "after", "ref": "b" * 40,
+                "status": "observed",
+                "reason_code": "source-revision-artifact-executed",
+                "observed_count": 1, "safe_modes": [False],
+            }],
+            "source_revision_comparison": {
+                "status": "difference-observed",
+                "pairs": [{
+                    "safe_mode": False, "status": "bucket-difference",
+                    "reason_code": "bucket-changed",
+                }],
+                "observed_count": 1, "inconclusive_count": 0,
+            },
+        }
+        delta = build_round_memory([c], {"C1": {}}, {"C1": "候选"},
+                                   lab, 6)
+        comparison = delta["entries"][0]["events"][0]["evidence"]["comparison"]
+        self.assertEqual("observed",
+                         comparison["source_revision_observations"][0]["status"])
+        self.assertEqual("difference-observed",
+                         comparison["source_revision_comparison"]["status"])
+        self.assertEqual("bucket-difference",
+                         comparison["source_revision_comparison"]["pairs"][0]["status"])
+        self.assertEqual("not-a-finding", comparison["claim_status"])
+
     def test_merge_is_idempotent_and_preserves_old_events(self):
         c = candidate()
         first = build_round_memory([c], {"C1": {}}, {"C1": "候选"},

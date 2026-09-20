@@ -225,10 +225,119 @@ def _classify_pair(before: Mapping[str, Any],
     return "same-observation", "bucket-and-signature-match"
 
 
-def summarize_comparison_observations(contract: Any,
-                                     records: Iterable[Dict[str, Any]],
-                                     primary_version: str = "") -> Dict[str, Any]:
-    """Summarize actual version-cell observations against a contract."""
+def _source_revision_marker(row: Mapping[str, Any]) -> Tuple[str, str]:
+    marker = row.get("source_revision")
+    if not isinstance(marker, Mapping):
+        marker = row
+    return (_text(marker.get("role"), 16).lower(),
+            _commit_ref(marker.get("ref")))
+
+
+def _commit_ref(value: Any) -> str:
+    item = _text(value, 80).lower()
+    return item if _COMMIT_RE.fullmatch(item) else ""
+
+
+def _source_arm_summary(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    if not rows:
+        return {"status": "not-executed",
+                "reason_code": "source-revision-build-required",
+                "observed_count": 0, "safe_modes": []}
+    gaps = []
+    observed = []
+    for row in rows:
+        explicit = _text(row.get("status"), 64).lower()
+        bucket = _row_bucket(row)
+        if explicit in _GAP_BUCKETS or bucket in _GAP_BUCKETS:
+            gaps.append(_text(row.get("reason_code"), 80)
+                        or "source-revision-cell-unavailable")
+        else:
+            observed.append(row)
+    safe_modes = sorted({bool(row.get("safe_mode", False)) for row in rows})
+    if observed:
+        return {
+            "status": "observed",
+            "reason_code": "source-revision-artifact-executed",
+            "observed_count": len(observed),
+            "safe_modes": safe_modes,
+        }
+    return {
+        "status": "environment-gap",
+        "reason_code": sorted(set(gaps))[0]
+        if gaps else "source-revision-cell-unavailable",
+        "observed_count": 0,
+        "safe_modes": safe_modes,
+    }
+
+
+def _source_row_observed(row: Mapping[str, Any]) -> bool:
+    explicit = _text(row.get("status"), 64).lower()
+    bucket = _row_bucket(row)
+    return (explicit not in (_GAP_BUCKETS | {"not-executed"})
+            and bucket not in _GAP_BUCKETS)
+
+
+def _source_revision_pair(contract: Mapping[str, Any],
+                          source_index: Mapping[Tuple[str, str],
+                                                Sequence[Mapping[str, Any]]]
+                          ) -> Dict[str, Any]:
+    arms = {row["role"]: row for row in contract.get("source_revision") or []}
+    if not {"before", "after"} <= set(arms):
+        return {"status": "unobserved", "pairs": [],
+                "observed_count": 0, "inconclusive_count": 0,
+                "claim_status": CLAIM_STATUS}
+    before_key = ("before", arms["before"]["ref"])
+    after_key = ("after", arms["after"]["ref"])
+    before_rows = list(source_index.get(before_key) or [])
+    after_rows = list(source_index.get(after_key) or [])
+    declared_safe = {bool(row.get("safe_mode", False))
+                     for row in before_rows + after_rows}
+    before_safe = {bool(row.get("safe_mode", False)): row
+                   for row in before_rows if _source_row_observed(row)}
+    after_safe = {bool(row.get("safe_mode", False)): row
+                  for row in after_rows if _source_row_observed(row)}
+    safe_modes = sorted(declared_safe or set(before_safe) | set(after_safe))
+    if not safe_modes and (before_rows or after_rows):
+        safe_modes = [False]
+    pairs = []
+    for safe in safe_modes[:4]:
+        before = before_safe.get(safe)
+        after = after_safe.get(safe)
+        if before is None or after is None:
+            status, reason = "inconclusive", "missing-source-revision-cell"
+        else:
+            status, reason = _classify_pair(before, after)
+        pairs.append({"safe_mode": safe, "status": status,
+                      "reason_code": reason, "claim_status": CLAIM_STATUS})
+    statuses = {row["status"] for row in pairs}
+    if "bucket-difference" in statuses:
+        overall = "difference-observed"
+    elif "signature-drift" in statuses:
+        overall = "signature-drift"
+    elif "environment-gap" in statuses or "inconclusive" in statuses:
+        overall = "inconclusive"
+    elif "same-observation" in statuses:
+        overall = "same-observation"
+    else:
+        overall = "unobserved"
+    return {
+        "status": overall,
+        "pairs": pairs,
+        "observed_count": sum(1 for row in pairs
+                               if row["status"] not in {"inconclusive",
+                                                         "environment-gap"}),
+        "inconclusive_count": sum(1 for row in pairs
+                                   if row["status"] in {"inconclusive",
+                                                         "environment-gap"}),
+        "claim_status": CLAIM_STATUS,
+    }
+
+
+def summarize_comparison_observations(
+        contract: Any, records: Iterable[Dict[str, Any]],
+        primary_version: str = "",
+        source_revision_records: Iterable[Mapping[str, Any]] = ()) -> Dict[str, Any]:
+    """Summarize actual version and supplied source-revision observations."""
     normalized = normalize_comparison_contract(contract)
     if not normalized:
         return {}
@@ -259,18 +368,30 @@ def summarize_comparison_observations(contract: Any,
                 "reason_code": reason, "claim_status": CLAIM_STATUS,
             })
 
-    source_observations = [
-        {"role": row["role"], "ref": row["ref"],
-         "status": "not-executed", "reason_code": "source-revision-build-required",
-         "claim_status": CLAIM_STATUS}
-        for row in normalized["source_revision"]
-    ]
+    source_index: Dict[Tuple[str, str], List[Mapping[str, Any]]] = {}
+    for row in source_revision_records or ():
+        if not isinstance(row, Mapping):
+            continue
+        role, ref = _source_revision_marker(row)
+        if role in {"before", "after"} and ref:
+            source_index.setdefault((role, ref), []).append(row)
+    source_observations = []
+    for row in normalized["source_revision"]:
+        key = (row["role"], row["ref"])
+        summary = _source_arm_summary(source_index.get(key, []))
+        source_observations.append({
+            "role": row["role"], "ref": row["ref"], **summary,
+            "claim_status": CLAIM_STATUS,
+        })
+    source_comparison = _source_revision_pair(normalized, source_index)
     sibling_observations = [
         {"variant": row["variant"], "status": "not-executed",
          "reason_code": "requires-sibling-lane", "claim_status": CLAIM_STATUS}
         for row in normalized["sibling_variants"]
     ]
     statuses = {row["status"] for row in observations}
+    if source_comparison.get("status"):
+        statuses.add(source_comparison["status"])
     if "bucket-difference" in statuses:
         overall = "difference-observed"
     elif "signature-drift" in statuses:
@@ -288,10 +409,13 @@ def summarize_comparison_observations(contract: Any,
         "status": overall,
         "version_observations": observations[:MAX_PAIRS * 4],
         "source_revision_observations": source_observations[:2],
+        "source_revision_comparison": source_comparison,
         "sibling_observations": sibling_observations[:MAX_VARIANTS],
         "observed_count": sum(1 for row in observations
-                               if row["status"] not in {"inconclusive", "environment-gap"}),
+                               if row["status"] not in {"inconclusive", "environment-gap"})
+        + int(source_comparison.get("observed_count", 0)),
         "inconclusive_count": sum(1 for row in observations
-                                   if row["status"] in {"inconclusive", "environment-gap"}),
+                                   if row["status"] in {"inconclusive", "environment-gap"})
+        + int(source_comparison.get("inconclusive_count", 0)),
         "claim_status": CLAIM_STATUS,
     }

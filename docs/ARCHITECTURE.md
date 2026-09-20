@@ -67,6 +67,29 @@ sibling paths explicitly unexecuted when no operator-supplied artifact exists.
 A patch reference is never treated as a runtime result; a missing old or fixed
 runtime is an environment gap rather than evidence that the fix works.
 
+An operator can close the source-revision build gap with an explicit,
+workspace-local artifact declaration:
+
+```json
+{
+  "source_revision_artifacts": {
+    "enabled": true,
+    "arms": [
+      {"role": "before", "ref": "<commit-sha>", "jars": ["build/before.jar"]},
+      {"role": "after", "ref": "<commit-sha>", "jars": ["build/after.jar"]}
+    ]
+  }
+}
+```
+
+The adapter accepts only bounded workspace-local JAR/WAR/ZIP files for the
+exact contract refs, fingerprints them, and reuses the isolated Java runner on
+the same fixture/lane. It never performs checkout, invokes a build command, or
+uses a remote artifact; missing, invalid, non-Java, or mismatched input remains
+`precondition-unavailable`/`inconclusive`. Actual source-arm observations are
+still research metadata with `claim_status=not-a-finding` and cannot satisfy
+G4/G5 by themselves.
+
 S8 also builds `research-replay-calibration-v1` from the target's bounded
 round snapshots. It measures whether replacement actions produced new
 information, whether environment gaps recovered, and whether fixture budgets

@@ -29,6 +29,10 @@ class TargetConfig:
     # PoC is intentionally non-repeatable.  An optional ``service`` mapping
     # owns a workspace-local argv-only process with a loopback healthcheck.
     runtime_lab: Dict[str, Any] = field(default_factory=dict)
+    # Optional, explicit historical build artifacts for comparison
+    # source-revision arms.  This is an artifact adapter only: it never
+    # performs checkout or invokes a build command.
+    source_revision_artifacts: Dict[str, Any] = field(default_factory=dict)
     public_scan: Dict[str, Any] = field(default_factory=dict)  # internet novelty scan (plan 2.7)
     # Optional, explicitly supplied research-quality feedback.  It only
     # influences S2 prioritisation and experiment checklists; it never changes
@@ -81,3 +85,10 @@ class TargetConfig:
                 for version_jars in out.values():
                     version_jars.append(p)
         return out
+
+    def resolve_source_revision_artifacts(self, workspace: Path) -> Dict[str, Any]:
+        """Validate operator-supplied historical artifacts for S4 only."""
+        from ..tools.source_revisions import resolve_source_revision_artifacts
+
+        return resolve_source_revision_artifacts(
+            workspace, self.source_revision_artifacts)
