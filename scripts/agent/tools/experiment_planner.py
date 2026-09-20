@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Sequence
 
 from .authz import normalize_authz_case, normalize_authz_cases
+from .experiment import capability_contract_from_candidate
 from .redaction import redact_text
 
 
@@ -128,6 +129,8 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
         or _contains(text, _AUTHZ_MARKERS)
     variant = bool(candidate.get("fix_completeness")) or _contains(text, _VARIANT_MARKERS)
     effect = _contains(text, _EFFECT_MARKERS)
+    capability_contract = capability_contract_from_candidate(candidate)
+    capability_chain = bool(capability_contract.get("required_capabilities"))
 
     normalized_versions = _versions(versions)
     preconditions = [
@@ -143,7 +146,8 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
     tags: List[str] = []
     for tag, enabled in (("stateful", stateful), ("race", stateful and dos),
                          ("authorization", authz), ("variant", variant),
-                         ("typed-effect", effect)):
+                         ("typed-effect", effect),
+                         ("capability-chain", capability_chain)):
         if enabled:
             tags.append(tag)
 
@@ -159,6 +163,34 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
                          "preconditions": preconditions},
         )
     ]
+
+    if capability_chain:
+        capability_observations = [
+            "CAPABILITY_TRACE for declared primitive ids",
+            "CAPABILITY_EVIDENCE for each emitted primitive",
+            "TRANSITION_TRACE for each declared transition",
+        ]
+        if capability_contract.get("typed_effect_required"):
+            capability_observations.append("EFFECT_KIND and EFFECT for typed effect")
+        plans.append(_plan(
+            candidate_id,
+            "capability-transition",
+            "逐步验证能力原语、相邻 transition 与终点 typed effect；静态链闭合不等于运行时闭合。",
+            capability_observations,
+            ["missing CAPABILITY_TRACE is unsupported, not proof of absence",
+             "missing transition evidence leaves the chain partial",
+             "a canary/instantiation without the declared typed effect cannot support impact"],
+            required_capabilities=list(
+                capability_contract.get("required_capabilities") or []),
+            observed_capabilities=list(
+                capability_contract.get("observed_capabilities") or []),
+            missing_capabilities=list(
+                capability_contract.get("missing_capabilities") or []),
+            transition_rules=list(
+                capability_contract.get("transition_rules") or []),
+            typed_effect_required=bool(
+                capability_contract.get("typed_effect_required")),
+        ))
 
     if authz:
         plans.append(_plan(
@@ -237,6 +269,7 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
             "preconditions": preconditions,
             "authz_cases": case_ids,
         },
+        "capability_contract": capability_contract,
         "plans": plans,
         "provenance": {
             "producer": "experiment-planner",

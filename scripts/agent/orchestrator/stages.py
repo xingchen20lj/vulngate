@@ -26,6 +26,7 @@ from ..tools.source_evidence import (DANGER_PATTERNS, build_source_sink_graph,
 from ..tools.patch_variants import analyze_patch_history, fix_completeness_candidate
 from ..tools.project_profile import build_project_profile
 from ..tools.experiment_planner import plan_candidate_experiments
+from ..tools.experiment import capability_contract_from_candidate
 from ..tools.research_strategies import composite_chain_candidates
 from ..tools.target_rules import collect_target_rule_hits, composite_chain_hints
 from ..tools.novelty import (Disclosure, NoveltyChecker, UpstreamRef,
@@ -407,6 +408,8 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
             "sequence": cand.get("sequence", []),
             "concurrency": cand.get("concurrency", 1),
             "availability_probe": cand.get("availability_probe", False),
+            "capability_contract": research_plan.get(
+                "capability_contract") or capability_contract_from_candidate(cand),
             "status": "candidate",
             "fix_completeness": bool(cand.get("fix_completeness")),
             "patch_commit": cand.get("patch_commit", ""),
@@ -557,6 +560,8 @@ def _poc_specs(ctx: StageContext) -> List[POCSpec]:
                 java_bin=str(c.get("java_bin", "")), java_home=str(c.get("java_home", "")),
                 authz=normalize_authz_case(c.get("authz") or
                                            (candidate_cases[0] if len(candidate_cases) == 1 else {})),
+                capability_contract=capability_contract_from_candidate(
+                    {**cand, **poc, **c}),
             ) for c in poc.get("cells", [])]
             specs.append(POCSpec(
                 candidate_id=cand["candidate_id"],
@@ -596,6 +601,8 @@ def _shell_poc_specs(ctx: StageContext) -> List[ShellPOCSpec]:
                 java_bin=str(c.get("java_bin", "")), java_home=str(c.get("java_home", "")),
                 authz=normalize_authz_case(c.get("authz") or
                                            (candidate_cases[0] if len(candidate_cases) == 1 else {})),
+                capability_contract=capability_contract_from_candidate(
+                    {**cand, **poc, **c}),
             ) for c in poc.get("cells", [])]
             specs.append(ShellPOCSpec(
                 candidate_id=cand["candidate_id"],

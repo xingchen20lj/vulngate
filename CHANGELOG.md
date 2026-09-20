@@ -29,6 +29,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   minimal verification sequence; capability paths remain
   `claim_status=not-a-finding` until manual data-flow and runtime typed-effect
   evidence exist.
+- Capability-chain candidates now carry a bounded `capability_contract` into
+  every S4 Java, shell, autonomous and CLI-manifest cell. PoCs can emit
+  ordered `CAPABILITY`/`CAPABILITY_EVIDENCE` and
+  `TRANSITION`/`TRANSITION_EVIDENCE` traces; S4 summarizes them as
+  `no-trace`/`partial`/`complete` and keeps typed effects separate from
+  intermediate capability observations. A complete trace remains
+  `claim_status=not-a-finding`.
 
 ### Documentation
 

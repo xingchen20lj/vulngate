@@ -55,6 +55,7 @@ from ..tools.novelty import (Disclosure, NoveltyChecker, UpstreamRef,
 from ..tools.patch_variants import analyze_patch_history
 from ..tools.project_profile import build_project_profile
 from ..tools.experiment_planner import plan_candidate_experiments
+from ..tools.experiment import capability_contract_from_candidate
 from ..tools.research_strategies import composite_chain_candidates
 from ..tools.target_rules import collect_target_rule_hits, composite_chain_hints
 from ..tools.public_scan import scan_all
@@ -79,7 +80,9 @@ SYSTEM_POC = (
     "你是资深 Java 安全 PoC 作者。直接输出最终 Java 源码，"
     "不要输出思考过程，不要解释，无 Markdown 围栏，不要 package 声明（单文件默认包）。"
     "main 必须至少输出一行机器可读观测（ERROR=/GATE_BLOCKED=/INSTANTIATED=/LEAKED= 之一，"
-    "基于真实运行结果），禁止空输出。"
+    "基于真实运行结果），禁止空输出。对于能力链，CAPABILITY/"
+    "CAPABILITY_EVIDENCE/TRANSITION/TRANSITION_EVIDENCE 也只能记录实际观察，"
+    "不能照抄声明或把对象实例化当成终点效果。"
 )
 
 SYSTEM_SECURITY_WEB = (
@@ -98,6 +101,8 @@ SYSTEM_POC_WEB = (
     "HTTP_CODE=<状态码>\nRESP_MATCH=<响应体/头中的特征串>\n"
     "EVIDENCE=<副作用证据，如写入成功的标记/会话接管邮箱>\n"
     "GATE_BLOCKED=<原因>\nERROR=<异常>\n"
+    "CAPABILITY=<实际观察到的能力原语>\nCAPABILITY_EVIDENCE=<原语证据>\n"
+    "TRANSITION=<实际观察到的 from->to>\nTRANSITION_EVIDENCE=<transition 证据>\n"
     "目标 base URL 必须从环境变量 VULNGATE_TARGET_URL 读取（脚本内使用该变量拼接路径，"
     "禁止硬编码其他主机；网络目标只允许 127.0.0.1/localhost）。"
     "允许使用 curl 与 python3，但只能访问明确的回环 URL；禁止 SSH/SCP/远程 rsync、云 CLI、"
@@ -806,6 +811,10 @@ def generate_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
         "STEP=<已完成的声明步骤标识；按 sequence 顺序逐步输出>\n"
         "STEP_EVIDENCE=<该步骤的实际证据摘要，不要输出 token/cookie/password>\n"
         "STATE=<已观察到的本地状态检查点>\n"
+        "CAPABILITY=<从 VULNGATE_CAPABILITIES 中选择且实际观察到的能力原语>\n"
+        "CAPABILITY_EVIDENCE=<capability_id:该原语的安全本地证据，不要输出 token/cookie/password>\n"
+        "TRANSITION=<实际观察到的 from->to，不能只复制 VULNGATE_TRANSITIONS>\n"
+        "TRANSITION_EVIDENCE=<from->to:该 transition 的安全本地证据>\n"
         "PARSED=...\n"
         "禁止真实外联网络（只能尝试 127.0.0.1）。只输出 Java 源码，无 Markdown 围栏。"
         "输出不超过 200 行，只允许 ASCII 字符（禁止全角中文标点），禁止解释性文本。"
@@ -816,6 +825,10 @@ def generate_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
         "VULNGATE_CONCURRENCY、VULNGATE_AVAILABILITY_PROBE；只有真实执行的步骤"
         "才输出 STEP/STEP_EVIDENCE/STATE，只有实际 worker 饱和与服务不可用才输出"
         "CONCURRENCY/ SERVICE_UNAVAILABLE。"
+        "若候选包含 capability_contract，请读取 VULNGATE_CAPABILITY_CONTRACT、"
+        "VULNGATE_CAPABILITIES、VULNGATE_TRANSITIONS；只有实际观察到对应原语、"
+        "transition 或 typed effect 才输出 CAPABILITY/CAPABILITY_EVIDENCE/"
+        "TRANSITION/TRANSITION_EVIDENCE/EFFECT，不能把声明值当作观测值。"
         % (cand["candidate_id"], cand.get("surface"), cand.get("entry"),
            cand.get("logic"), pre, versions,
            experiment_plan or "（无实验计划）",
@@ -854,7 +867,9 @@ def repair_poc(ctx: AutoCtx, cand: Dict[str, Any], src_text: str, compile_error:
         "（如 javax.json / org.json），必须改用目标库 %s 的公共 API；"
         "入口参考：%s。\n"
         "请只输出修正后的完整 Java 文件（类名 %s），保持机器可读输出行约定，"
-        "如候选声明了 sequence/concurrency，保留逐步 STEP/STEP_EVIDENCE/STATE 观测，"
+        "如候选声明了 sequence/concurrency，保留逐步 STEP/STEP_EVIDENCE/STATE 观测；"
+        "如候选包含 capability_contract，保留实际的 CAPABILITY/CAPABILITY_EVIDENCE/"
+        "TRANSITION/TRANSITION_EVIDENCE 观测，不能照抄声明，"
         "只使用公共 API 与 JDK 类，确保可编译。输出不超过 200 行，"
         "只允许 ASCII 字符（禁止全角中文标点），无 Markdown 围栏。"
         % (cand["candidate_id"], compile_error[-3000:],
@@ -923,11 +938,18 @@ def generate_shell_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
         "  AUTHZ_RESULT=<allow|deny；根据真实服务端授权结果输出>\n"
         "  STEP=<已完成的声明步骤标识>\n  STEP_EVIDENCE=<该步骤的实际证据摘要>\n"
         "  STATE=<已观察到的本地状态检查点>\n"
+        "  CAPABILITY=<实际观察到的声明能力原语>\n"
+        "  CAPABILITY_EVIDENCE=<capability_id:该原语的安全本地证据>\n"
+        "  TRANSITION=<实际观察到的声明 from->to>\n"
+        "  TRANSITION_EVIDENCE=<from->to:该 transition 的安全本地证据>\n"
         "  GATE_BLOCKED=<未触发的原因>\n  ERROR=<异常>\n"
         "- 权限矩阵上下文由 VULNGATE_AUTHZ_* 环境变量提供；不要在脚本中写入或输出 token/cookie/password；\n"
         "- 有状态/竞态候选可读取 VULNGATE_SEQUENCE、VULNGATE_CONCURRENCY、"
         "VULNGATE_AVAILABILITY_PROBE；只有真实执行的步骤才输出 STEP/STEP_EVIDENCE/STATE，"
         "不能把声明值直接当作观测值；\n"
+        "- 能力链可读取 VULNGATE_CAPABILITY_CONTRACT、VULNGATE_CAPABILITIES、"
+        "VULNGATE_TRANSITIONS；只有真实观察到原语和 transition 才输出对应的"
+        "CAPABILITY/CAPABILITY_EVIDENCE/TRANSITION/TRANSITION_EVIDENCE，不能照抄声明；\n"
         "- 只允许访问 VULNGATE_TARGET_URL 指向的主机（回环 127.0.0.1）；禁止外联；\n"
         "- 禁止解释性输出，只输出脚本本身。"
         % (cand["candidate_id"], cand.get("surface"), cand.get("entry"),
@@ -947,8 +969,10 @@ def repair_shell_poc(ctx: AutoCtx, cand: Dict[str, Any], script_text: str,
         "攻击逻辑：%s\n"
         "请只输出修正后的完整 bash 脚本：base URL 从 VULNGATE_TARGET_URL 读取，"
         "按候选逻辑真实发送请求并检查响应，保持机器可读观测行 "
-        "（HTTP_CODE= / RESP_MATCH= / EVIDENCE= / OBJECT_MUTATED= / AUTHZ_RESULT= / STEP= / STEP_EVIDENCE= / STATE= / GATE_BLOCKED= / ERROR=），"
+        "（HTTP_CODE= / RESP_MATCH= / EVIDENCE= / OBJECT_MUTATED= / AUTHZ_RESULT= / STEP= / STEP_EVIDENCE= / STATE= / CAPABILITY= / CAPABILITY_EVIDENCE= / TRANSITION= / TRANSITION_EVIDENCE= / GATE_BLOCKED= / ERROR=），"
         "权限上下文从 VULNGATE_AUTHZ_* 环境变量读取，禁止写入或输出 token/cookie/password；"
+        "能力原语和 transition 只能输出真实观察，不得照抄 VULNGATE_CAPABILITIES/"
+        "VULNGATE_TRANSITIONS；"
         "只允许访问 127.0.0.1/localhost，无解释性文本。"
         % (cand["candidate_id"], feedback[-3000:],
            cand.get("surface", ""), cand.get("logic", ""))
@@ -983,7 +1007,8 @@ def _verify_web_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
     cells = [MatrixCell(version=v, safe_mode=False, precondition="none", authz=case,
                         sequence=cand.get("sequence", []),
                         concurrency=cand.get("concurrency", 1),
-                        availability_probe=cand.get("availability_probe", False))
+                        availability_probe=cand.get("availability_probe", False),
+                        capability_contract=capability_contract_from_candidate(cand))
              for v in sorted(urls) for case in authz_cases]
     spec = ShellPOCSpec(candidate_id=cid, script=script_name, cells=cells,
                         urls=urls, entry=cand.get("entry", ""),
@@ -1080,6 +1105,7 @@ def build_cells(ctx: AutoCtx, cand: Dict[str, Any]) -> List[MatrixCell]:
                                         precondition=pre, jvm=jvm, authz=authz,
                                         sequence=sequence, concurrency=concurrency,
                                         availability_probe=availability_probe,
+                                        capability_contract=capability_contract_from_candidate(cand),
                                         required_runtime=required_runtime,
                                         java_bin=java_bin, java_home=java_home))
     return cells
@@ -1236,7 +1262,8 @@ def _verify_fuzz_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
         args=["--entry", fz["entry"], "--hex", fz["hex"]], jvm=jvm,
         sequence=cand.get("sequence", []),
         concurrency=cand.get("concurrency", 1),
-        availability_probe=cand.get("availability_probe", False))
+        availability_probe=cand.get("availability_probe", False),
+        capability_contract=capability_contract_from_candidate(cand))
         for v in versions for s in (True, False)]
     spec = POCSpec(
         candidate_id=cid, class_name=class_name, src="FuzzProbe.java",
@@ -1503,10 +1530,16 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                             "pinned": pinned,
                             "experiment_plan_count": len(experiment_plans),
                             "matrix": [
-                                {k: c.get(k) for k in
-                                 ("candidate_id", "surface", "entry",
-                                  "input_shape", "logic", "authz_cases",
-                                  "experiment_plan")}
+                                dict(
+                                    [(k, c.get(k)) for k in (
+                                        "candidate_id", "surface", "entry",
+                                        "input_shape", "logic", "authz_cases",
+                                        "experiment_plan")]
+                                    + [("capability_contract",
+                                       (c.get("experiment_plan") or {}).get(
+                                           "capability_contract") or
+                                       capability_contract_from_candidate(c))]
+                                )
                                 for c in candidates
                             ]})
         store.save_stage("S2", {"candidates": candidates})

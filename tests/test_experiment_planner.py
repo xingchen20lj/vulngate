@@ -84,6 +84,38 @@ class ExperimentPlannerTests(unittest.TestCase):
                       by_kind["fix-variant-comparison"]["required_observations"])
         self.assertIn("EFFECT_KIND", by_kind["typed-effect"]["required_observations"])
 
+    def test_capability_chain_plan_requires_each_primitive_transition_and_effect(self):
+        candidate = {
+            "candidate_id": "CAP1",
+            "surface": "capability-chain: read -> credential-read -> exec",
+            "attack_class": "capability-chain",
+            "required_capabilities": ["read", "credential-read", "exec"],
+            "observed_capabilities": ["read"],
+            "missing_capabilities": ["credential-read", "exec"],
+            "transition_rules": [
+                {"from": "read", "to": "credential-read", "declared": False},
+                {"from": "credential-read", "to": "exec", "declared": False},
+            ],
+            "runtime_required": True,
+        }
+
+        result = plan_candidate_experiments(candidate, ["1.0"])
+        plan = next(item for item in result["plans"]
+                    if item["kind"] == "capability-transition")
+
+        self.assertIn("capability-chain", result["strategy_tags"])
+        self.assertEqual(result["capability_contract"]["required_capabilities"],
+                         ["read", "credential-read", "exec"])
+        self.assertIn("CAPABILITY_TRACE for declared primitive ids",
+                      plan["required_observations"])
+        self.assertIn("CAPABILITY_EVIDENCE for each emitted primitive",
+                      plan["required_observations"])
+        self.assertIn("TRANSITION_TRACE for each declared transition",
+                      plan["required_observations"])
+        self.assertIn("EFFECT_KIND and EFFECT for typed effect",
+                      plan["required_observations"])
+        self.assertEqual(result["provenance"]["claim_status"], "not-a-finding")
+
     def test_plan_is_deterministic_and_bounded(self):
         candidate = {
             "candidate_id": "B1",

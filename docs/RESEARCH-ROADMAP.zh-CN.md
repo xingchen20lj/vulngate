@@ -18,7 +18,7 @@
 | 1 | 全源码覆盖、入口/危险 Sink、控制图、同族差分 | 已完成 | coverage、flow、control、differential、scheduler | 高风险未覆盖区域持续可见 |
 | 2 | 复合攻击链和状态/竞态实验契约 | 已完成 | `chain-*`、`sequence`、`STEP/STATE`、可用性证据 | 声明并发不等于 A:H；每一步可追踪 |
 | 3 | 可证伪实验规划器 | 本阶段已实现 | `S2/experiment-plans.json`、S3 计划上下文 | 每个候选有必需观测和 falsifier，且 `not-a-finding` |
-| 4 | 能力原语与攻击路径图 | 本阶段已实现 | `capability-graph.json`、`capability-candidates.json`、能力链实验序列 | 低危原语只有在链路和终点效果均成立时才升级 |
+| 4 | 能力原语与攻击路径图 | 已实现（含 S4 运行时契约） | `capability-graph.json`、`capability-candidates.json`、`capability_contract`、`CAPABILITY/TRANSITION` 证据 | 低危原语只有在链路、transition 和终点 typed effect 均有观测时才允许继续评估 |
 | 5 | 运行时研究实验室与差分验证 | 后续 | 固定 fixture、版本差分、受控 fuzz、缩减后的 reproducer | 每个复现器能在隔离环境稳定重跑，失败原因可分类 |
 | 6 | 研究记忆与反馈学习 | 后续 | candidate/finding/negative-result 记忆、重复检测、跨轮 next probe | 不重复跑已证伪路径；新轮次能利用旧证据 |
 | 7 | 专家级评测基准 | 后续 | 真实/合成案例集、变体集、误报/漏报指标 | 用证据质量、覆盖率、校准度衡量，而不是只看候选数量 |
@@ -36,7 +36,7 @@
 
 规划器的输出是研究清单，不会生成 confirmed、0day 或严重性结论。S3 可以使用它选择下一步验证，G4/G5 仍只消费实际落盘的矩阵观测。
 
-## 已实现阶段：能力原语与攻击路径图
+## 已实现阶段：能力原语与攻击路径图及 S4 运行时契约
 
 现在先将候选拆成可验证的能力原语：输入控制、解析/变换、身份或租户边界、文件读写、网络请求、进程/命令执行、状态修改等；再沿 Source→Transform→Control→Sink 图搜索“能力组合”。S1 会把现有 entry/sink/flow index 转换为有界的 `capability-graph`，并把显式链方程生成到 S2 的候选池。
 
@@ -50,9 +50,21 @@
 
 验收时至少覆盖：`read → leak`、`write → configuration/state change`、`ssrf → internal effect`、`exec → process/file marker`，并保留不能闭合的链作为 pending，而不是误报成高影响漏洞。图中的完整链也只会带 `claim_status=not-a-finding`、`requires_manual_dataflow=true`、`runtime_required=true`，再由现有实验规划器生成最小验证步骤。
 
+能力链现在通过一个有界的 `capability_contract` 进入每个 S4 cell。运行器只把规范化后的
+原语、缺失项和 transition 规则作为 PoC 的观察清单，并额外保存：
+
+- `CAPABILITY=` / `CAPABILITY_EVIDENCE=`：实际观察到的能力原语及其安全证据；
+- `TRANSITION=` / `TRANSITION_EVIDENCE=`：实际发生的相邻状态转换及其安全证据；
+- `EFFECT_KIND=` / `EFFECT=`：需要时用于证明终点 typed effect。
+
+汇总器将能力链标记为 `no-trace`、`partial` 或 `complete`，同时单独记录缺失原语、缺失
+transition 证据和 typed effect 状态。`complete` 只表示该 cell 的声明观测清单已满足，仍
+不是漏洞结论；所有能力链证据保持 `claim_status=not-a-finding`，环境失败和未观测不能
+被解释为能力不存在。
+
 ## 后续优先级
 
-1. 已完成能力图与实验计划的连接；下一步将把每条链的中间状态观测直接映射到 S4 cell。
+1. 在现有 S4 cell 契约上增加固定 fixture、版本/配置差分和可重复的实验环境。
 2. 再做受控运行时实验室和差分 fuzz，优先复用现有 S4 cell、隔离和收敛契约。
 3. 最后做跨轮记忆和评测基准，用负结果、重复率、证据完整度和严重性校准反向约束 Agent。
 

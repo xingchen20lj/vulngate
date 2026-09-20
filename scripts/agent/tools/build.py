@@ -3,7 +3,8 @@
 Runs `{version} x {safe-mode on/off} x {precondition}` cells for a candidate,
 captures stdout/stderr per cell, and extracts machine-readable observations
 (GATE_BLOCKED / INSTANTIATED / ERROR / NETWORK / PARSED plus bounded
-STEP/STEP_EVIDENCE/STATE traces) that the G4 runtime gate consumes.
+STEP/STEP_EVIDENCE/STATE and capability/transition traces) that the G4
+runtime gate consumes.
 """
 
 from __future__ import annotations
@@ -20,8 +21,8 @@ from typing import Any, Dict, List, Optional
 from ..sandbox.approval import ApprovalGate
 from ..sandbox.runner import CommandRunner, RunResult, minimal_poc_env
 from .authz import assert_authz_observations, authz_env, authz_jvm_props, normalize_authz_case
-from .experiment import (experiment_metadata, normalize_experiment,
-                         sequence_trace_status)
+from .experiment import (experiment_metadata, normalize_capability_contract,
+                         normalize_experiment, sequence_trace_status)
 
 
 RUNNER_POLICY_VERSION = "loopback-only-v2"
@@ -93,21 +94,37 @@ class MatrixCell:
     sequence: List[str] = field(default_factory=list)
     concurrency: int = 1
     availability_probe: bool = False
+    # Bounded capability-chain contract.  This is an observation checklist,
+    # never proof that a primitive or transition exists.
+    capability_contract: Dict[str, Any] = field(default_factory=dict)
     experiment_warnings: List[str] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
         (self.sequence, self.concurrency, self.availability_probe,
          self.experiment_warnings) = normalize_experiment(
             self.sequence, self.concurrency, self.availability_probe)
+        self.capability_contract = normalize_capability_contract(
+            self.capability_contract)
 
 
 def _cell_experiment_env(cell: MatrixCell) -> Dict[str, str]:
     """Expose only bounded experiment metadata to a PoC process."""
+    contract = normalize_capability_contract(cell.capability_contract)
     return {
         "VULNGATE_SEQUENCE": json.dumps(cell.sequence, ensure_ascii=False),
         "VULNGATE_CONCURRENCY": str(cell.concurrency),
         "VULNGATE_AVAILABILITY_PROBE": (
             "true" if cell.availability_probe else "false"),
+        "VULNGATE_CAPABILITY_CONTRACT": json.dumps(
+            contract, ensure_ascii=False, separators=(",", ":")),
+        "VULNGATE_CAPABILITIES": json.dumps(
+            contract.get("required_capabilities", []), ensure_ascii=False),
+        "VULNGATE_OBSERVED_CAPABILITIES": json.dumps(
+            contract.get("observed_capabilities", []), ensure_ascii=False),
+        "VULNGATE_MISSING_CAPABILITIES": json.dumps(
+            contract.get("missing_capabilities", []), ensure_ascii=False),
+        "VULNGATE_TRANSITIONS": json.dumps(
+            contract.get("transition_rules", []), ensure_ascii=False),
     }
 
 
@@ -118,6 +135,7 @@ def _cell_metadata(cell: MatrixCell) -> Dict[str, Any]:
         "sequence": meta["sequence"],
         "concurrency": meta["concurrency"],
         "availability_probe": meta["availability_probe"],
+        "capability_contract": meta["capability_contract"],
         "experiment": meta,
     }
 
@@ -271,14 +289,18 @@ def resolve_java_runtime(cell: MatrixCell) -> Dict[str, str]:
 
 
 def parse_observations(stdout: str, stderr: str = "") -> Dict[str, Any]:
-    """Parse scalar observations plus bounded state/step evidence traces."""
+    """Parse scalar observations plus bounded state/capability evidence traces."""
     obs: Dict[str, Any] = {}
     combined = stdout + "\n" + stderr
     for line in combined.splitlines():
         for source_key, trace_key in (
                 ("STEP", "STEP_TRACE"),
                 ("STEP_EVIDENCE", "STEP_EVIDENCE"),
-                ("STATE", "STATE_TRACE")):
+                ("STATE", "STATE_TRACE"),
+                ("CAPABILITY", "CAPABILITY_TRACE"),
+                ("CAPABILITY_EVIDENCE", "CAPABILITY_EVIDENCE"),
+                ("TRANSITION", "TRANSITION_TRACE"),
+                ("TRANSITION_EVIDENCE", "TRANSITION_EVIDENCE")):
             if line.startswith(source_key + "="):
                 values = obs.setdefault(trace_key, [])
                 if not isinstance(values, list):
@@ -690,6 +712,118 @@ class ShellMatrixRunner:
 _FALSY_MARKERS = ("", "true", "yes", "ok", "none", "null", "0", "false")
 
 
+def _trace_values(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return [str(item)[:240] for item in value[:32] if str(item).strip()]
+    if value is None or not str(value).strip():
+        return []
+    return [str(value)[:240]]
+
+
+def _capability_name(value: Any, allowed: List[str]) -> str:
+    """Extract a declared capability id from one PoC trace value."""
+    text = str(value or "").strip()
+    for candidate in (text, text.split("=", 1)[0].strip(),
+                      text.split(":", 1)[0].strip()):
+        if candidate in allowed:
+            return candidate
+    return ""
+
+
+def _transition_name(value: Any) -> str:
+    text = str(value or "").strip()
+    if "=" in text:
+        text = text.split("=", 1)[0].strip()
+    if ":" in text:
+        text = text.split(":", 1)[0].strip()
+    if "->" not in text:
+        return ""
+    left, right = (part.strip() for part in text.split("->", 1))
+    return "%s->%s" % (left, right) if left and right else ""
+
+
+def _capability_cell_evidence(cell: Dict[str, Any], obs: Dict[str, Any]
+                              ) -> Optional[Dict[str, Any]]:
+    """Summarize intermediate capability observations without judging impact."""
+    experiment = cell.get("experiment") or {}
+    contract = normalize_capability_contract(
+        cell.get("capability_contract") or experiment.get("capability_contract"))
+    required = list(contract.get("required_capabilities") or [])
+    if not required:
+        return None
+    capability_trace = _trace_values(obs.get("CAPABILITY_TRACE"))
+    capability_evidence = _trace_values(obs.get("CAPABILITY_EVIDENCE"))
+    transition_trace = _trace_values(obs.get("TRANSITION_TRACE"))
+    transition_evidence = _trace_values(obs.get("TRANSITION_EVIDENCE"))
+    observed = []
+    for raw in capability_trace:
+        name = _capability_name(raw, required)
+        if name and name not in observed:
+            observed.append(name)
+    missing = [name for name in required if name not in observed]
+    evidence_capabilities = []
+    for raw in capability_evidence:
+        name = _capability_name(raw, required)
+        if name and name not in evidence_capabilities:
+            evidence_capabilities.append(name)
+    missing_capability_evidence = [name for name in observed
+                                   if name not in evidence_capabilities]
+    expected_transitions = [
+        "%s->%s" % (rule["from"], rule["to"])
+        for rule in contract.get("transition_rules", [])
+    ]
+    observed_transitions = []
+    for raw in transition_trace:
+        name = _transition_name(raw)
+        if name in expected_transitions and name not in observed_transitions:
+            observed_transitions.append(name)
+    missing_transitions = [name for name in expected_transitions
+                           if name not in observed_transitions]
+    evidence_transitions = []
+    for raw in transition_evidence:
+        name = _transition_name(raw)
+        if name in expected_transitions and name not in evidence_transitions:
+            evidence_transitions.append(name)
+    missing_transition_evidence = [name for name in observed_transitions
+                                   if name not in evidence_transitions]
+    effect_kind = str(obs.get("EFFECT_KIND", "")).strip().lower()
+    effect = str(obs.get("EFFECT", obs.get("SIDE_EFFECT", ""))).strip()
+    safe_effect = any(marker in effect_kind
+                      for marker in ("canary", "simulat", "shape-only", "in-memory"))
+    typed_effect_observed = bool(effect_kind and effect and not safe_effect)
+    if not capability_trace:
+        status = "no-trace"
+    elif (missing or missing_transitions or missing_capability_evidence or
+          missing_transition_evidence or
+          (contract.get("typed_effect_required") and not typed_effect_observed)):
+        status = "partial"
+    else:
+        status = "complete"
+    return {
+        "version": cell.get("version"),
+        "safe": cell.get("safe_mode"),
+        "precondition": cell.get("precondition"),
+        "declared_capabilities": required,
+        "observed_capabilities": observed,
+        "missing_capabilities": missing,
+        "capability_evidence_ids": evidence_capabilities,
+        "missing_capability_evidence": missing_capability_evidence,
+        "declared_transitions": expected_transitions,
+        "observed_transitions": observed_transitions,
+        "missing_transitions": missing_transitions,
+        "transition_evidence_ids": evidence_transitions,
+        "missing_transition_evidence": missing_transition_evidence,
+        "capability_trace": capability_trace,
+        "capability_evidence": capability_evidence,
+        "transition_trace": transition_trace,
+        "transition_evidence": transition_evidence,
+        "status": status,
+        "typed_effect_required": bool(contract.get("typed_effect_required")),
+        "typed_effect_observed": typed_effect_observed,
+        "claim_status": "not-a-finding",
+    }
+
+
 def classify_s4_execution(cells: List[Dict]) -> Dict[str, object]:
     """Classify what S4 actually established, independently of host control flow.
 
@@ -849,6 +983,7 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
     effect_evidence = []
     availability_proof = []
     experiment_evidence = []
+    capability_evidence = []
     authz_results = []
     authz_boundary_violations = []
 
@@ -884,7 +1019,7 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
             state_trace = [str(state_trace)] if state_trace else []
         if declared_sequence or declared_workers > 1 or declared_probe \
                 or step_trace or step_evidence or state_trace:
-            experiment_evidence.append({
+            experiment_row = {
                 "version": c.get("version"),
                 "safe": c.get("safe_mode"),
                 "precondition": c.get("precondition"),
@@ -898,7 +1033,16 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
                 "step_evidence": [str(x)[:240] for x in step_evidence[:32]],
                 "state_trace": [str(x)[:240] for x in state_trace[:32]],
                 "warnings": list(experiment.get("warnings", [])),
-            })
+            }
+            capability_row = _capability_cell_evidence(c, obs)
+            if capability_row:
+                experiment_row["capability"] = capability_row
+                capability_evidence.append(capability_row)
+            experiment_evidence.append(experiment_row)
+        else:
+            capability_row = _capability_cell_evidence(c, obs)
+            if capability_row:
+                capability_evidence.append(capability_row)
         assertion = c.get("authz_assertion")
         if assertion is None and c.get("authz"):
             assertion = assert_authz_observations(c.get("authz"), obs)
@@ -999,6 +1143,7 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
         "effect_evidence": effect_evidence,
         "availability_proof": availability_proof,
         "experiment_evidence": experiment_evidence,
+        "capability_evidence": capability_evidence,
         "authz_results": authz_results,
         "authz_boundary_violations": authz_boundary_violations,
         "cells_ran": len(cells),

@@ -12,10 +12,15 @@ from __future__ import annotations
 import re
 from typing import Any, List, Tuple
 
+from .redaction import redact_text
+
 
 MAX_SEQUENCE_STEPS = 16
 MAX_STEP_ID_LENGTH = 64
 MAX_CONCURRENCY = 64
+MAX_CAPABILITIES = 16
+MAX_TRANSITION_RULES = 16
+MAX_CAPABILITY_GOAL_LENGTH = 160
 
 _STEP_ID = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,%d}$" % (MAX_STEP_ID_LENGTH - 1))
@@ -87,6 +92,92 @@ def normalize_experiment(sequence: Any = None, concurrency: Any = 1,
     return steps, workers, probe, warnings
 
 
+def _bounded_identifiers(value: Any, limit: int) -> List[str]:
+    """Keep capability names identifier-shaped and bounded.
+
+    Capability contracts are metadata supplied by static analysis or an LLM
+    candidate.  They must never become a second command/configuration channel.
+    """
+    if not isinstance(value, (list, tuple)):
+        return []
+    out: List[str] = []
+    for raw in value:
+        item = str(raw).strip()
+        if not item or not _STEP_ID.fullmatch(item) or item in out:
+            continue
+        out.append(item)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def normalize_capability_contract(value: Any) -> dict:
+    """Normalize a bounded capability-chain contract for one S4 cell.
+
+    The contract describes what a PoC should attempt to observe; it does not
+    assert that any primitive or transition exists.  Only identifier-shaped
+    capability names and ``from``/``to`` pairs survive normalization.
+    """
+    if not isinstance(value, dict):
+        return {}
+    required = _bounded_identifiers(
+        value.get("required_capabilities") or value.get("required"),
+        MAX_CAPABILITIES)
+    observed = _bounded_identifiers(
+        value.get("observed_capabilities") or value.get("observed"),
+        MAX_CAPABILITIES)
+    missing = _bounded_identifiers(
+        value.get("missing_capabilities") or value.get("missing"),
+        MAX_CAPABILITIES)
+    rules: List[dict] = []
+    raw_rules = value.get("transition_rules") or value.get("transitions")
+    if isinstance(raw_rules, (list, tuple)):
+        for raw in raw_rules:
+            if not isinstance(raw, dict):
+                continue
+            left = str(raw.get("from", "")).strip()
+            right = str(raw.get("to", "")).strip()
+            if not _STEP_ID.fullmatch(left) or not _STEP_ID.fullmatch(right):
+                continue
+            row = {"from": left, "to": right}
+            if isinstance(raw.get("declared"), bool):
+                row["declared"] = raw["declared"]
+            rules.append(row)
+            if len(rules) >= MAX_TRANSITION_RULES:
+                break
+    goal = redact_text(value.get("goal", "")).replace("\x00", "").strip()
+    return {
+        "required_capabilities": required,
+        "observed_capabilities": observed,
+        "missing_capabilities": missing,
+        "transition_rules": rules,
+        "goal": goal[:MAX_CAPABILITY_GOAL_LENGTH],
+        "typed_effect_required": bool(value.get("typed_effect_required", False)),
+    }
+
+
+def capability_contract_from_candidate(candidate: Any) -> dict:
+    """Derive a cell contract from a static capability candidate or plan."""
+    if not isinstance(candidate, dict):
+        return {}
+    nested = candidate.get("capability_contract")
+    if not isinstance(nested, dict):
+        plan = candidate.get("experiment_plan")
+        if isinstance(plan, dict):
+            nested = plan.get("capability_contract")
+    if isinstance(nested, dict):
+        return normalize_capability_contract(nested)
+    return normalize_capability_contract({
+        "required_capabilities": candidate.get("required_capabilities"),
+        "observed_capabilities": candidate.get("observed_capabilities"),
+        "missing_capabilities": candidate.get("missing_capabilities"),
+        "transition_rules": candidate.get("transition_rules"),
+        "goal": candidate.get("goal"),
+        "typed_effect_required": candidate.get(
+            "typed_effect_required", candidate.get("runtime_required", False)),
+    })
+
+
 def experiment_metadata(cell: Any) -> dict:
     """Return the stable JSON shape persisted for one matrix cell."""
     return {
@@ -94,6 +185,8 @@ def experiment_metadata(cell: Any) -> dict:
         "concurrency": int(getattr(cell, "concurrency", 1) or 1),
         "availability_probe": bool(getattr(cell, "availability_probe", False)),
         "warnings": list(getattr(cell, "experiment_warnings", []) or []),
+        "capability_contract": normalize_capability_contract(
+            getattr(cell, "capability_contract", {})),
     }
 
 

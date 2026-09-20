@@ -189,7 +189,7 @@ Run stages in order unless a hard gate or explicit scope rule ends a candidate.
   python3 scripts/agent_cli.py differential <target> --show-candidates \
     --fix-history state/<target>/round-01/S1/security-fix-history.json
   ```
-- **Capability-primitive search:** `capability-graph.json` maps observed entry/flow/sink signals to bounded `read` / `write` / `exec` / `ssrf` / credential and evaluation primitives. `capability-candidates.json` composes only explicitly listed equations, records `observed_capabilities` versus `missing_capabilities`, and emits a minimal verification sequence. A complete-looking chain is still `claim_status=not-a-finding`, `requires_manual_dataflow=true`, and `runtime_required=true`; missing primitives are pending research goals, never negative evidence or an RCE claim.
+- **Capability-primitive search:** `capability-graph.json` maps observed entry/flow/sink signals to bounded `read` / `write` / `exec` / `ssrf` / credential and evaluation primitives. `capability-candidates.json` composes only explicitly listed equations, records `observed_capabilities` versus `missing_capabilities`, emits a minimal verification sequence, and carries a bounded S4 `capability_contract`. A complete-looking chain is still `claim_status=not-a-finding`, `requires_manual_dataflow=true`, and `runtime_required=true`; missing primitives are pending research goals, never negative evidence or an RCE claim.
 
   ```bash
   python3 scripts/agent_cli.py capability <target> --show-candidates
@@ -362,6 +362,19 @@ lines; the runner preserves ordered traces. A declared concurrency or probe is
 metadata, not runtime proof: `A:H` still requires observed
 `CONCURRENCY>=2` plus `SERVICE_UNAVAILABLE=true` (or an equivalent accepted
 observation).
+
+Capability-chain candidates may additionally carry a bounded
+`capability_contract` per cell. The runner exposes its read-only declaration as
+`VULNGATE_CAPABILITY_CONTRACT`, `VULNGATE_CAPABILITIES`,
+`VULNGATE_OBSERVED_CAPABILITIES`, `VULNGATE_MISSING_CAPABILITIES`, and
+`VULNGATE_TRANSITIONS`. PoCs may emit repeated `CAPABILITY=` /
+`CAPABILITY_EVIDENCE=` and `TRANSITION=` / `TRANSITION_EVIDENCE=` lines, but
+only for primitives and transitions actually observed; copying a declaration
+is not evidence. S4 classifies the declared capability checklist as
+`no-trace`, `partial`, or `complete`, records missing primitive/transition
+evidence, and keeps `EFFECT_KIND`/`EFFECT` as a separate typed-effect check.
+Even `complete` is cell-level research evidence with `claim_status=not-a-finding`,
+not a vulnerability conclusion.
 
 Keep every cell, including harness failures and negative observations.
 
@@ -789,7 +802,7 @@ reports/<target>/round-NN/...
   python3 scripts/agent_cli.py differential <target> --show-candidates \
     --fix-history state/<target>/round-01/S1/security-fix-history.json
   ```
-- **能力原语搜索：** `capability-graph.json` 将入口/flow/sink 的静态信号映射成有界的 `read` / `write` / `exec` / `ssrf` / 凭据 / 求值原语。`capability-candidates.json` 只组合显式方程，分别记录 `observed_capabilities` 与 `missing_capabilities`，并给出最小验证序列。即使链看起来闭合，仍必须保持 `claim_status=not-a-finding`、`requires_manual_dataflow=true`、`runtime_required=true`；缺失原语是待研究目标，不是负证据，更不是 RCE 结论。
+- **能力原语搜索：** `capability-graph.json` 将入口/flow/sink 的静态信号映射成有界的 `read` / `write` / `exec` / `ssrf` / 凭据 / 求值原语。`capability-candidates.json` 只组合显式方程，分别记录 `observed_capabilities` 与 `missing_capabilities`，给出最小验证序列，并携带有界的 S4 `capability_contract`。即使链看起来闭合，仍必须保持 `claim_status=not-a-finding`、`requires_manual_dataflow=true`、`runtime_required=true`；缺失原语是待研究目标，不是负证据，更不是 RCE 结论。
 
   ```bash
   python3 scripts/agent_cli.py capability <target> --show-candidates
@@ -937,6 +950,16 @@ sequence（步骤标识，最多 16 个）× concurrency（1..64）× availabili
 输出 `STEP=`、`STEP_EVIDENCE=`、`STATE=`，运行器会保留有序 trace。声明的
 并发度或探针只是元数据，不是运行时证明；`A:H` 仍必须有实际观测到的
 `CONCURRENCY>=2` 与 `SERVICE_UNAVAILABLE=true`（或等价已接受观测）。
+
+能力链候选还会把有界 `capability_contract` 传入每个 cell。运行器通过
+`VULNGATE_CAPABILITY_CONTRACT`、`VULNGATE_CAPABILITIES`、
+`VULNGATE_OBSERVED_CAPABILITIES`、`VULNGATE_MISSING_CAPABILITIES` 和
+`VULNGATE_TRANSITIONS` 提供只读观察清单。PoC 可以重复输出
+`CAPABILITY=` / `CAPABILITY_EVIDENCE=` 与 `TRANSITION=` /
+`TRANSITION_EVIDENCE=`，但只能记录实际观察，不能照抄声明。S4 会把清单
+分为 `no-trace`、`partial`、`complete`，分别保留缺失原语/transition 证据，
+并把 `EFFECT_KIND` / `EFFECT` 作为独立的 typed effect 条件；即使状态为
+`complete`，仍然只是 `claim_status=not-a-finding` 的 cell 级研究证据。
 
 所有 cell 都保留，包括 harness error 和负向观测。
 

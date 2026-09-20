@@ -37,6 +37,15 @@ sequence. These are static research hypotheses (`not-a-finding`) that require
 manual data-flow review and runtime typed-effect evidence; a missing primitive
 is a next probe, not proof that the chain is absent.
 
+The next link is now deterministic S4 evidence. Capability candidates are
+normalized into a bounded `capability_contract` on each matrix cell and exposed
+to Java, shell, autonomous, and CLI-manifest PoCs as read-only observation
+metadata. The runner preserves `CAPABILITY` / `CAPABILITY_EVIDENCE` and
+`TRANSITION` / `TRANSITION_EVIDENCE` traces, and reports `no-trace`, `partial`,
+or `complete` capability evidence while keeping `EFFECT_KIND` / `EFFECT` as a
+separate typed-effect requirement. Even a complete cell trace remains a
+`not-a-finding` research result until the ordinary G1/G4/G5 gates are met.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable
