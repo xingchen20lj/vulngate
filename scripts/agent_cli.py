@@ -16,6 +16,10 @@ Usage:
   agent_cli.py cvss --vector <CVSS:3.1/...> [--tier <tier>] [--implicit-default-on]
   agent_cli.py ledger --workspace <dir> --target <name> --round <N> --entries <json>
   agent_cli.py deps --target <dir> [--out <report.md>] [--offline] [--cache <dir>]
+  agent_cli.py review <target> --workspace <dir> (--research-key <rk>|--candidate-id <id>)
+                           --status <accepted|rejected|needs-evidence|scope-corrected>
+                           [--reason-code <code>] [--note <text>] [--evidence-ref <ref>]
+                           [--next-probe <hint>] [--round <N>] [--json]
   agent_cli.py coverage <target> [--workspace <dir>] [--rebuild] [--show-uncovered]
                            [--json] [--risk high|medium|low] [--category authz]
                            [--module <prefix>] [--lang zh|en]
@@ -519,6 +523,68 @@ def cmd_deps(args: argparse.Namespace) -> int:
                  "severity": f.severity,
                  "fixed_version": f.fixed_version} for f in findings[:30]],
     })
+    return 0
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    """Record bounded human review feedback for one research mechanism."""
+    from agent.memory.research import (REVIEW_REASON_CODES, REVIEW_STATUSES,
+                                       load_research_memory,
+                                       record_review_feedback,
+                                       review_feedback_path)
+
+    workspace = Path(args.workspace).resolve()
+    memory = load_research_memory(workspace, args.target)
+    research_key = str(args.research_key or "").strip()
+    candidate_id = str(args.candidate_id or "").strip()
+    if not research_key and candidate_id:
+        matches = [entry for entry in memory.get("entries", [])
+                   if str(entry.get("candidate_id") or "") == candidate_id]
+        keys = sorted({str(entry.get("research_key")) for entry in matches
+                       if entry.get("research_key")})
+        if len(keys) != 1:
+            _out({"error": "candidate id does not resolve to one research key",
+                  "candidate_id": candidate_id, "matches": keys,
+                  "hint": "pass --research-key explicitly when the candidate was renamed"})
+            return 2
+        research_key = keys[0]
+    if not research_key:
+        _out({"error": "--research-key or --candidate-id is required"})
+        return 2
+    if args.status not in REVIEW_STATUSES or args.reason_code not in REVIEW_REASON_CODES:
+        _out({"error": "unsupported review status or reason code",
+              "statuses": sorted(REVIEW_STATUSES),
+              "reason_codes": sorted(REVIEW_REASON_CODES)})
+        return 2
+    round_no = int(args.round or 0)
+    if round_no <= 0:
+        try:
+            round_no = max(1, int(memory.get("round", 0) or 0) + 1)
+        except (TypeError, ValueError):
+            round_no = 1
+    try:
+        feedback = record_review_feedback(
+            workspace, args.target, research_key, args.status,
+            reason_code=args.reason_code, candidate_id=candidate_id,
+            reviewer_note=args.note, evidence_refs=args.evidence_ref,
+            next_probe_hints=args.next_probe, round_no=round_no)
+    except ValueError as exc:
+        _out({"error": str(exc)})
+        return 2
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "feedback": feedback,
+        "feedback_file": str(review_feedback_path(workspace, args.target)
+                               .relative_to(workspace)),
+        "claim_status": "not-a-finding",
+    }
+    if args.json:
+        _out(payload)
+    else:
+        print("review feedback recorded: %s %s (%s) -> %s" % (
+            feedback["status"], feedback["research_key"],
+            feedback["reason_code"], payload["feedback_file"]))
     return 0
 
 
@@ -1129,6 +1195,36 @@ def build_parser() -> argparse.ArgumentParser:
     dp.add_argument("--offline", action="store_true")
     dp.add_argument("--cache", default=None)
     dp.set_defaults(fn=cmd_deps)
+
+    rv = sub.add_parser(
+        "review",
+        help="record bounded human review feedback for a research mechanism",
+    )
+    rv.add_argument("target", help="target name (state/<target>/...)")
+    rv.add_argument("--workspace", required=True,
+                    help="workspace root containing state/<target>/")
+    identity = rv.add_mutually_exclusive_group(required=True)
+    identity.add_argument("--research-key", default=None,
+                          help="stable rk-... mechanism key")
+    identity.add_argument("--candidate-id", default=None,
+                          help="candidate id resolved through research memory")
+    rv.add_argument("--status", required=True,
+                    choices=["accepted", "rejected", "needs-evidence", "scope-corrected"])
+    rv.add_argument("--reason-code", default="needs-source-review",
+                    choices=["false-positive", "confirmed-mechanism",
+                             "missing-typed-effect", "environment-gap",
+                             "scope-correction", "duplicate",
+                             "needs-source-review"])
+    rv.add_argument("--note", default="", help="bounded reviewer note")
+    rv.add_argument("--evidence-ref", action="append", default=[],
+                    help="artifact/code reference; repeatable")
+    rv.add_argument("--next-probe", action="append", default=[],
+                    help="bounded next-probe hint; repeatable")
+    rv.add_argument("--round", type=int, default=0,
+                    help="review round (default: latest memory round + 1)")
+    rv.add_argument("--json", action="store_true",
+                    help="machine-readable output")
+    rv.set_defaults(fn=cmd_review)
 
     cvr = sub.add_parser(
         "coverage",

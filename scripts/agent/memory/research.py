@@ -31,6 +31,8 @@ from ..tools.redaction import redact_text
 MEMORY_SCHEMA_VERSION = "research-memory-v1"
 MEMORY_FILENAME = "research-memory.json"
 MEMORY_CLAIM_STATUS = "not-a-finding"
+REVIEW_SCHEMA_VERSION = "research-review-v1"
+REVIEW_FILENAME = "review-feedback.json"
 
 MAX_MEMORY_ENTRIES = 2048
 MAX_EVENTS_PER_ENTRY = 24
@@ -40,6 +42,11 @@ MAX_TARGET_CLASSES = 12
 MAX_TEXT = 180
 MAX_SURFACE = 220
 MAX_DIGEST_INPUT = 12000
+MAX_REVIEW_ENTRIES = 512
+MAX_REVIEW_REFS = 8
+MAX_REVIEW_NOTE = 240
+MAX_CONTEXT_VERSIONS = 16
+MAX_CONTEXT_AUTHZ = 16
 
 STATE_STABLE_REPRODUCER = "stable-reproducer"
 STATE_ACTIONABLE_DIFFERENCE = "actionable-difference"
@@ -48,6 +55,32 @@ STATE_UNSTABLE_REPLAY = "unstable-replay"
 STATE_STABLE_OBSERVATION = "stable-observation"
 STATE_INCONCLUSIVE = "inconclusive"
 STATE_DECISION_RECORDED = "decision-recorded"
+STATE_REVIEW_ACCEPTED = "review-accepted"
+STATE_REVIEW_REJECTED = "review-rejected"
+STATE_REVIEW_NEEDS_EVIDENCE = "review-needs-evidence"
+STATE_REVIEW_SCOPE_CORRECTED = "review-scope-corrected"
+
+REVIEW_STATUS_ACCEPTED = "accepted"
+REVIEW_STATUS_REJECTED = "rejected"
+REVIEW_STATUS_NEEDS_EVIDENCE = "needs-evidence"
+REVIEW_STATUS_SCOPE_CORRECTED = "scope-corrected"
+
+REVIEW_STATUSES = frozenset({
+    REVIEW_STATUS_ACCEPTED, REVIEW_STATUS_REJECTED,
+    REVIEW_STATUS_NEEDS_EVIDENCE, REVIEW_STATUS_SCOPE_CORRECTED,
+})
+REVIEW_REASON_CODES = frozenset({
+    "false-positive", "confirmed-mechanism", "missing-typed-effect",
+    "environment-gap", "scope-correction", "duplicate",
+    "needs-source-review",
+})
+
+_REVIEW_STATE_BY_STATUS = {
+    REVIEW_STATUS_ACCEPTED: STATE_REVIEW_ACCEPTED,
+    REVIEW_STATUS_REJECTED: STATE_REVIEW_REJECTED,
+    REVIEW_STATUS_NEEDS_EVIDENCE: STATE_REVIEW_NEEDS_EVIDENCE,
+    REVIEW_STATUS_SCOPE_CORRECTED: STATE_REVIEW_SCOPE_CORRECTED,
+}
 
 _GAP_STATUSES = frozenset({
     "unexecuted", "run-failed", "precondition-unavailable", "gate-blocked",
@@ -166,6 +199,9 @@ def research_key(candidate: Dict[str, Any]) -> str:
         "source_sink_digest": _path_digest(candidate.get("source_to_sink")),
         "capability_digest": _digest(candidate.get("capability_contract"))
         if candidate.get("capability_contract") else "",
+        "fix_variants": _bounded_strings(
+            candidate.get("patch_variants") or candidate.get("fix_variants"),
+            8, 160),
         "fuzz": fuzz_core,
     }
     structural = any(value for key, value in core.items()
@@ -184,6 +220,10 @@ def _candidate_meta(candidate: Dict[str, Any], key: str) -> Dict[str, Any]:
         "code_locations": _locations(candidate),
         "target_classes": _bounded_strings(candidate.get("target_classes"),
                                              MAX_TARGET_CLASSES, 160),
+        "fix_variants": _bounded_strings(
+            candidate.get("patch_variants") or candidate.get("fix_variants"),
+            8, 160),
+        "patch_commit": _text(candidate.get("patch_commit"), 80),
         "research_key": key,
     }
 
@@ -216,8 +256,136 @@ def _runtime_state(replay: Dict[str, Any], differential: Dict[str, Any],
     return STATE_INCONCLUSIVE, hints
 
 
+def _safe_int(value: Any, default: int = 0, minimum: Optional[int] = None,
+              maximum: Optional[int] = None) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    if minimum is not None:
+        number = max(minimum, number)
+    if maximum is not None:
+        number = min(maximum, number)
+    return number
+
+
+def _runtime_context(runtime_lab: Any, candidate_id: str = "") -> Dict[str, Any]:
+    """Return the credential-free S4 context useful for the next probe.
+
+    ``runtime-context-v1`` already owns the detailed snapshot.  Research
+    memory keeps a smaller view so a later round can answer *which service,
+    configuration and authorization fixture did we actually exercise?*
+    without copying URLs, commands, environment values or identities.
+    """
+    if not isinstance(runtime_lab, dict):
+        return {}
+    configuration = runtime_lab.get("configuration")
+    if not isinstance(configuration, dict):
+        configuration = {}
+
+    versions = _bounded_strings(configuration.get("versions"),
+                               MAX_CONTEXT_VERSIONS, 80)
+    target_urls = configuration.get("target_urls")
+    target_url_digests: Dict[str, str] = {}
+    if isinstance(target_urls, dict):
+        for version, snapshot in sorted(target_urls.items(),
+                                        key=lambda item: str(item[0]))[:MAX_CONTEXT_VERSIONS]:
+            if not isinstance(snapshot, dict):
+                continue
+            digest = _text(snapshot.get("url_digest"), 40)
+            if digest:
+                target_url_digests[_text(version, 80)] = digest
+
+    options = configuration.get("runtime_lab")
+    if not isinstance(options, dict):
+        options = {}
+    safe_modes: List[bool] = []
+    for value in options.get("safe_modes") or []:
+        if isinstance(value, bool):
+            parsed = value
+        else:
+            parsed = str(value).strip().lower() in {"true", "1", "yes", "on"}
+        if parsed not in safe_modes:
+            safe_modes.append(parsed)
+        if len(safe_modes) >= 4:
+            break
+
+    service = configuration.get("service_lifecycle")
+    if not isinstance(service, dict):
+        service = runtime_lab.get("service_lifecycle")
+    if not isinstance(service, dict):
+        service = {}
+    health = service.get("healthcheck")
+    if not isinstance(health, dict):
+        health = {}
+    service_view: Dict[str, Any] = {}
+    for key, limit in (("status", 80), ("config_digest", 40),
+                       ("schema_version", 60)):
+        value = _text(service.get(key), limit)
+        if value:
+            service_view[key] = value
+    for key in ("configured", "enabled", "ready", "process_managed"):
+        if isinstance(service.get(key), bool):
+            service_view[key] = service[key]
+    if health:
+        service_view["healthcheck_kind"] = _text(health.get("kind"), 40)
+        service_view["healthcheck_configured"] = bool(health.get("configured"))
+        if isinstance(health.get("port"), int):
+            service_view["healthcheck_port"] = _safe_int(
+                health.get("port"), 0, 1, 65535)
+
+    authz_rows: List[Dict[str, Any]] = []
+    raw_authz = configuration.get("authz_fixtures") or []
+    if isinstance(raw_authz, list):
+        for fixture in raw_authz:
+            if not isinstance(fixture, dict):
+                continue
+            fixture_candidate = _text(fixture.get("candidate_id"), 120)
+            if candidate_id and fixture_candidate and fixture_candidate != candidate_id:
+                continue
+            fixture_id = _text(fixture.get("fixture_id") or
+                               fixture.get("authz_fixture_id"), 80)
+            if not fixture_id:
+                continue
+            row: Dict[str, Any] = {"fixture_id": fixture_id}
+            expected = _text(fixture.get("expected_authz"), 24).lower()
+            if expected in {"allow", "deny"}:
+                row["expected_authz"] = expected
+            codes = []
+            for code in fixture.get("expected_http_codes") or []:
+                code = _safe_int(code, 0, 100, 599)
+                if code and code not in codes:
+                    codes.append(code)
+            if codes:
+                row["expected_http_codes"] = codes[:8]
+            authz_rows.append(row)
+            if len(authz_rows) >= MAX_CONTEXT_AUTHZ:
+                break
+
+    context: Dict[str, Any] = {
+        "schema_version": _text(configuration.get("schema_version"), 60),
+        "target_type": _text(configuration.get("target_type"), 60),
+        "versions": versions,
+        "target_url_digests": target_url_digests,
+        "runtime_options": {
+            "enabled": bool(options.get("enabled")),
+            "replay_runs": _safe_int(options.get("replay_runs"), 0, 0, 5),
+            "safe_modes": safe_modes,
+        },
+        "service_lifecycle": service_view,
+        "authz_fixtures": authz_rows,
+        "claim_status": MEMORY_CLAIM_STATUS,
+    }
+    # A digest makes a configuration change visible even if the individual
+    # fields above are absent in an older runtime-lab artifact.
+    context["context_digest"] = _digest(context)[:24]
+    return context
+
+
 def _fixture_event(item: Dict[str, Any], round_no: int,
-                   fixture_index: int = 0) -> Dict[str, Any]:
+                   fixture_index: int = 0,
+                   runtime_context: Optional[Dict[str, Any]] = None
+                   ) -> Dict[str, Any]:
     fixture = item.get("fixture") or {}
     replay = item.get("replay") or {}
     differential = item.get("differential") or {}
@@ -250,7 +418,23 @@ def _fixture_event(item: Dict[str, Any], round_no: int,
         "inconclusive_cells": _bounded_strings(
             differential.get("inconclusive_cells"), 16, 120),
         "reproduces_expected": reproduces if isinstance(reproduces, bool) else None,
+        "authz_fixture_id": _text(fixture.get("authz_fixture_id"), 80),
     }
+    context = dict(runtime_context or {})
+    authz_fixture_id = evidence["authz_fixture_id"]
+    if authz_fixture_id:
+        rows = list(context.get("authz_fixtures") or [])
+        known = {str(row.get("fixture_id")) for row in rows
+                 if isinstance(row, dict)}
+        if authz_fixture_id not in known:
+            rows.append({"fixture_id": authz_fixture_id})
+        context["authz_fixtures"] = rows[:MAX_CONTEXT_AUTHZ]
+        context["context_digest"] = _digest({
+            key: value for key, value in context.items()
+            if key != "context_digest"
+        })[:24]
+    if context:
+        evidence["runtime_context"] = context
     event_core = {
         "research_key": _text(fixture.get("research_key"), 80),
         "fixture_id": evidence["fixture_id"],
@@ -269,7 +453,9 @@ def _fixture_event(item: Dict[str, Any], round_no: int,
     return event
 
 
-def _summary_gap_event(summary: Dict[str, Any], round_no: int) -> Optional[Dict[str, Any]]:
+def _summary_gap_event(summary: Dict[str, Any], round_no: int,
+                       runtime_context: Optional[Dict[str, Any]] = None
+                       ) -> Optional[Dict[str, Any]]:
     if not isinstance(summary, dict):
         return None
     markers = []
@@ -282,11 +468,14 @@ def _summary_gap_event(summary: Dict[str, Any], round_no: int) -> Optional[Dict[
         return None
     core = {"round": int(round_no), "state": STATE_ENVIRONMENT_GAP,
             "markers": markers[:8]}
+    evidence: Dict[str, Any] = {"summary_markers": markers[:8]}
+    if runtime_context:
+        evidence["runtime_context"] = dict(runtime_context)
     return {
         "event_id": "re-" + _digest(core)[:24],
         "round": int(round_no),
         "state": STATE_ENVIRONMENT_GAP,
-        "evidence": {"summary_markers": markers[:8]},
+        "evidence": evidence,
         "next_probe_hints": ["先修复 S4 前置条件或 harness，再解释运行时结果"],
         "claim_status": MEMORY_CLAIM_STATUS,
     }
@@ -322,13 +511,14 @@ def build_round_memory(candidates: Sequence[Dict[str, Any]],
         cid = _text(candidate.get("candidate_id"), 120)
         key = research_key(candidate)
         summary = summaries.get(cid, {}) if cid else {}
+        context = _runtime_context(runtime_lab, cid)
         events: List[Dict[str, Any]] = []
         for fixture_index, item in enumerate(runtime_by_candidate.get(cid, [])):
-            event = _fixture_event(item, round_no, fixture_index)
+            event = _fixture_event(item, round_no, fixture_index, context)
             event["evidence"]["research_key"] = key
             events.append(event)
         if not events:
-            gap = _summary_gap_event(summary, round_no)
+            gap = _summary_gap_event(summary, round_no, context)
             if gap:
                 gap["event_id"] = "re-" + _digest({
                     "research_key": key,
@@ -389,22 +579,263 @@ def memory_path(workspace: Path, target: str) -> Path:
     return Path(workspace).resolve() / "state" / str(target) / MEMORY_FILENAME
 
 
-def load_research_memory(workspace: Path, target: str) -> Dict[str, Any]:
-    path = memory_path(workspace, target)
+def review_feedback_path(workspace: Path, target: str) -> Path:
+    return Path(workspace).resolve() / "state" / str(target) / REVIEW_FILENAME
+
+
+def _empty_review_feedback() -> Dict[str, Any]:
+    return {
+        "schema_version": REVIEW_SCHEMA_VERSION,
+        "entries": [],
+        "summary": {"feedback_count": 0, "statuses": {}},
+        "claim_status": MEMORY_CLAIM_STATUS,
+    }
+
+
+def _normalize_review_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize one operator review without accepting raw execution data."""
+    if not isinstance(entry, dict):
+        return {}
+    status = _text(entry.get("status"), 40).lower()
+    reason_code = _text(entry.get("reason_code"), 60).lower()
+    research = _text(entry.get("research_key"), 80)
+    candidate_id = _text(entry.get("candidate_id"), 120)
+    if status not in REVIEW_STATUSES or not research:
+        return {}
+    if reason_code not in REVIEW_REASON_CODES:
+        reason_code = "needs-source-review"
+    round_no = _safe_int(entry.get("round"), 0, 0, 1000000)
+    evidence_refs = _bounded_strings(entry.get("evidence_refs"),
+                                     MAX_REVIEW_REFS, 160)
+    next_probe_hints = _bounded_strings(entry.get("next_probe_hints"),
+                                        MAX_HINTS, 220)
+    note = _text(entry.get("reviewer_note"), MAX_REVIEW_NOTE)
+    feedback_id = _text(entry.get("feedback_id"), 80)
+    if not feedback_id:
+        feedback_id = "rf-" + _digest({
+            "research_key": research,
+            "candidate_id": candidate_id,
+            "status": status,
+            "reason_code": reason_code,
+            "reviewer_note": note,
+            "evidence_refs": evidence_refs,
+            "next_probe_hints": next_probe_hints,
+            "round": round_no,
+        })[:24]
+    return {
+        "feedback_id": feedback_id,
+        "research_key": research,
+        "candidate_id": candidate_id,
+        "status": status,
+        "reason_code": reason_code,
+        "reviewer_note": note,
+        "evidence_refs": evidence_refs,
+        "next_probe_hints": next_probe_hints,
+        "round": round_no,
+        "claim_status": MEMORY_CLAIM_STATUS,
+    }
+
+
+def _review_summary(entries: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    statuses = Counter(entry.get("status") for entry in entries
+                       if entry.get("status"))
+    return {
+        "feedback_count": len(entries),
+        "statuses": dict(sorted((str(k), int(v))
+                                 for k, v in statuses.items() if k)),
+    }
+
+
+def load_review_feedback(workspace: Path, target: str) -> Dict[str, Any]:
+    path = review_feedback_path(workspace, target)
     if not path.exists():
-        return _empty_memory()
+        return _empty_review_feedback()
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
-        return _empty_memory()
+        return _empty_review_feedback()
     if not isinstance(value, dict):
-        return _empty_memory()
+        return _empty_review_feedback()
+    entries: List[Dict[str, Any]] = []
+    seen = set()
+    for raw in value.get("entries") or []:
+        item = _normalize_review_entry(raw)
+        if not item or item["feedback_id"] in seen:
+            continue
+        seen.add(item["feedback_id"])
+        entries.append(item)
+    entries.sort(key=lambda item: (int(item.get("round", 0) or 0),
+                                   str(item.get("feedback_id", ""))))
+    entries = entries[-MAX_REVIEW_ENTRIES:]
+    return {
+        "schema_version": REVIEW_SCHEMA_VERSION,
+        "entries": entries,
+        "summary": _review_summary(entries),
+        "claim_status": MEMORY_CLAIM_STATUS,
+    }
+
+
+def write_review_feedback(workspace: Path, target: str,
+                          feedback: Dict[str, Any]) -> Path:
+    path = review_feedback_path(workspace, target)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entries = []
+    seen = set()
+    for raw in (feedback or {}).get("entries") or []:
+        item = _normalize_review_entry(raw)
+        if not item or item["feedback_id"] in seen:
+            continue
+        seen.add(item["feedback_id"])
+        entries.append(item)
+    entries.sort(key=lambda item: (int(item.get("round", 0) or 0),
+                                   str(item.get("feedback_id", ""))))
+    entries = entries[-MAX_REVIEW_ENTRIES:]
+    payload = {
+        "schema_version": REVIEW_SCHEMA_VERSION,
+        "entries": entries,
+        "summary": _review_summary(entries),
+        "claim_status": MEMORY_CLAIM_STATUS,
+    }
+    tmp = path.with_name(".%s.tmp.%d" % (path.name, os.getpid()))
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
+                   encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
+def record_review_feedback(workspace: Path, target: str,
+                           research_key_value: str,
+                           status: str,
+                           reason_code: str = "needs-source-review",
+                           candidate_id: str = "",
+                           reviewer_note: str = "",
+                           evidence_refs: Optional[Sequence[str]] = None,
+                           next_probe_hints: Optional[Sequence[str]] = None,
+                           round_no: int = 0) -> Dict[str, Any]:
+    """Append one bounded human-review event and return its normalized entry."""
+    item = _normalize_review_entry({
+        "research_key": research_key_value,
+        "candidate_id": candidate_id,
+        "status": status,
+        "reason_code": reason_code,
+        "reviewer_note": reviewer_note,
+        "evidence_refs": list(evidence_refs or []),
+        "next_probe_hints": list(next_probe_hints or []),
+        "round": round_no,
+    })
+    if not item:
+        raise ValueError("research_key, status and a supported review shape are required")
+    current = load_review_feedback(workspace, target)
+    entries = list(current.get("entries") or [])
+    entries.append(item)
+    write_review_feedback(workspace, target, {"entries": entries})
+    return item
+
+
+def _review_event(feedback: Dict[str, Any]) -> Dict[str, Any]:
+    state = _REVIEW_STATE_BY_STATUS.get(
+        str(feedback.get("status")), STATE_REVIEW_NEEDS_EVIDENCE)
+    evidence = {
+        "feedback_id": _text(feedback.get("feedback_id"), 80),
+        "research_key": _text(feedback.get("research_key"), 80),
+        "review_status": _text(feedback.get("status"), 40),
+        "reason_code": _text(feedback.get("reason_code"), 60),
+        "reviewer_note": _text(feedback.get("reviewer_note"), MAX_REVIEW_NOTE),
+        "evidence_refs": _bounded_strings(feedback.get("evidence_refs"),
+                                           MAX_REVIEW_REFS, 160),
+    }
+    core = {
+        "feedback_id": evidence["feedback_id"],
+        "research_key": evidence["research_key"],
+        "round": _safe_int(feedback.get("round"), 0, 0, 1000000),
+        "state": state,
+    }
+    hints = _bounded_strings(feedback.get("next_probe_hints"), MAX_HINTS, 220)
+    if not hints:
+        hints = {
+            STATE_REVIEW_REJECTED: ["仅在出现新差异或更强数据流证据后重开，不要重复原探针"],
+            STATE_REVIEW_ACCEPTED: ["保留机制证据，继续补齐 G4/G5 所需的 typed effect 与严重性证据"],
+            STATE_REVIEW_NEEDS_EVIDENCE: ["按复核意见补最小可复现实验、source→sink 或 typed effect 证据"],
+            STATE_REVIEW_SCOPE_CORRECTED: ["按修正后的范围重建候选键并重新做覆盖与运行时验证"],
+        }.get(state, [])
+    return {
+        "event_id": "re-" + _digest(core)[:24],
+        "round": core["round"],
+        "state": state,
+        "evidence": evidence,
+        "next_probe_hints": hints,
+        "claim_status": MEMORY_CLAIM_STATUS,
+    }
+
+
+def _apply_review_feedback(memory: Dict[str, Any],
+                           feedback_entries: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Overlay review events so scheduling sees feedback before the next S8."""
+    normalized = memory if isinstance(memory, dict) else _empty_memory()
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for raw in normalized.get("entries") or []:
+        entry = _normalize_entry(raw) if isinstance(raw, dict) else {}
+        key = str(entry.get("research_key") or "")
+        if key:
+            grouped[key] = entry
+    max_round = _safe_int(normalized.get("round"), 0, 0, 1000000)
+    for raw in feedback_entries or []:
+        feedback = _normalize_review_entry(raw)
+        key = str(feedback.get("research_key") or "")
+        if not key:
+            continue
+        event = _review_event(feedback)
+        max_round = max(max_round, int(event.get("round", 0) or 0))
+        entry = grouped.get(key)
+        if entry is None:
+            entry = _normalize_entry({
+                "research_key": key,
+                "candidate_id": feedback.get("candidate_id", ""),
+                "round": event.get("round", 0),
+                "events": [],
+            })
+            grouped[key] = entry
+        elif feedback.get("candidate_id") and not entry.get("candidate_id"):
+            entry["candidate_id"] = _text(feedback.get("candidate_id"), 120)
+        events = entry.setdefault("events", [])
+        ids = {str(item.get("event_id")) for item in events}
+        if event["event_id"] not in ids:
+            events.append(event)
+        events.sort(key=_event_sort_key)
+        entry["events"] = events[-MAX_EVENTS_PER_ENTRY:]
+        entry["round"] = max(int(entry.get("round", 0) or 0),
+                             int(event.get("round", 0) or 0))
+        entry["claim_status"] = MEMORY_CLAIM_STATUS
+    entries = sorted(grouped.values(),
+                     key=lambda item: str(item.get("research_key", "")))
+    entries = entries[-MAX_MEMORY_ENTRIES:]
+    return {
+        "schema_version": MEMORY_SCHEMA_VERSION,
+        "round": max_round,
+        "entries": entries,
+        "summary": _memory_summary(entries, max_round),
+        "claim_status": MEMORY_CLAIM_STATUS,
+    }
+
+
+def load_research_memory(workspace: Path, target: str) -> Dict[str, Any]:
+    path = memory_path(workspace, target)
+    value: Dict[str, Any]
+    if not path.exists():
+        value = _empty_memory()
+    else:
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            loaded = None
+        value = loaded if isinstance(loaded, dict) else _empty_memory()
     entries = [_normalize_entry(entry) for entry in (value.get("entries") or [])
                if isinstance(entry, dict) and entry.get("research_key")]
     value["schema_version"] = MEMORY_SCHEMA_VERSION
     value["entries"] = entries[:MAX_MEMORY_ENTRIES]
     value["claim_status"] = MEMORY_CLAIM_STATUS
-    return value
+    return _apply_review_feedback(
+        value, load_review_feedback(workspace, target).get("entries") or [])
 
 
 def _event_sort_key(event: Dict[str, Any]) -> Tuple[int, str]:
@@ -430,6 +861,88 @@ def _latest_research_event(events: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     return max(chosen, key=_event_sort_key) if chosen else {}
 
 
+def _normalize_runtime_context(value: Any) -> Dict[str, Any]:
+    """Whitelist the replay context copied from ``runtime-context-v1``."""
+    if not isinstance(value, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    for key, limit in (("schema_version", 60), ("target_type", 60),
+                       ("context_digest", 40)):
+        text = _text(value.get(key), limit)
+        if text:
+            out[key] = text
+    out["versions"] = _bounded_strings(value.get("versions"),
+                                       MAX_CONTEXT_VERSIONS, 80)
+    url_digests = value.get("target_url_digests")
+    if isinstance(url_digests, dict):
+        out["target_url_digests"] = {
+            _text(version, 80): _text(digest, 40)
+            for version, digest in sorted(url_digests.items(),
+                                          key=lambda item: str(item[0]))
+            if _text(version, 80) and _text(digest, 40)
+        }  # bounded below after construction
+        out["target_url_digests"] = dict(
+            list(out["target_url_digests"].items())[:MAX_CONTEXT_VERSIONS])
+
+    options = value.get("runtime_options")
+    if isinstance(options, dict):
+        safe_modes = []
+        for item in options.get("safe_modes") or []:
+            if isinstance(item, bool):
+                parsed = item
+            else:
+                parsed = str(item).strip().lower() in {"true", "1", "yes", "on"}
+            if parsed not in safe_modes:
+                safe_modes.append(parsed)
+        out["runtime_options"] = {
+            "enabled": bool(options.get("enabled")),
+            "replay_runs": _safe_int(options.get("replay_runs"), 0, 0, 5),
+            "safe_modes": safe_modes[:4],
+        }
+
+    service = value.get("service_lifecycle")
+    if isinstance(service, dict):
+        service_out: Dict[str, Any] = {}
+        for key, limit in (("status", 80), ("config_digest", 40),
+                           ("schema_version", 60), ("healthcheck_kind", 40)):
+            text = _text(service.get(key), limit)
+            if text:
+                service_out[key] = text
+        for key in ("configured", "enabled", "ready", "process_managed",
+                    "healthcheck_configured"):
+            if isinstance(service.get(key), bool):
+                service_out[key] = service[key]
+        if isinstance(service.get("healthcheck_port"), int):
+            service_out["healthcheck_port"] = _safe_int(
+                service.get("healthcheck_port"), 0, 1, 65535)
+        out["service_lifecycle"] = service_out
+
+    authz_out: List[Dict[str, Any]] = []
+    for row in value.get("authz_fixtures") or []:
+        if not isinstance(row, dict):
+            continue
+        fixture_id = _text(row.get("fixture_id") or
+                           row.get("authz_fixture_id"), 80)
+        if not fixture_id:
+            continue
+        item: Dict[str, Any] = {"fixture_id": fixture_id}
+        expected = _text(row.get("expected_authz"), 24).lower()
+        if expected in {"allow", "deny"}:
+            item["expected_authz"] = expected
+        codes = []
+        for code in row.get("expected_http_codes") or []:
+            code = _safe_int(code, 0, 100, 599)
+            if code and code not in codes:
+                codes.append(code)
+        if codes:
+            item["expected_http_codes"] = codes[:8]
+        authz_out.append(item)
+        if len(authz_out) >= MAX_CONTEXT_AUTHZ:
+            break
+    out["authz_fixtures"] = authz_out
+    return out
+
+
 def _normalize_evidence(value: Any) -> Dict[str, Any]:
     """Whitelist the small evidence view allowed in durable memory."""
     if not isinstance(value, dict):
@@ -437,7 +950,10 @@ def _normalize_evidence(value: Any) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for key, limit in (("fixture_id", 120), ("fixture_kind", 60),
                        ("replay_status", 80), ("differential_status", 100),
-                       ("primary_version", 80), ("research_key", 80)):
+                       ("primary_version", 80), ("research_key", 80),
+                       ("authz_fixture_id", 80), ("configuration_digest", 40),
+                       ("feedback_id", 80), ("review_status", 40),
+                       ("reason_code", 60), ("reviewer_note", MAX_REVIEW_NOTE)):
         if value.get(key) not in (None, ""):
             out[key] = _text(value.get(key), limit)
     if value.get("replay_attempts") is not None:
@@ -464,6 +980,11 @@ def _normalize_evidence(value: Any) -> Dict[str, Any]:
     out["differences"] = differences
     out["summary_markers"] = _bounded_strings(
         value.get("summary_markers"), 8, 180)
+    context = _normalize_runtime_context(value.get("runtime_context"))
+    if context:
+        out["runtime_context"] = context
+    out["evidence_refs"] = _bounded_strings(
+        value.get("evidence_refs"), MAX_REVIEW_REFS, 160)
     return out
 
 
@@ -482,6 +1003,8 @@ def _normalize_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
                                              MAX_LOCATIONS, 180),
         "target_classes": _bounded_strings(entry.get("target_classes"),
                                             MAX_TARGET_CLASSES, 160),
+        "fix_variants": _bounded_strings(entry.get("fix_variants"), 8, 160),
+        "patch_commit": _text(entry.get("patch_commit"), 80),
         "round": entry_round,
         "decision": _text(entry.get("decision"), 100),
         "decision_status": _text(entry.get("decision_status"), 80),
@@ -554,6 +1077,11 @@ def merge_research_memory(existing: Optional[Dict[str, Any]],
             if source.get("target_classes"):
                 target["target_classes"] = _bounded_strings(
                     source.get("target_classes"), MAX_TARGET_CLASSES, 160)
+            if source.get("fix_variants"):
+                target["fix_variants"] = _bounded_strings(
+                    source.get("fix_variants"), 8, 160)
+            if source.get("patch_commit"):
+                target["patch_commit"] = _text(source.get("patch_commit"), 80)
             target["decision"] = _text(source.get("decision", target.get("decision", "")), 100)
             events = target.setdefault("events", [])
             seen = {str(event.get("event_id")) for event in events}
@@ -631,13 +1159,17 @@ def memory_prompt_rows(entries: Iterable[Dict[str, Any]],
         events = [event for event in entry.get("events", [])
                   if isinstance(event, dict) and event.get("state")]
         latest = _latest_research_event(events)
+        latest_evidence = latest.get("evidence") or {}
         rows.append({
             "research_key": _text(entry.get("research_key"), 80),
             "candidate_id": _text(entry.get("candidate_id"), 120),
             "state": _text(latest.get("state"), 80) or STATE_DECISION_RECORDED,
             "round": latest.get("round", entry.get("round", 0)),
+            "fix_variants": _bounded_strings(entry.get("fix_variants"), 4, 160),
             "next_probe_hints": _bounded_strings(
                 latest.get("next_probe_hints"), 2, 220),
+            "review_status": _text(latest_evidence.get("review_status"), 40),
+            "reason_code": _text(latest_evidence.get("reason_code"), 60),
             "claim_status": MEMORY_CLAIM_STATUS,
         })
     rows.sort(key=lambda row: (-int(row.get("round", 0) or 0),

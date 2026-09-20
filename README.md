@@ -94,6 +94,7 @@ Current gate identifiers are **G0, G1, G1b, G3, G4, and G5**; G1b is the default
 - **Ordinary-S4 fixture adapter** — Java and shell PoC cells can be replayed as bounded, redacted execution fixtures; `S4/runtime-lab.json` keeps stable replay, version/SafeMode differences, and harness gaps separate from G4/G5.
 - **Bounded service context** — stateful S4 runs may start one workspace-local argv-only service, require a loopback health check, reuse a healthy instance, kill the complete process group, and persist `S4/processes.json`; `runtime-lab.json` includes a credential-free configuration snapshot and stable authz/tenant fixture IDs.
 - **Cross-round research memory** — S8 persists stable mechanism keys, replay/differential states, environment gaps, and next-probe hints in `state/<target>/research-memory.json`; S2 reuses that evidence to damp exact repeats and prioritize actionable differences without treating memory as a finding.
+- **Human review feedback loop** — `agent_cli.py review` records bounded accepted/rejected/needs-evidence/scope-corrected feedback by stable research key; S8 replays it into target memory and S2 uses it only to reprioritize follow-up work, never to replace G4/G5 evidence.
 - **Falsifiable experiment planning** — S2 emits bounded plans with required observations and explicit falsifiers for baseline, authz, state, availability, fix variants, and typed effects; plans remain `not-a-finding`.
 - **Capability-primitive path search** — S1 derives bounded `read` / `write` / `exec` / `ssrf` and credential/evaluation chains from the entry/sink/flow indices, preserves missing primitives, and emits minimal verification sequences; static chains remain `not-a-finding` until data-flow and runtime typed-effect evidence exist.
 - **Authorization-aware matrices** — web/application candidates can include identity × role × tenant × object context.
@@ -201,7 +202,7 @@ For an autonomous run using your own compatible LLM API key:
 | S5 | Novelty: upstream issue/PR/fix + public disclosure search and coverage | `S5/novelty.json`, `S5/novelty-coverage.json` | G3 novelty / downgrade |
 | S6 | CVSS + precondition/impact consistency | `S6/severity.json` | G5 consistency |
 | S7 | Self-contained local finding document | `reports/<target>/…` | disclosure hold |
-| S8 | Evidence ledger, exclusions, round summary, cross-round research memory | `ledger/<target>/…`, `state/<target>/research-memory.json`, `S8/research-memory.json` | final consistency checks |
+| S8 | Evidence ledger, exclusions, round summary, cross-round research memory and review feedback | `ledger/<target>/…`, `state/<target>/research-memory.json`, `state/<target>/review-feedback.json`, `S8/research-memory.json`, `S8/review-feedback.json` | final consistency checks |
 
 The source-to-sink graph is intentionally conservative: heuristic proximity is marked as `heuristic-nearby` and `requires_manual_dataflow=true`; it is not presented as a substitute for sound semantic data-flow analysis.
 

@@ -39,7 +39,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..llm.adapter import BudgetExceeded, LLMClient
 from ..memory.ledger import render_finding_md, write_round_artifacts
 from ..memory.research import (build_round_memory, load_research_memory,
-                                merge_research_memory, write_research_memory)
+                                load_review_feedback, merge_research_memory,
+                                write_research_memory)
 from ..orchestrator.config import TargetConfig
 from ..orchestrator.gates import g3_novelty
 from ..sandbox.approval import ApprovalGate
@@ -1808,13 +1809,21 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
     memory = merge_research_memory(
         load_research_memory(ctx.root, ctx.cfg.name), memory_delta)
     memory_file = write_research_memory(ctx.root, ctx.cfg.name, memory)
+    review_feedback = load_review_feedback(ctx.root, ctx.cfg.name)
     ctx.write_artifact(round_no, "S8", "research-memory.json", memory_delta)
     ctx.write_artifact(round_no, "S8", "research-memory-summary.json", memory["summary"])
+    ctx.write_artifact(round_no, "S8", "review-feedback.json", review_feedback)
     research_memory_info = {
         "artifact": str(memory_file.relative_to(ctx.root.resolve())),
         "round_entries": len(memory_delta.get("entries", [])),
         "total_entries": len(memory.get("entries", [])),
         "states": memory.get("summary", {}).get("states", {}),
+        "claim_status": "not-a-finding",
+    }
+    review_feedback_info = {
+        "artifact": "state/%s/review-feedback.json" % ctx.cfg.name,
+        "count": review_feedback.get("summary", {}).get("feedback_count", 0),
+        "statuses": review_feedback.get("summary", {}).get("statuses", {}),
         "claim_status": "not-a-finding",
     }
     s8 = store.load_stage("S8")
@@ -1844,6 +1853,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             },
             "next_round": [],
             "research_memory": research_memory_info,
+            "review_feedback": review_feedback_info,
         }
         by_candidate_memory = {
             str(entry.get("candidate_id")): entry
@@ -1862,10 +1872,12 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                               summary, lang=ctx.cfg.output_lang)
         ctx.write_artifact(round_no, "S8", "llm-usage.json", ctx.llm.usage.to_dict())
         store.save_stage("S8", {"ledger_rows": len(ledger_rows), "excluded": len(excluded),
-                                "research_memory": research_memory_info})
+                                "research_memory": research_memory_info,
+                                "review_feedback": review_feedback_info})
     print("[round-%02d] done: 确认=%d 排除=%d" % (round_no, len(rows), len(excluded)))
     return {"next_candidates": _propose_next(ctx, candidates, rows),
-            "research_memory": research_memory_info}
+            "research_memory": research_memory_info,
+            "review_feedback": review_feedback_info}
 
 
 def _repro_text(row: Dict[str, Any]) -> str:

@@ -41,8 +41,16 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import coverage as cov
 from .inventory import CoverageStore, load_inventory
-from ..memory.research import (STATE_DECISION_RECORDED, load_research_memory,
-                                memory_match, memory_prompt_rows)
+from ..memory.research import (
+    STATE_DECISION_RECORDED,
+    STATE_REVIEW_ACCEPTED,
+    STATE_REVIEW_NEEDS_EVIDENCE,
+    STATE_REVIEW_REJECTED,
+    STATE_REVIEW_SCOPE_CORRECTED,
+    load_research_memory,
+    memory_match,
+    memory_prompt_rows,
+)
 
 # ---------------------------------------------------------------------------
 # configuration
@@ -163,6 +171,11 @@ DUPLICATE_DAMPING = 0.3
 RESEARCH_STABLE_DAMPING = 0.55
 RESEARCH_UNSTABLE_DAMPING = 0.85
 RESEARCH_DIFFERENCE_BOOST = 5.0
+# Human review is a scheduling signal, never a hard ban or a conclusion.
+RESEARCH_REVIEW_ACCEPTED_DAMPING = 0.75
+RESEARCH_REVIEW_REJECTED_DAMPING = 0.35
+RESEARCH_REVIEW_SCOPE_DAMPING = 0.85
+RESEARCH_REVIEW_NEEDS_EVIDENCE_BOOST = 4.0
 
 #: Duplicate threshold, used two ways.  Against a *reviewed region* it is the
 #: fraction of the candidate's own evidence that must already be covered
@@ -997,6 +1010,20 @@ def score_candidate(candidate: Dict[str, Any], ctx: ScheduleContext,
             before = total
             total = min(scale, total + RESEARCH_DIFFERENCE_BOOST)
             adjustment = round(total - before, 4)
+        elif state == STATE_REVIEW_ACCEPTED:
+            total *= RESEARCH_REVIEW_ACCEPTED_DAMPING
+            adjustment = RESEARCH_REVIEW_ACCEPTED_DAMPING
+        elif state == STATE_REVIEW_REJECTED:
+            total *= RESEARCH_REVIEW_REJECTED_DAMPING
+            adjustment = RESEARCH_REVIEW_REJECTED_DAMPING
+        elif state == STATE_REVIEW_SCOPE_CORRECTED:
+            total *= RESEARCH_REVIEW_SCOPE_DAMPING
+            adjustment = RESEARCH_REVIEW_SCOPE_DAMPING
+        elif state == STATE_REVIEW_NEEDS_EVIDENCE:
+            before = total
+            total = min(scale, total + RESEARCH_REVIEW_NEEDS_EVIDENCE_BOOST)
+            adjustment = round(total - before, 4)
+        latest_evidence = latest.get("evidence") or {}
         evidence["research_memory"] = {
             "research_key": remembered.get("research_key", ""),
             "latest_state": state,
@@ -1005,6 +1032,10 @@ def score_candidate(candidate: Dict[str, Any], ctx: ScheduleContext,
             "score_adjustment": adjustment,
             "claim_status": "not-a-finding",
         }
+        for key in ("review_status", "reason_code", "reviewer_note",
+                    "evidence_refs", "feedback_id"):
+            if latest_evidence.get(key) not in (None, "", []):
+                evidence["research_memory"][key] = latest_evidence[key]
     return CandidateScore(
         candidate_id=str(candidate.get("candidate_id") or ""),
         category=candidate_category(candidate),
@@ -1562,9 +1593,14 @@ def prompt_coverage_block(ctx: ScheduleContext, plan: Optional[SchedulePlan] = N
         lines.append("  （暂无可复用的运行时记忆 / no reusable runtime memory）")
     for row in memory_rows:
         hints = "; ".join(row.get("next_probe_hints") or []) or "-"
-        lines.append("  %s [%s, round=%s] next=%s claim_status=%s" % (
+        review = row.get("review_status")
+        review_text = (" review=%s/%s" % (
+            review, row.get("reason_code") or "-") if review else "")
+        variants = "; ".join(row.get("fix_variants") or [])
+        variant_text = (" fix_variants=%s" % variants) if variants else ""
+        lines.append("  %s [%s, round=%s]%s next=%s claim_status=%s" % (
             row.get("candidate_id") or row.get("research_key"),
-            row.get("state"), row.get("round", 0), hints,
+            row.get("state"), row.get("round", 0), review_text + variant_text, hints,
             row.get("claim_status", "not-a-finding")))
 
     lines.append("## 覆盖新颖性要求 / Coverage Novelty Requirement")

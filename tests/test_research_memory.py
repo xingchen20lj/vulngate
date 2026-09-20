@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import contextlib
+import io
 import shutil
 import sys
 import tempfile
@@ -16,16 +18,21 @@ from agent.analysis import scheduler as SCH  # noqa: E402
 from agent.memory.research import (  # noqa: E402
     STATE_ACTIONABLE_DIFFERENCE,
     STATE_ENVIRONMENT_GAP,
+    STATE_REVIEW_NEEDS_EVIDENCE,
+    STATE_REVIEW_REJECTED,
     STATE_STABLE_REPRODUCER,
     build_round_memory,
+    load_review_feedback,
     load_research_memory,
     memory_match,
     merge_research_memory,
+    record_review_feedback,
     research_key,
     write_research_memory,
 )
 from agent.orchestrator.config import TargetConfig  # noqa: E402
 from agent.orchestrator.stages import StageContext, run_s8  # noqa: E402
+import agent_cli  # noqa: E402
 
 
 def candidate(candidate_id="C1", **extra):
@@ -92,6 +99,17 @@ class ResearchMemoryTests(unittest.TestCase):
         self.assertEqual(["src/Parser.java:42"],
                          delta["entries"][0]["code_locations"])
 
+    def test_fix_variant_hints_are_retained_as_bounded_research_metadata(self):
+        c = candidate(patch_commit="deadbeef1234", patch_variants=[
+            "boundary-variant", "alternate-codec",
+        ])
+        delta = build_round_memory([c], {"C1": {}}, {"C1": "候选"},
+                                   lab_for("C1"), 1)
+        entry = delta["entries"][0]
+        self.assertEqual(["alternate-codec", "boundary-variant"],
+                         entry["fix_variants"])
+        self.assertEqual("deadbeef1234", entry["patch_commit"])
+
     def test_runtime_states_keep_difference_and_environment_gap_distinct(self):
         c = candidate()
         difference = build_round_memory(
@@ -114,6 +132,45 @@ class ResearchMemoryTests(unittest.TestCase):
             lab_for("C1"), 4)
         self.assertEqual(STATE_STABLE_REPRODUCER,
                          stable["entries"][0]["events"][0]["state"])
+
+    def test_runtime_context_is_carried_without_raw_service_or_authz_values(self):
+        c = candidate()
+        lab = lab_for("C1")
+        lab["configuration"] = {
+            "schema_version": "runtime-context-v1",
+            "target_type": "web-app",
+            "versions": ["v1"],
+            "target_urls": {"v1": {"url_digest": "url-digest-1",
+                                     "raw_url": "http://127.0.0.1/?token=secret"}},
+            "runtime_lab": {"enabled": True, "replay_runs": 3,
+                             "safe_modes": [False, True]},
+            "service_lifecycle": {
+                "schema_version": "service-lifecycle-v1",
+                "status": "started-ready", "ready": True,
+                "config_digest": "service-config-1",
+                "healthcheck": {"kind": "url", "configured": True,
+                                 "port": 8080, "raw": "secret=do-not-copy"},
+            },
+            "authz_fixtures": [{
+                "candidate_id": "C1", "fixture_id": "azfx-1",
+                "role": "tenant-admin", "tenant_id": "private-tenant",
+                "expected_authz": "deny", "expected_http_codes": [403],
+            }],
+        }
+        lab["fixtures"][0]["fixture"]["authz_fixture_id"] = "azfx-1"
+        delta = build_round_memory([c], {"C1": {}}, {"C1": "候选"}, lab, 2)
+        event = delta["entries"][0]["events"][0]
+        context = event["evidence"]["runtime_context"]
+        self.assertEqual("started-ready", context["service_lifecycle"]["status"])
+        self.assertEqual("service-config-1",
+                         context["service_lifecycle"]["config_digest"])
+        self.assertEqual(["azfx-1"], [row["fixture_id"]
+                                      for row in context["authz_fixtures"]])
+        self.assertEqual("url-digest-1", context["target_url_digests"]["v1"])
+        encoded = json.dumps(delta, ensure_ascii=False)
+        self.assertNotIn("private-tenant", encoded)
+        self.assertNotIn("secret=do-not-copy", encoded)
+        self.assertNotIn("raw_url", encoded)
 
     def test_merge_is_idempotent_and_preserves_old_events(self):
         c = candidate()
@@ -173,6 +230,91 @@ class ResearchMemoryTests(unittest.TestCase):
         self.assertEqual("not-a-finding",
                          after.evidence["research_memory"]["claim_status"])
 
+    def test_human_review_is_idempotent_and_overlays_memory(self):
+        c = candidate()
+        base = merge_research_memory(
+            {}, build_round_memory([c], {"C1": {}}, {"C1": "候选"},
+                                   lab_for("C1"), 1))
+        write_research_memory(self.root, "target", base)
+        key = research_key(c)
+        first = record_review_feedback(
+            self.root, "target", key, "needs-evidence",
+            reason_code="missing-typed-effect", candidate_id="C1",
+            reviewer_note="secret=do-not-persist", evidence_refs=["S4/runtime-lab.json"],
+            next_probe_hints=["补 typed effect"], round_no=2)
+        second = record_review_feedback(
+            self.root, "target", key, "needs-evidence",
+            reason_code="missing-typed-effect", candidate_id="C1",
+            reviewer_note="secret=do-not-persist", evidence_refs=["S4/runtime-lab.json"],
+            next_probe_hints=["补 typed effect"], round_no=2)
+        self.assertEqual(first["feedback_id"], second["feedback_id"])
+        feedback = load_review_feedback(self.root, "target")
+        self.assertEqual(1, feedback["summary"]["feedback_count"])
+        self.assertNotIn("do-not-persist",
+                         json.dumps(feedback, ensure_ascii=False))
+        memory = load_research_memory(self.root, "target")
+        latest = memory_match(c, memory["entries"])["latest_event"]
+        self.assertEqual(STATE_REVIEW_NEEDS_EVIDENCE, latest["state"])
+        self.assertEqual("not-a-finding", latest["claim_status"])
+
+    def test_review_feedback_changes_priority_but_not_claim_status(self):
+        c = candidate()
+        base_ctx = SCH.ScheduleContext(
+            entries={"e": {"entry_id": "e", "kind": "http",
+                            "file": "src/Parser.java", "line": 42}},
+            sinks={"s": {"sink_id": "s", "category": "command-exec",
+                          "severity_hint": "high", "file": "src/Parser.java",
+                          "line": 42}},
+            flows=[{"flow_id": "f", "entry_id": "e", "sink_id": "s",
+                    "direction": "cross-procedural", "path": [],
+                    "authorizations": []}],
+        )
+        before = SCH.score_candidate(c, base_ctx)
+        key = research_key(c)
+        record_review_feedback(self.root, "needs", key, "needs-evidence",
+                               reason_code="needs-source-review", candidate_id="C1",
+                               round_no=1)
+        needs = load_research_memory(self.root, "needs")
+        after_needs = SCH.score_candidate(
+            c, SCH.ScheduleContext(entries=base_ctx.entries, sinks=base_ctx.sinks,
+                                   flows=base_ctx.flows,
+                                   research_memory=needs["entries"]))
+        self.assertGreater(after_needs.total, before.total)
+        self.assertEqual(STATE_REVIEW_NEEDS_EVIDENCE,
+                         after_needs.evidence["research_memory"]["latest_state"])
+        self.assertEqual("not-a-finding",
+                         after_needs.evidence["research_memory"]["claim_status"])
+
+        record_review_feedback(self.root, "rejected", key, "rejected",
+                               reason_code="false-positive", candidate_id="C1",
+                               round_no=1)
+        rejected = load_research_memory(self.root, "rejected")
+        after_rejected = SCH.score_candidate(
+            c, SCH.ScheduleContext(entries=base_ctx.entries, sinks=base_ctx.sinks,
+                                   flows=base_ctx.flows,
+                                   research_memory=rejected["entries"]))
+        self.assertLess(after_rejected.total, before.total)
+        self.assertEqual(STATE_REVIEW_REJECTED,
+                         after_rejected.evidence["research_memory"]["latest_state"])
+
+    def test_review_cli_resolves_candidate_id_and_writes_feedback(self):
+        c = candidate()
+        memory = merge_research_memory(
+            {}, build_round_memory([c], {"C1": {}}, {"C1": "候选"},
+                                   lab_for("C1"), 1))
+        write_research_memory(self.root, "target", memory)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = agent_cli.main([
+                "review", "target", "--workspace", str(self.root),
+                "--candidate-id", "C1", "--status", "accepted",
+                "--reason-code", "confirmed-mechanism", "--json",
+            ])
+        self.assertEqual(0, code)
+        self.assertIn("research_key", output.getvalue())
+        self.assertEqual(1, load_review_feedback(self.root, "target")
+                         ["summary"]["feedback_count"])
+
     def test_config_s8_writes_round_delta_and_target_memory(self):
         c = candidate()
         cfg = TargetConfig(name="target", discovery_date="2026-09-21",
@@ -183,8 +325,11 @@ class ResearchMemoryTests(unittest.TestCase):
         target_memory = self.root / "state" / "target" / "research-memory.json"
         round_delta = (self.root / "state" / "target" / "round-01" / "S8"
                        / "research-memory.json")
+        round_feedback = (self.root / "state" / "target" / "round-01" / "S8"
+                          / "review-feedback.json")
         self.assertTrue(target_memory.exists())
         self.assertTrue(round_delta.exists())
+        self.assertTrue(round_feedback.exists())
         self.assertEqual("state/target/research-memory.json",
                          result["research_memory"]["artifact"])
         self.assertEqual("stable-reproducer",

@@ -20,7 +20,7 @@
 | 3 | 可证伪实验规划器 | 本阶段已实现 | `S2/experiment-plans.json`、S3 计划上下文 | 每个候选有必需观测和 falsifier，且 `not-a-finding` |
 | 4 | 能力原语与攻击路径图 | 已实现（含 S4 运行时契约） | `capability-graph.json`、`capability-candidates.json`、`capability_contract`、`CAPABILITY/TRANSITION` 证据 | 低危原语只有在链路、transition 和终点 typed effect 均有观测时才允许继续评估 |
 | 5 | 运行时研究实验室与差分验证 | 已实现（定向 fuzz + 普通 S4） | `fuzz-corpus.json`、`FUZZ/runtime-lab.json`、`S4/runtime-lab.json`、版本/安全模式差分、缩减 reproducer | 固定输入可重复重放；差分、签名漂移与前置/harness 失败分开记录 |
-| 6 | 研究记忆与反馈学习 | 已实现（跨轮记忆 + S4 服务上下文） | `state/<target>/research-memory.json`、`S8/research-memory.json`、`S4/runtime-lab.json`、`S4/processes.json`、配置快照、authz fixture | 新轮次能利用旧证据；服务/配置/授权上下文可复现；环境缺口不被当成负证据；重复实验只降权不删除 |
+| 6 | 研究记忆与反馈学习 | 已实现（上下文 + 可回放人工复核） | `state/<target>/research-memory.json`、`state/<target>/review-feedback.json`、`S8/research-memory.json`、`S8/review-feedback.json`、`S4/runtime-lab.json`、`S4/processes.json`、配置快照、authz fixture、修复变体提示 | 新轮次能利用旧证据；服务/配置/授权/修复上下文可复现；人工复核可回放；环境缺口不被当成负证据；重复实验只降权不删除 |
 | 7 | 专家级评测基准 | 后续 | 真实/合成案例集、变体集、误报/漏报指标 | 用证据质量、覆盖率、校准度衡量，而不是只看候选数量 |
 
 ## 当前阶段：可证伪实验规划
@@ -112,9 +112,24 @@ stdout/stderr 不写入跨轮记忆。
 环境缺口保持原分数并在 prompt 中提示修复。候选不会被自动删除，所有记忆事件都标记
 `claim_status=not-a-finding`，且合并操作具备幂等性。
 
+本阶段还把 S4 的 `runtime-context-v1` 压缩为可安全复用的事件上下文：服务状态/配置 digest、
+版本与目标 URL digest、运行选项、authz fixture ID、预期授权结果和修复变体提示都可在下一轮
+被引用，而原始命令、参数、URL 查询、身份值和进程输出不会复制进研究记忆。人工复核通过：
+
+```bash
+python3 scripts/agent_cli.py review <target> --workspace <audit-dir> \
+  --candidate-id <candidate-id> --status needs-evidence \
+  --reason-code missing-typed-effect --note "补 typed effect" --round <N> --json
+```
+
+反馈以 `review-accepted`、`review-rejected`、`review-needs-evidence` 或
+`review-scope-corrected` 事件保存到 `state/<target>/review-feedback.json`，并在 S8 快照到本轮
+目录。它只影响排序和下一步提示：`rejected` 降低重复，`needs-evidence` 提高补证据优先级，
+不能删除候选，也不能替代 G4/G5。
+
 ## 后续优先级
 
-1. 让研究记忆吸收服务快照、修复变体和人工复核反馈，同时保持事件可回放。
-2. 最后做评测基准，用负结果、重复率、证据完整度和严重性校准反向约束 Agent。
+1. 建立评测基准，用负结果、重复率、证据完整度和严重性校准反向约束 Agent。
+2. 将评测结果反馈到候选生成、实验计划和调度权重，形成可量化的持续改进闭环。
 
 每一阶段都必须同时更新实现、技能契约、回归测试和 CHANGELOG；只有测试、artifact schema 和安全边界一起稳定后，才适合提交为一个独立变更。

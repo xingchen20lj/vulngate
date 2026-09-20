@@ -84,6 +84,16 @@ idempotently merged, excludes raw arguments and process output, and remains
 `claim_status=not-a-finding`; it improves experiment selection without
 changing G4/G5 or asserting that a stable observation proves absence.
 
+The loop now accepts structured human review through `agent_cli.py review`.
+Feedback is keyed by the same stable mechanism key, stored separately in
+`state/<target>/review-feedback.json`, and replayed into research memory as an
+explicit event. S4 context summaries also carry service readiness/config
+digests, version/URL digests, authorization fixture IDs, and bounded fix
+variant hints. Rejected mechanisms are damped, items marked
+`needs-evidence` are promoted for a focused follow-up, and scope corrections
+remain visible; none of these signals changes a finding conclusion or satisfies
+G4/G5. The round S8 directory snapshots the feedback file for auditability.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

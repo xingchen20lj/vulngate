@@ -59,6 +59,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   the scheduler dampens exact stable repeats and prioritizes actionable
   differences while preserving every candidate and keeping the memory
   `claim_status=not-a-finding`.
+- Research memory now absorbs a bounded S4 context view (service readiness and
+  config digests, version/URL digests, authorization fixture IDs, and patch
+  variant hints) without copying commands, credentials, raw arguments or
+  process output. `agent_cli.py review` records accepted, rejected,
+  needs-evidence, or scope-corrected feedback in
+  `state/<target>/review-feedback.json`; S8 snapshots it and the scheduler
+  uses it only to reprioritize follow-up research.
 
 ### Documentation
 
@@ -74,6 +81,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Documented the bounded service lifecycle, configuration snapshot, process
   registry, and credential-free authz fixture contract in the roadmap, README,
   quickstart, evolution notes, and audit skill.
+- Documented the replayable human-review feedback contract, review CLI, bounded
+  statuses/reason codes, and its separation from G4/G5 conclusions.
 
 ## [1.1.0] - 2026-09-16
 

@@ -459,6 +459,28 @@ delete a candidate solely because memory exists, and never let memory satisfy
 G4 or G5. Every memory entry and scheduler memory evidence must remain
 `claim_status=not-a-finding`; merges must be idempotent across S8 resume.
 
+Human review is a bounded input to the same loop. Record it by stable research
+key, or by candidate id when S8 has exactly one matching key:
+
+```bash
+python3 scripts/agent_cli.py review <target> --workspace <audit-dir> \
+  --candidate-id <candidate-id> --status accepted --reason-code confirmed-mechanism \
+  --note "mechanism needs typed effect" \
+  --evidence-ref state/<target>/round-01/S4/runtime-lab.json \
+  --next-probe "add minimal typed-effect observation" --round <N> --json
+```
+
+Supported statuses are `accepted`, `rejected`, `needs-evidence`, and
+`scope-corrected`; supported reason codes are `false-positive`,
+`confirmed-mechanism`, `missing-typed-effect`, `environment-gap`,
+`scope-correction`, `duplicate`, and `needs-source-review`. Feedback is saved
+in `state/<target>/review-feedback.json`, merged into research memory on load
+and S8, and exposed to S2 only as a scheduling hint. Notes and references are
+bounded and redacted; do not put raw payloads, commands, process output or
+secrets in them. A rejection lowers repeat priority, `needs-evidence` raises
+the next probe, and `accepted`/`scope-corrected` preserve the need for
+independent G4/G5 evidence. No review status is a vulnerability verdict.
+
 Keep every cell, including harness failures and negative observations.
 
 #### Typed execution states
@@ -1105,6 +1127,25 @@ S8 结束时，把有界的研究增量幂等合并到
 下一轮 S2 调度会读取目标级记忆：稳定观察可以降低完全重复的优先级，可行动差异可以获得
 小幅 follow-up 提升，环境缺口保持候选可选并带修复提示。记忆不能单独删除候选，也不能满足
 G4/G5；所有记忆和调度证据保持 `claim_status=not-a-finding`，S8 恢复必须幂等。
+
+人工复核也是有界的研究输入。优先使用稳定 research key；如果 S8 中 candidate id 只对应一个
+research key，也可以直接按 candidate id 记录：
+
+```bash
+python3 scripts/agent_cli.py review <target> --workspace <audit-dir> \
+  --candidate-id <candidate-id> --status accepted --reason-code confirmed-mechanism \
+  --note "机制成立但仍需 typed effect" \
+  --evidence-ref state/<target>/round-01/S4/runtime-lab.json \
+  --next-probe "补最小 typed effect 观测" --round <N> --json
+```
+
+支持的 status 是 `accepted`、`rejected`、`needs-evidence`、`scope-corrected`；reason code 是
+`false-positive`、`confirmed-mechanism`、`missing-typed-effect`、`environment-gap`、
+`scope-correction`、`duplicate`、`needs-source-review`。反馈写入
+`state/<target>/review-feedback.json`，在读取记忆和 S8 时合并，并只作为 S2 调度提示。备注和
+引用会有界、脱敏；不得写入原始 payload、命令、进程输出或 secret。`rejected` 只降低重复优先级，
+`needs-evidence` 提高下一步探针优先级，`accepted`/`scope-corrected` 仍必须独立补齐 G4/G5 证据。
+任何复核 status 都不是漏洞结论。
 
 所有 cell 都保留，包括 harness error 和负向观测。
 

@@ -11,7 +11,8 @@ from typing import Any, Dict, List, Optional
 
 from ..memory.ledger import render_finding_md, write_round_artifacts
 from ..memory.research import (build_round_memory, load_research_memory,
-                                merge_research_memory, write_research_memory)
+                                load_review_feedback, merge_research_memory,
+                                write_research_memory)
 from ..memory.state import CheckpointStore
 from ..analysis.languages import ALL_SUFFIXES
 from ..sandbox.approval import ApprovalGate
@@ -1110,8 +1111,10 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
     memory = merge_research_memory(
         load_research_memory(ctx.workspace, ctx.target), memory_delta)
     memory_file = write_research_memory(ctx.workspace, ctx.target, memory)
+    review_feedback = load_review_feedback(ctx.workspace, ctx.target)
     ctx.store.write_artifact("S8", "research-memory.json", memory_delta)
     ctx.store.write_artifact("S8", "research-memory-summary.json", memory["summary"])
+    ctx.store.write_artifact("S8", "review-feedback.json", review_feedback)
     by_candidate_memory = {
         str(entry.get("candidate_id")): entry for entry in memory_delta.get("entries", [])
     }
@@ -1130,6 +1133,12 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
         "round_entries": len(memory_delta.get("entries", [])),
         "total_entries": len(memory.get("entries", [])),
         "states": memory.get("summary", {}).get("states", {}),
+        "claim_status": "not-a-finding",
+    }
+    summary["review_feedback"] = {
+        "artifact": "state/%s/review-feedback.json" % ctx.target,
+        "count": review_feedback.get("summary", {}).get("feedback_count", 0),
+        "statuses": review_feedback.get("summary", {}).get("statuses", {}),
         "claim_status": "not-a-finding",
     }
     out_dir = write_round_artifacts(ctx.workspace, ctx.target, ctx.round_no, rows, excluded,
