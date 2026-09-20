@@ -221,6 +221,18 @@ Precondition tiers:
 
 Do not write final conclusions in S2.
 
+#### Falsifiable experiment plans
+
+S2 also writes `S2/experiment-plans.json`, covering the complete candidate
+pool and marking which candidates were scheduled in this round. The
+deterministic planner attaches a bounded research checklist for the candidate's
+observable signals: baseline reachability, authorization boundaries, state
+sequences, concurrency/availability, fix variants, and typed effects when
+applicable. Each plan contains required observations and explicit falsifiers.
+The artifact is a research plan with `claim_status=not-a-finding`; it is never
+runtime evidence or a final conclusion. S3 may use it to choose the next
+probe, while G4/G5 still require the corresponding persisted observations.
+
 #### S2 candidate scheduling (coverage-driven, spec §13/§14/§15)
 
 S2 no longer hands the model "the few most dangerous snippets" and takes
@@ -796,6 +808,15 @@ S1 产生的每个 fix-completeness 候选必须进入 `S2/candidate-matrix.json
 - `extra-primitive`：需要额外 Gadget/Class/Primitive。
 
 S2 不写最终结论。
+
+#### 可证伪实验计划
+
+S2 还会写出 `S2/experiment-plans.json`，覆盖完整候选池并标记哪些候选在本轮
+被调度。确定性规划器根据候选的可观察信号，生成有界的研究清单：入口基线、
+授权边界、有状态步骤、并发/可用性、修复变体，以及适用时的 typed effect。
+每个计划都带有必需观测和明确证伪条件。该产物的
+`claim_status=not-a-finding`，只是研究计划，不是运行时证据或最终结论；S3 可以
+用它选择下一步探针，但 G4/G5 仍只接受相应的已落盘观测。
 
 #### S2 候选调度（覆盖驱动，spec §13/§14/§15）
 

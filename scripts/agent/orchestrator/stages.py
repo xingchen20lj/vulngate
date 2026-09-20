@@ -25,6 +25,7 @@ from ..tools.source_evidence import (DANGER_PATTERNS, build_source_sink_graph,
                                      grep_hits, match_source_sink_paths)
 from ..tools.patch_variants import analyze_patch_history, fix_completeness_candidate
 from ..tools.project_profile import build_project_profile
+from ..tools.experiment_planner import plan_candidate_experiments
 from ..tools.research_strategies import composite_chain_candidates
 from ..tools.target_rules import collect_target_rule_hits, composite_chain_hints
 from ..tools.novelty import (Disclosure, NoveltyChecker, UpstreamRef,
@@ -352,8 +353,20 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
         generated_chain.append(candidate)
     pool, static_added = _merge_static_candidates(ctx, list(ctx.config.candidates))
     selected, plan, schedule_note = _schedule_round(ctx, pool)
+    selected_ids = {str(c.get("candidate_id")) for c in selected}
+    versions = sorted({str(j.get("version")) for j in ctx.config.jars
+                       if j.get("version")})
+    experiment_plans = []
+    for cand in pool:
+        research_plan = plan_candidate_experiments(cand, versions)
+        cand["experiment_plan"] = research_plan
+        plan_row = dict(research_plan)
+        plan_row["scheduled"] = str(cand.get("candidate_id")) in selected_ids
+        experiment_plans.append(plan_row)
+    ctx.store.write_artifact("S2", "experiment-plans.json", experiment_plans)
     matrix = []
     for cand in selected:
+        research_plan = cand.get("experiment_plan") or {}
         matrix.append({
             "candidate_id": cand["candidate_id"],
             "surface": cand["surface"],
@@ -369,6 +382,9 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
             "patch_commit": cand.get("patch_commit", ""),
             "patch_variants": cand.get("patch_variants", []),
             "chain_components": cand.get("chain_components", []),
+            "experiment_plan_ids": [p.get("plan_id") for p in
+                                    research_plan.get("plans", [])],
+            "research_strategy": research_plan.get("strategy_tags", []),
         })
     ctx.store.write_artifact("S2", "candidate-matrix.json", matrix)
     if plan is not None:
@@ -380,7 +396,10 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
               "static_candidates": static_added,
               "candidates": selected,
               "pool_size": len(pool),
-              "schedule_note": schedule_note}
+              "schedule_note": schedule_note,
+              "experiment_plan_count": len(experiment_plans),
+              "scheduled_experiment_plan_count": sum(
+                  1 for item in experiment_plans if item.get("scheduled"))}
     if plan is not None:
         result["schedule"] = {
             "round": plan.round_no,
@@ -449,6 +468,12 @@ def run_s3(ctx: StageContext) -> Dict[str, Any]:
     """Static audit per candidate: gates, dead code, default reachability."""
     gate_scan = ctx.store.read_artifact("S1", "gate-scan.json") or []
     source_sink_graph = ctx.store.read_artifact("S1", "source-sink-graph.json") or []
+    experiment_plan_rows = ctx.store.read_artifact(
+        "S2", "experiment-plans.json") or []
+    experiment_plans = {
+        str(row.get("candidate_id")): row
+        for row in experiment_plan_rows if isinstance(row, dict)
+    }
     notes = []
     for cand in ctx.config.candidates:
         audit = cand.get("audit_notes", {})
@@ -457,6 +482,8 @@ def run_s3(ctx: StageContext) -> Dict[str, Any]:
             source_sink_graph, cand)
         if source_to_sink:
             cand["source_to_sink"] = source_to_sink
+        experiment_plan = experiment_plans.get(str(cand["candidate_id"])) \
+            or cand.get("experiment_plan") or {}
         notes.append({
             "candidate_id": cand["candidate_id"],
             "surface": cand["surface"],
@@ -464,6 +491,7 @@ def run_s3(ctx: StageContext) -> Dict[str, Any]:
             "g1b": g1b.__dict__,
             "code_location": cand.get("code_location", []),
             "source_to_sink": source_to_sink,
+            "experiment_plan": experiment_plan,
         })
     residuals = []
     for cand in ctx.config.candidates:

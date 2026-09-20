@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from agent.tools.research_strategies import composite_chain_candidates  # noqa: E402
 from agent.autonomous.run_agent import AutoCtx, static_candidates  # noqa: E402
 from agent.orchestrator.config import TargetConfig  # noqa: E402
-from agent.orchestrator.stages import StageContext, run_s1, run_s2  # noqa: E402
+from agent.orchestrator.stages import StageContext, run_s1, run_s2, run_s3  # noqa: E402
 
 
 class CompositeChainCandidateTests(unittest.TestCase):
@@ -91,6 +91,18 @@ class CompositeChainCandidateTests(unittest.TestCase):
                 item["candidate_id"].startswith("chain-")
                 for item in s2["matrix"]
             ))
+            experiment_plans = ctx.store.read_artifact(
+                "S2", "experiment-plans.json")
+            self.assertTrue(experiment_plans)
+            chain_plan = next(item for item in experiment_plans
+                              if item["candidate_id"].startswith("chain-"))
+            self.assertTrue(chain_plan["scheduled"])
+            self.assertIn("authorization-boundary",
+                          {item["kind"] for item in chain_plan["plans"]})
+            s3 = run_s3(ctx)
+            chain_note = next(item for item in s3["notes"]
+                              if item["candidate_id"].startswith("chain-"))
+            self.assertEqual(chain_plan, chain_note["experiment_plan"])
 
     def test_autonomous_static_candidates_reads_chain_artifact(self):
         with tempfile.TemporaryDirectory() as td:

@@ -54,6 +54,7 @@ from ..tools.novelty import (Disclosure, NoveltyChecker, UpstreamRef,
                              mechanism_audit_llm)
 from ..tools.patch_variants import analyze_patch_history
 from ..tools.project_profile import build_project_profile
+from ..tools.experiment_planner import plan_candidate_experiments
 from ..tools.research_strategies import composite_chain_candidates
 from ..tools.target_rules import collect_target_rule_hits, composite_chain_hints
 from ..tools.public_scan import scan_all
@@ -502,6 +503,32 @@ def schedule_candidates(ctx: AutoCtx, round_no: int,
     return selected, note
 
 
+def _attach_experiment_plans(ctx: AutoCtx, round_no: int,
+                             candidates: List[Dict[str, Any]],
+                             pool: Optional[List[Dict[str, Any]]] = None
+                             ) -> List[Dict[str, Any]]:
+    """Attach and persist bounded, falsifiable research plans for S2 candidates.
+
+    A fresh round passes the full pre-schedule pool so deferred candidates keep
+    their research plan. A resumed round has only the checkpointed selection,
+    which is treated as the scheduled subset.
+    """
+    versions = sorted({str(j.get("version")) for j in ctx.cfg.jars
+                       if j.get("version")})
+    selected_ids = {str(c.get("candidate_id")) for c in candidates}
+    plan_candidates = pool if pool is not None else candidates
+    plans = []
+    for candidate in plan_candidates:
+        research_plan = plan_candidate_experiments(candidate, versions)
+        candidate["experiment_plan"] = research_plan
+        plan_row = dict(research_plan)
+        plan_row["scheduled"] = (str(candidate.get("candidate_id")) in selected_ids
+                                  if pool is not None else True)
+        plans.append(plan_row)
+    ctx.write_artifact(round_no, "S2", "experiment-plans.json", plans)
+    return plans
+
+
 def static_candidates(ctx: AutoCtx, round_no: Optional[int] = None
                       ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Index-derived candidates from the persisted coverage store (spec §11/§12).
@@ -670,11 +697,14 @@ def audit_candidate(ctx: AutoCtx, cand: Dict[str, Any]) -> Dict[str, Any]:
                                 ctx.root, max_chars=8000)
     flow_hints = match_source_sink_paths(
         getattr(ctx, "_source_sink_graph", []), cand)
+    experiment_plan = json.dumps(
+        cand.get("experiment_plan") or {}, ensure_ascii=False, indent=2)[:6000]
     user = (
         "候选：%s\n入口：%s\n逻辑：%s\n\n"
         "源码目录：%s\n\n"
         "候选相关源码片段（真实源码证据，文件+行号；以这些为准，不得臆测）：\n%s\n\n"
         "确定性 Source→Sink 路径提示（仅启发式，必须逐行复核）：\n%s\n\n"
+        "确定性实验计划（仅验证清单，不是漏洞结论；必须用真实运行观测逐项证伪/支持）：\n%s\n\n"
         "%s"
         "请静态审计并输出："
         '{"gate_status":是否被安全门控阻断, "gate_kind":如 feature-gate/cache-lookup/missing-bound-check, '
@@ -683,6 +713,7 @@ def audit_candidate(ctx: AutoCtx, cand: Dict[str, Any]) -> Dict[str, Any]:
         % (cand["candidate_id"], cand.get("entry"), cand.get("logic"), srcs,
            src_block or "（未定位到源码片段，请在审计笔记中注明）",
            json.dumps(flow_hints, ensure_ascii=False)[:6000] or "（无启发式路径）",
+           experiment_plan or "（无实验计划）",
            _scope_block(ctx, 2500))
     )
     try:
@@ -704,9 +735,12 @@ def generate_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
     pre = "; ".join(cand.get("preconditions") or ["无"])
     src_block = candidate_block(cand, ctx.cfg.entry_points, ctx.cfg.source_dirs,
                                 ctx.root, max_chars=6000)
+    experiment_plan = json.dumps(
+        cand.get("experiment_plan") or {}, ensure_ascii=False, indent=2)[:6000]
     user = (
         "候选：%s\n攻击面：%s\n入口：%s\n逻辑：%s\n前置条件：%s\n"
         "目标 jar 版本：%s\n\n"
+        "确定性实验计划（仅验证清单，不是漏洞结论；按真实可执行步骤实现）：\n%s\n\n"
         "目标库 API 提示：%s\n\n"
         "候选相关源码片段（真实源码证据，写 PoC 时按真实 API 签名，禁止凭记忆猜 API）：\n%s\n\n"
         "请输出单个 Java 文件（类名 %s，public static void main），最小可编译，"
@@ -741,7 +775,9 @@ def generate_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
         "才输出 STEP/STEP_EVIDENCE/STATE，只有实际 worker 饱和与服务不可用才输出"
         "CONCURRENCY/ SERVICE_UNAVAILABLE。"
         % (cand["candidate_id"], cand.get("surface"), cand.get("entry"),
-           cand.get("logic"), pre, versions, ctx.cfg.api_hint or "见入口清单",
+           cand.get("logic"), pre, versions,
+           experiment_plan or "（无实验计划）",
+           ctx.cfg.api_hint or "见入口清单",
            src_block or "（无源码片段）", class_name, ctx.cfg.name,
            cand.get("entry") or _fmt_entries(ctx.cfg.entry_points)[:200])
     )
@@ -1362,6 +1398,8 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
     if s2 and not force:
         candidates = s2["candidates"]
         print("[round-%02d] S2 resume: %d candidates loaded" % (round_no, len(candidates)))
+        experiment_plans = _attach_experiment_plans(ctx, round_no, candidates)
+        store.save_stage("S2", {"candidates": candidates})
     else:
         fuzz_cands: List[Dict[str, Any]] = []
         if ctx.fuzz_budget > 0:
@@ -1407,14 +1445,20 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         if not candidates:
             print("[round-%02d] no candidates; stopping" % round_no)
             return {"next_candidates": []}
+        experiment_plans = _attach_experiment_plans(ctx, round_no, candidates, merged)
         ctx.write_artifact(round_no, "S2", "candidate-matrix.json",
                            {"candidate_count": len(candidates),
                             "schedule_note": schedule_note,
                             "pool_size": len(merged),
                             "pinned": pinned,
-                            "matrix": [{k: c.get(k) for k in
-                                        ("candidate_id", "surface", "entry",
-                                         "input_shape", "logic", "authz_cases")} for c in candidates]})
+                            "experiment_plan_count": len(experiment_plans),
+                            "matrix": [
+                                {k: c.get(k) for k in
+                                 ("candidate_id", "surface", "entry",
+                                  "input_shape", "logic", "authz_cases",
+                                  "experiment_plan")}
+                                for c in candidates
+                            ]})
         store.save_stage("S2", {"candidates": candidates})
 
     # ---- S3: static audit (resumable) ---------------------------------

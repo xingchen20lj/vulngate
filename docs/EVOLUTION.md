@@ -19,6 +19,14 @@ Candidate scheduling scores the complete pool, applies category quotas, pins
 runtime-backed candidates, and carries deferred work into later rounds. The
 pipeline writes the schedule into the same workspace as the evidence ledger.
 
+S2 now also emits a deterministic, bounded experiment plan for every candidate
+in the pool. The plan records the observations needed to test baseline,
+authorization, stateful/race, availability, fix-variant and typed-effect
+hypotheses, plus explicit falsifiers. It is marked `not-a-finding`: the plan
+helps S3 choose the next probe but cannot satisfy G4/G5 without persisted
+runtime evidence. See [the research roadmap](RESEARCH-ROADMAP.zh-CN.md) for the
+next capability layers.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

@@ -18,6 +18,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Shell PoCs, while ordered `STEP`/`STEP_EVIDENCE`/`STATE` traces and the
   declaration are persisted. Declarations remain metadata; A:H still requires
   observed concurrent saturation and service unavailability.
+- S2 now emits deterministic, bounded `experiment-plans.json` records for the
+  complete candidate pool. Plans carry required observations and explicit
+  falsifiers for baseline, authorization, state/race, availability, fix
+  variants and typed effects, and are explicitly marked `not-a-finding`.
+
+### Documentation
+
+- Added the Chinese research-capability roadmap in
+  [`docs/RESEARCH-ROADMAP.zh-CN.md`](docs/RESEARCH-ROADMAP.zh-CN.md), including
+  acceptance criteria for capability-graph, runtime-lab, memory and evaluation
+  stages.
 
 ## [1.1.0] - 2026-09-16
 

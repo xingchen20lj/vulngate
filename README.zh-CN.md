@@ -89,6 +89,7 @@ Evidence Gates
 - **确定性助手 CLI** —— `agent_cli.py` 提供 source mapping/evidence、矩阵运行、Novelty、CVSS 一致性、账本、依赖检查、spawn 诊断与 staging helpers。
 - **版本 × Feature × 前置条件验证** —— PoC 以显式 cell 矩阵运行，而不是单次 best-effort 测试。
 - **授权边界矩阵** —— Web/应用类候选可加入身份 × 角色 × 租户 × 对象维度。
+- **可证伪实验规划** —— S2 为基线、授权、有状态、可用性、修复变体和 typed effect 生成带必需观测/证伪条件的有界计划；计划保持 `not-a-finding`，不会冒充漏洞结论。
 - **逐 cell 运行时前置** —— 声明需要的 JDK/runtime 必须真实可用，否则记录 `precondition-unavailable`，不会静默使用其他运行时替代。
 - **S4 证据收敛** —— 已落盘矩阵证据不会被 Agent/spawn 超时元数据覆盖。
 - **保守 Novelty** —— 公开查询失败会保留为不确定状态，而不会被转化为“未发现公开记录”。
@@ -118,7 +119,8 @@ bash macos/run-audit.sh /Applications/Target.app /path/to/native-audit
 分析、调度和账本命令使用同一个 `--workspace`。源码或范围变化后重新构建覆盖索引。
 原生重建只建立攻击面视图，不能恢复方法体或直接证明漏洞。
 详见 [原生目标使用说明](macos/README.md) 和
-[功能演进说明](docs/EVOLUTION.md)。
+[功能演进说明](docs/EVOLUTION.md)，能力升级路线见
+[研究能力升级路线图](docs/RESEARCH-ROADMAP.zh-CN.md)。
 
 ## 安装
 
@@ -178,7 +180,7 @@ npm install -g @openai/codex
 | 阶段 | 目的 | 代表性输出 | 闸门 |
 |---|---|---|---|
 | S1 | 攻击面、入口、危险调用点、修复历史/变体、项目画像、目标类型规则、复合攻击链候选 | `S1/entry-inventory.json`、`S1/security-fix-history.json`、`S1/patch-variants.json`、`S1/project-profile.json`、`S1/target-rules.json`、`S1/composite-chain-hints.json`、`S1/composite-chain-candidates.json` | G0 死代码、G1 可达性 |
-| S2 | 候选矩阵：surface × entry × input × mechanism | `S2/candidate-matrix.json` | — |
+| S2 | 候选矩阵与可证伪研究计划：surface × entry × input × mechanism | `S2/candidate-matrix.json`、`S2/experiment-plans.json` | — |
 | S3 | 带 file:line 证据的源码审计、Source→Sink hints、residuals | `S3/audit-notes.json`、`S3/residuals.json` | G1b 默认配置门控 |
 | S4 | PoC 矩阵：版本 × safe mode × 前置条件；可选 authz 与有界状态/并发实验 | `S4/matrix-runs/<c>/cells.json`、`S4/execution-status.json`、`S4/authz-matrix.json` | G4 运行时证据 |
 | S5 | Novelty：上游 issue/PR/fix + 公开披露搜索与覆盖记录 | `S5/novelty.json`、`S5/novelty-coverage.json` | G3 Novelty / 强制降级 |
