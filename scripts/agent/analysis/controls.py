@@ -836,6 +836,10 @@ def static_candidates(store: Any) -> List[Dict[str, Any]]:
     from . import semantic_controlflow as semantic_controlflow_analysis
     candidates.extend(
         semantic_controlflow_analysis.load_semantic_controlflow_candidates(store))
+    # Python AST witnesses add syntax-aware scope/branch review leads without
+    # replacing the language-agnostic structural layer.
+    from . import semantic_ast as semantic_ast_analysis
+    candidates.extend(semantic_ast_analysis.load_semantic_ast_candidates(store))
     return candidates
 
 

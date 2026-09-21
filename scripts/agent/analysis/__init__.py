@@ -33,6 +33,7 @@ Module map:
 ``semantic_guards`` bounded branch-posture and subject/object binding evidence
 ``semantic_calls`` bounded one-hop interprocedural argument/return evidence
 ``semantic_controlflow`` bounded branch-dominance and alternate-path evidence
+``semantic_ast`` bounded Python-AST branch and scope evidence
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ __all__ = [
     "semantic_guards",
     "semantic_calls",
     "semantic_controlflow",
+    "semantic_ast",
     "semantic_paths",
     "symbols",
 ]

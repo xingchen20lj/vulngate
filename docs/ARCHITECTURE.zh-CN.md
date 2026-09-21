@@ -258,6 +258,17 @@ python3 scripts/agent_cli.py semantic-controlflow <target> \
   --workspace <audit-dir> --show-candidates --json
 ```
 
+`semantic-ast-evidence-v1` 是 Python 目标的语法感知补充层：每个有界 Python 文件只解析一次，记录
+分支归属、函数/类作用域、负向条件形状、直接终止语句、`else`/异常备用路径和解析失败。它把反复的
+行号区间猜测替换为可引用的 AST 结构见证，但仍不声称完整 CFG、dominance/SSA、类型或运行时证明。
+不支持的语言和语法错误会作为明确缺口保留；`semantic-ast-candidates.json` 只包含
+`not-a-finding`、`requires_manual_dataflow=true` 的研究线索，不保存源码原文或 AST dump。
+
+```bash
+python3 scripts/agent_cli.py semantic-ast <target> \
+  --workspace <audit-dir> --show-candidates --json
+```
+
 ## 两种运行模式
 
 | 模式 | 推理方 | 配置 | 典型用途 |

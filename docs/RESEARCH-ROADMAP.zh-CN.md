@@ -52,6 +52,7 @@
 | 35 | 语义守卫姿态与主体绑定 | 已实现（bounded semantic guard evidence） | `semantic-guard-evidence-v1`、`semantic-guard-evidence.json`、`semantic-guard-candidates.json`、`semantic-guards` CLI | 区分 terminating/nested/non-branch/未解析分支姿态及 overlap/mismatch/unresolved 主体绑定；只生成 `not-a-finding` 研究线索，不声称 branch dominance、对象身份或授权绕过 |
 | 36 | 有界跨符号调用点参数/返回绑定 | 已实现（bounded interprocedural binding evidence） | `semantic-call-evidence-v1`、`semantic-call-evidence.json`、`semantic-call-candidates.json`、`semantic-calls` CLI | 对一跳调用点绑定实参/形参、有限传播污染参数、记录返回形状和 sink 参数绑定；跨符号 unresolved、静态线索保持 `not-a-finding`，不声称完整数据流或漏洞 |
 | 37 | 有界控制流关系与备用路径 | 已实现（bounded control-flow relation evidence） | `semantic-controlflow-evidence-v1`、`semantic-controlflow-evidence.json`、`semantic-controlflow-candidates.json`、`semantic-controlflow` CLI | 区分可能支配、终止拒绝分支之后、`else`/`except` alternate path 和同块未验证检查；不声称完整 CFG、路径可行性或授权绕过 |
+| 38 | Python AST 结构见证与解析缺口 | 已实现（bounded Python-AST structural evidence） | `semantic-ast-evidence-v1`、`semantic-ast-evidence.json`、`semantic-ast-candidates.json`、`semantic-ast` CLI | 以语法树确认 Python 作用域、终止守卫、`else`/异常备用路径和解析状态；不声称完整 CFG、SSA、类型/运行时证明，其他语言保留显式降级 |
 
 ## 已实现基础：可证伪实验规划
 
@@ -565,3 +566,13 @@ S2→S4→S8 的单向契约：
 - 对可能的终止拒绝分支记录 sink 是否位于分支体之外，对同块普通检查保留 `same-block-unverified`；不推断返回/异常、循环、短路、fallthrough、宏、路径可行性或对象身份；
 - 对满足原有 control-map 前置条件且关系未闭合的路径生成 `semantic-controlflow-gap` 的稳定 `cfg-*` 候选，写入完整 S2 静态候选池。产物不保存源码原文，所有摘要、行和候选保持 `claim_status=not-a-finding`、`confidence=heuristic-nearby`、`requires_manual_dataflow=true`，S3/S4 仍必须补真实 CFG、授权和 typed-effect 证据；
 - 产物与 CLI 为 `state/<target>/coverage/semantic-controlflow-evidence.json`、`semantic-controlflow-candidates.json` 和 `python3 scripts/agent_cli.py semantic-controlflow <target> --workspace <audit-dir> --show-candidates --json`。后续可以用 AST/CFG、类型和运行时分支观测替换这一结构启发式，而不改变既有闸门。
+
+## 阶段 38 初步实现：Python AST 结构见证与解析缺口
+
+阶段 37 的 brace/indent 区间已经能跨语言安排控制流人工追踪，但对 Python 仍会把语法树作用域、`else`/异常 handler 和直接 `return`/`raise` 终止形状压缩成行号猜测。阶段 38 增加独立的 `semantic-ast-evidence-v1`：
+
+- 每个有界 Python 文件只解析一次，建立函数/类作用域、`if`、`try`/handler、循环和 `match` 的分支部件索引；对每条已有 guard/sink 关系只保存节点种类、分支 ID、归一化行区间和作用域区间，不保存源码原文或 AST dump；
+- 用语法树区分 `ast-terminating-guard`、`ast-enclosing-branch`、`ast-alternate-path`、`ast-same-block-unverified`、`ast-cross-scope-unverified`、`ast-parse-failed` 等结构状态，作为 Stage 37 词法关系的独立交叉证据；
+- 直接 `return`/`raise` 只作为终止形状见证；异常、循环、装饰器、动态导入、动态 dispatch、类型/对象身份、sanitizer 和路径可行性仍要求人工与 S4 证据；解析失败、不支持语言和超限文件保持 analysis gap，绝不作为安全负证据；
+- 对 guarded/partial 且关系未闭合的路径生成稳定 `ast-*` 候选，加入 S2 静态候选池。记录和候选始终保持 `claim_status=not-a-finding`、`confidence=heuristic-nearby`、`requires_manual_dataflow=true`，不改变候选状态、CVSS、G4/G5；
+- 产物与 CLI 为 `state/<target>/coverage/semantic-ast-evidence.json`、`semantic-ast-candidates.json` 和 `python3 scripts/agent_cli.py semantic-ast <target> --workspace <audit-dir> --show-candidates --json`。其他语言继续使用既有通用控制流证据，后续可增加对应的语法/类型适配器。

@@ -112,6 +112,31 @@ python3 scripts/agent_cli.py semantic-controlflow <target> \
 The layer is kept separate from semantic guard evidence so a future AST/CFG
 resolver can replace the structural heuristic without weakening existing gates.
 
+## Unreleased Python AST structural evidence
+
+The bounded control-flow layer is deliberately language-agnostic, but its
+brace/indent intervals cannot give a syntax-level witness for Python function
+scope, `else`/exception membership, or a direct `return`/`raise` rejection
+shape. S1 now persists `semantic-ast-evidence-v1` and
+`semantic-ast-candidates.json` for Python files.
+
+The layer parses each file once, then records only normalized node kinds,
+branch IDs, line spans, scope spans, terminal-shape metadata, and parser
+status. It distinguishes `ast-terminating-guard`, `ast-enclosing-branch`,
+`ast-alternate-path`, `ast-same-block-unverified`, cross-scope gaps, and parse
+gaps. It does not implement a complete CFG, dominance, SSA, type/dispatch,
+decorator, exception, loop, sanitizer, or path-feasibility proof. All rows and
+`ast-*` candidates remain `claim_status=not-a-finding`,
+`heuristic-nearby`, and `requires_manual_dataflow=true`; unsupported languages
+and parse failures are never treated as negative evidence.
+
+Use:
+
+```bash
+python3 scripts/agent_cli.py semantic-ast <target> \
+  --workspace <audit-dir> --show-candidates --json
+```
+
 ## Analysis coverage
 
 The engine now records the complete production-source universe, explicit skip

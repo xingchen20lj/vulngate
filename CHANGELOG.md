@@ -34,6 +34,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `else`/`except` paths without claiming a complete CFG or dominance proof.
 - Added `agent_cli.py semantic-controlflow` and merged control-flow gaps into
   the static S2 candidate pool as `not-a-finding` research leads.
+- Added `semantic-ast-evidence-v1` and `semantic-ast-candidates.json`. Python
+  files now get bounded AST branch/scope witnesses for terminating guards,
+  alternate paths, exception handlers, and parse gaps without storing source
+  text or claiming a complete CFG.
+- Added `agent_cli.py semantic-ast` and merged AST structural gaps into the
+  static S2 candidate pool as `not-a-finding` research leads.
 
 ### Fixed
 

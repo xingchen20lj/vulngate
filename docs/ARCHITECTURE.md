@@ -98,6 +98,21 @@ python3 scripts/agent_cli.py semantic-controlflow <target> \
   --workspace <audit-dir> --show-candidates --json
 ```
 
+`semantic-ast-evidence-v1` is the syntax-aware companion for Python targets.
+It parses each bounded Python file once and records branch membership, function
+or class scope, negative-test shape, direct terminal statements, alternate
+`else`/exception paths, and parse failures. This replaces repeated line-range
+guessing with a citable AST witness while deliberately stopping short of a
+complete CFG, dominance/SSA, type or runtime proof. Unsupported languages and
+syntax errors remain explicit gaps; `semantic-ast-candidates.json` contains
+only `not-a-finding` research leads with `requires_manual_dataflow=true` and
+does not store source text or AST dumps.
+
+```bash
+python3 scripts/agent_cli.py semantic-ast <target> \
+  --workspace <audit-dir> --show-candidates --json
+```
+
 S8 also emits a bounded `research-strategy-guidance-v1` view. It joins only
 strategy observation metadata, the latest review status, and explicit variant
 coverage, then maps them to finite next-action classes. Guidance can adjust
