@@ -239,6 +239,18 @@ python3 scripts/agent_cli.py semantic-guards <target> \
   --workspace <audit-dir> --show-candidates --json
 ```
 
+`semantic-call-evidence-v1` 补上语义路径/守卫层主动保留的跨符号缺口：对 flow 上每条
+call edge 记录调用点、实参到形参的绑定、被污染的 callee 参数和返回形状提示，再比较这些
+有限标识符是否到达 sink 参数。`bound` 只是帮助安排下一步追踪的静态证据，`not-bound` 和
+`unresolved` 仍是人工复核线索，不是安全结论。该层不解析 overload、virtual dispatch、DI、
+reflection、callback、async、类型转换、变换语义、分支支配或路径可行性，也不保存源码原文；
+`semantic-call-candidates.json` 保持 `not-a-finding` 与 `requires_manual_dataflow=true`。
+
+```bash
+python3 scripts/agent_cli.py semantic-calls <target> \
+  --workspace <audit-dir> --show-candidates --json
+```
+
 ## 两种运行模式
 
 | 模式 | 推理方 | 配置 | 典型用途 |

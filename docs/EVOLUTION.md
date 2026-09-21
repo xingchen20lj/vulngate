@@ -56,6 +56,37 @@ pool. They are intentionally separate from semantic path evidence so later
 CFG/type/DI improvements can replace the heuristic layer without changing the
 existing artifact contract.
 
+## Unreleased semantic call evidence
+
+The previous layers intentionally left every cross-symbol input as unresolved.
+That was safe, but it made the next expert action underspecified: a reviewer
+could see an entry-to-sink call path without knowing which call-site argument
+was supposed to become the callee parameter. S1 now persists
+`semantic-call-evidence-v1` and `semantic-call-candidates.json`.
+
+For every edge on a bounded flow it records the call-site location, callee
+parameter names, bounded argument identifier tokens, direct/propagated/literal
+binding states, and a return-shape hint when the callee appears to return a
+bound parameter. It then compares the propagated parameter set with the sink
+argument and distinguishes `bound`, `not-bound`, `unresolved`, and
+`not-applicable`.
+
+This is deliberately a one-hop lexical bridge, not an interprocedural proof:
+overloads, virtual dispatch, DI, reflection, callbacks, async edges, type
+conversion, sanitizer semantics, branch dominance, and path feasibility remain
+manual checks. No raw source line, payload, or process output is stored. Every
+row and `call-*` lead remains `claim_status=not-a-finding`,
+`heuristic-nearby`, and `requires_manual_dataflow=true`. Use:
+
+```bash
+python3 scripts/agent_cli.py semantic-calls <target> \
+  --workspace <audit-dir> --show-candidates --json
+```
+
+The call-binding candidates join the same deterministic S2 pool and are kept
+as a separate artifact so a later typed/CFG resolver can replace the lexical
+bridge without weakening the evidence gates.
+
 ## Analysis coverage
 
 The engine now records the complete production-source universe, explicit skip

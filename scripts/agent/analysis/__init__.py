@@ -31,6 +31,7 @@ Module map:
 ``capability_graph`` bounded capability-primitive composition and research paths
 ``semantic_paths`` bounded source-local control-order and same-symbol data-flow evidence
 ``semantic_guards`` bounded branch-posture and subject/object binding evidence
+``semantic_calls`` bounded one-hop interprocedural argument/return evidence
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ __all__ = [
     "models",
     "scheduler",
     "semantic_guards",
+    "semantic_calls",
     "semantic_paths",
     "symbols",
 ]

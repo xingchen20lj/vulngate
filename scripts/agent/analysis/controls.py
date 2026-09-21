@@ -828,6 +828,10 @@ def static_candidates(store: Any) -> List[Dict[str, Any]]:
     # them read-only here; inventory owns their deterministic construction.
     from . import semantic_guards as semantic_guard_analysis
     candidates.extend(semantic_guard_analysis.load_semantic_guard_candidates(store))
+    # One-hop call-site binding turns some cross-symbol gaps into citable
+    # parameter/return tracing tasks without claiming complete data flow.
+    from . import semantic_calls as semantic_call_analysis
+    candidates.extend(semantic_call_analysis.load_semantic_call_candidates(store))
     return candidates
 
 

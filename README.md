@@ -92,6 +92,7 @@ Current gate identifiers are **G0, G1, G1b, G3, G4, and G5**; G1b is the default
 - **Capability-chain runtime contract** — capability candidates carry a bounded `capability_contract` into S4 cells; `CAPABILITY`/`TRANSITION` traces are classified as `no-trace`, `partial`, or `complete`, while typed effects remain a separate evidence requirement.
 - **Semantic path evidence** — S1 adds `semantic-path-evidence-v1`: it checks whether path controls are before the sink in the same lexical scope and performs a bounded same-symbol parameter/alias walk; cross-symbol and branch-dominance questions stay explicit research gaps, and every lead remains `not-a-finding`.
 - **Semantic guard evidence** — S1 adds `semantic-guard-evidence-v1`: it records bounded branch posture and subject/object binding (`terminating-guard`, `nested-branch`, `non-branch-check`, `overlap`, `mismatch`, `unresolved`) so reviewers can prioritize authorization and logic traces without treating lexical evidence as dominance or object-identity proof.
+- **Interprocedural binding evidence** — S1 adds `semantic-call-evidence-v1`: it traces one bounded call hop at a time, records argument-to-parameter binding and return-shape hints, and turns unresolved cross-symbol paths into citable research tasks without claiming complete data flow.
 - **Runtime research lab** — directed fuzz inputs become fixed corpus fixtures and minimized reproducers; bounded replay and version × SafeMode comparison preserve stable, differential, signature-drift, and precondition-gap evidence without promoting it to a finding.
 - **Ordinary-S4 fixture adapter** — Java and shell PoC cells can be replayed as bounded, redacted execution fixtures; `S4/runtime-lab.json` keeps stable replay, version/SafeMode differences, and harness gaps separate from G4/G5.
 - **Bounded service context** — stateful S4 runs may start one workspace-local argv-only service, require a loopback health check, reuse a healthy instance, kill the complete process group, and persist `S4/processes.json`; `runtime-lab.json` includes a credential-free configuration snapshot and stable authz/tenant fixture IDs.
@@ -150,6 +151,9 @@ additional model API key.
   graph and surfaced as S2 research candidates.
 - Bounded semantic guard evidence for branch posture and subject/object binding,
   persisted separately and surfaced as `not-a-finding` S2 research candidates.
+- Bounded one-hop interprocedural argument/return binding evidence for
+  source-to-sink flows, with unresolved dispatch and transformations kept as
+  explicit research gaps.
 - Capability-primitive graphs and explicit attack-chain equations that retain
   missing intermediate capabilities instead of promoting static composition to RCE.
 - Candidate scoring and category quotas that preserve deferred work across rounds.
@@ -163,6 +167,7 @@ python3 scripts/agent_cli.py differential demo --workspace /path/to/audit --show
 python3 scripts/agent_cli.py capability demo --workspace /path/to/audit --show-candidates
 python3 scripts/agent_cli.py semantic-paths demo --workspace /path/to/audit --show-candidates
 python3 scripts/agent_cli.py semantic-guards demo --workspace /path/to/audit --show-candidates
+python3 scripts/agent_cli.py semantic-calls demo --workspace /path/to/audit --show-candidates
 python3 scripts/agent_cli.py benchmark --manifest benchmarks/research-benchmark-v1.json \
   --run benchmarks/research-benchmark-sample-run.json \
   --feedback-out state/research-benchmark-feedback.json --json
@@ -234,7 +239,7 @@ For an autonomous run using your own compatible LLM API key:
 
 | Stage | Purpose | Representative outputs | Gate |
 |---|---|---|---|
-| S1 | Attack-surface mapping, entry inventory, danger sites, fix history/variants, project profile, target rules, composite-chain, capability, semantic path/guard evidence, and attacker-path threat-model views | `S1/entry-inventory.json`, `S1/security-fix-history.json`, `S1/patch-variants.json`, `S1/project-profile.json`, `S1/target-rules.json`, `S1/composite-chain-candidates.json`, `S1/capability-graph.json`, `S1/capability-candidates.json`, `S1/semantic-path-evidence.json`, `S1/semantic-path-candidates.json`, `S1/semantic-guard-evidence.json`, `S1/semantic-guard-candidates.json`, `S1/threat-model.json` | G0 dead code, G1 reachability |
+| S1 | Attack-surface mapping, entry inventory, danger sites, fix history/variants, project profile, target rules, composite-chain, capability, semantic path/guard/call evidence, and attacker-path threat-model views | `S1/entry-inventory.json`, `S1/security-fix-history.json`, `S1/patch-variants.json`, `S1/project-profile.json`, `S1/target-rules.json`, `S1/composite-chain-candidates.json`, `S1/capability-graph.json`, `S1/capability-candidates.json`, `S1/semantic-path-evidence.json`, `S1/semantic-path-candidates.json`, `S1/semantic-guard-evidence.json`, `S1/semantic-guard-candidates.json`, `S1/semantic-call-evidence.json`, `S1/semantic-call-candidates.json`, `S1/threat-model.json` | G0 dead code, G1 reachability |
 | S2 | Candidate matrix, falsifiable research plans, controlled consistency rechecks, surface-specific variant lanes, and cross-artifact research strategy: surface × entry × input × mechanism | `S2/candidate-matrix.json`, `S2/experiment-plans.json`, `S2/research-strategy.json` | — |
 | S3 | Source audit with file:line evidence, source-to-sink hints, residuals | `S3/audit-notes.json`, `S3/residuals.json` | G1b default-config gating |
 | S4 | PoC matrix: version × safe mode × precondition; optional authz, bounded state/concurrency, capability-transition context, consistency recheck contract and executed lane closure, residual falsifier contract, replay/differential lab, and loopback service lifecycle | `S4/matrix-runs/<c>/cells.json`, `S4/execution-status.json`, `S4/authz-matrix.json`, `S4/residual-closure.json`, `S4/runtime-lab.json`, `S4/processes.json` | G4 runtime evidence |

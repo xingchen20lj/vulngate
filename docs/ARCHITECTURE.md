@@ -67,6 +67,23 @@ python3 scripts/agent_cli.py semantic-guards <target> \
   --workspace <audit-dir> --show-candidates --json
 ```
 
+`semantic-call-evidence-v1` adds the bounded interprocedural bridge that the
+path and guard layers intentionally leave open. For each call-graph edge on a
+flow it records the call-site, argument-to-parameter binding, tainted callee
+parameters, and a return-shape hint; it then reports whether those bounded
+identifiers reach the sink argument. `bound` is useful positive static
+evidence for choosing a trace, while `not-bound` and `unresolved` are manual
+review leads, not safety claims. The layer does not resolve overloads, virtual
+dispatch, DI, reflection, callbacks, async flow, types, transformations,
+dominance, or feasibility, and stores no raw source text. Its
+`semantic-call-candidates.json` entries remain `not-a-finding` with
+`requires_manual_dataflow=true`.
+
+```bash
+python3 scripts/agent_cli.py semantic-calls <target> \
+  --workspace <audit-dir> --show-candidates --json
+```
+
 S8 also emits a bounded `research-strategy-guidance-v1` view. It joins only
 strategy observation metadata, the latest review status, and explicit variant
 coverage, then maps them to finite next-action classes. Guidance can adjust

@@ -21,6 +21,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added `agent_cli.py semantic-guards` and merged guard leads into the static
   S2 candidate pool. The new layer does not claim branch dominance, object
   identity, authorization correctness, or a vulnerability.
+- Added `semantic-call-evidence-v1` and `semantic-call-candidates.json`.
+  S1 now performs bounded one-hop call-site argument binding, tainted
+  parameter propagation, and return-shape hints across source-to-sink flows;
+  unresolved dispatch, arity, and sink binding remain explicit research gaps.
+- Added `agent_cli.py semantic-calls` and merged interprocedural binding leads
+  into the static S2 candidate pool without promoting static data flow to a
+  finding or runtime effect.
 
 ### Fixed
 

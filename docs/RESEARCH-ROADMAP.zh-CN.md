@@ -50,6 +50,7 @@
 | 33 | 结果自适应研究预算分配 | 已实现（bounded outcome-cost adaptive budget） | `research-budget-v1`、`research-budget` CLI、S8 surface budget、agenda budget hints、replay pack provenance | 按 research surface 汇总成本、信息增益、环境缺口和无信息重复；产生 recovery/exploit/explore/cooldown 策略并影响下一轮有限预算，保留探索与假设，不改变候选、CVSS、G4/G5 |
 | 34 | 语义路径证据与有限同符号数据流 | 已实现（bounded semantic path evidence） | `semantic-path-evidence-v1`、`semantic-path-evidence.json`、`semantic-path-candidates.json`、`semantic-paths` CLI | 区分控制在 sink 前/后/同一行及语义块关系；对同符号参数/简单别名给出 direct/propagated/not-traced，跨符号明确 unresolved；不复制源码、不升级 candidate/CVSS/G4/G5 |
 | 35 | 语义守卫姿态与主体绑定 | 已实现（bounded semantic guard evidence） | `semantic-guard-evidence-v1`、`semantic-guard-evidence.json`、`semantic-guard-candidates.json`、`semantic-guards` CLI | 区分 terminating/nested/non-branch/未解析分支姿态及 overlap/mismatch/unresolved 主体绑定；只生成 `not-a-finding` 研究线索，不声称 branch dominance、对象身份或授权绕过 |
+| 36 | 有界跨符号调用点参数/返回绑定 | 已实现（bounded interprocedural binding evidence） | `semantic-call-evidence-v1`、`semantic-call-evidence.json`、`semantic-call-candidates.json`、`semantic-calls` CLI | 对一跳调用点绑定实参/形参、有限传播污染参数、记录返回形状和 sink 参数绑定；跨符号 unresolved、静态线索保持 `not-a-finding`，不声称完整数据流或漏洞 |
 
 ## 已实现基础：可证伪实验规划
 
@@ -544,3 +545,12 @@ S2→S4→S8 的单向契约：
 - 对控制和 sink 的有限 identifier token 做 subject/object binding：`overlap`、`mismatch`、`unresolved`、`cross-symbol-unverified`。`mismatch` 只表示值得人工追踪“检查了 A、操作了 B”，不表示已经存在越权；
 - 对满足基础控制图前置条件的路径生成 `semantic-subject-binding` 与 `semantic-branch-posture` 线索，写入完整静态候选池，同时保留稳定 ID、位置、`requires_manual_dataflow=true` 和 `claim_status=not-a-finding`；
 - 产物与 CLI 为 `state/<target>/coverage/semantic-guard-evidence.json`、`semantic-guard-candidates.json` 和 `python3 scripts/agent_cli.py semantic-guards <target> --workspace <audit-dir> --show-candidates --json`。两条 pipeline 共用同一份索引；后续可用 CFG、类型、DI 和运行时授权证据替换启发式层，而不改变既有闸门。
+
+## 阶段 36 初步实现：有界跨符号调用点参数/返回绑定
+
+阶段 35 已经能判断“控制看起来是否保护了 sink 所在的分支，以及检查对象是否接近操作对象”，但跨符号路径仍会在调用边处留下 `cross-symbol-unresolved`：模型知道 handler 调用了哪个 helper，却无法从有限证据判断外部输入究竟以哪个参数进入 helper、helper 是否把它传给 sink，或返回值是否把污染重新带回上层。阶段 36 增加独立的 `semantic-call-evidence-v1`，把这段最常见的一跳桥接显式化：
+
+- 对 flow 中相邻的调用边解析有限的调用点实参和被调符号形参，区分 `direct`、`propagated`、`literal`、`unresolved`、`arity-unresolved`、`bound` 与 `not-bound`；污染参数只沿已发现的一跳边传播，不把名字相似当成完整类型或别名证明；
+- 在被调符号的有限范围内记录返回语句是否引用污染形参，形成 `tainted-return-likely`、`not-observed` 或 unresolved 的返回形状提示；这只帮助 S3 选择复核点，不声称真实返回值、异常路径、容器元素或异步回调已经被证明；
+- 将最终 sink 实参与这条有界绑定链对齐，区分 `bound`、`not-bound`、`unresolved` 和 `not-applicable`，并对未闭合的跨符号路径生成 `semantic-interprocedural-binding` 研究候选，进入 S2 的完整静态候选池；
+- 产物与 CLI 为 `state/<target>/coverage/semantic-call-evidence.json`、`semantic-call-candidates.json` 和 `python3 scripts/agent_cli.py semantic-calls <target> --workspace <audit-dir> --show-candidates --json`。实现刻意不建模 CFG、完整类型/别名、virtual dispatch、DI、reflection、callback、async 或 sanitizer 语义；所有记录、摘要和候选仍保持 `claim_status=not-a-finding`、`confidence=heuristic-nearby`、`requires_manual_dataflow=true`，必须由 S3/S4 补真实数据流与效果证据。

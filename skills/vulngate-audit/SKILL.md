@@ -167,7 +167,7 @@ Run stages in order unless a hard gate or explicit scope rule ends a candidate.
   python3 "$PLUGIN_ROOT/scripts/agent_cli.py" coverage <target> --workspace <audit-dir> --root <source-root> --rebuild --json
   ```
 
-  Keep `<audit-dir>` outside the plugin cache. In S2, merge all candidates from `control-candidates.json`, `differential-candidates.json`, `capability-candidates.json`, `semantic-path-candidates.json`, and `semantic-guard-candidates.json` into the host's candidate pool before calling `schedule`; use `selected_ids` for this round and preserve the full pool for later rounds. After writing the S8 ledger, run `coverage` again with the same workspace to refresh review status. The config-driven pipeline performs S1 indexing and S2 merging automatically.
+  Keep `<audit-dir>` outside the plugin cache. In S2, merge all candidates from `control-candidates.json`, `differential-candidates.json`, `capability-candidates.json`, `semantic-path-candidates.json`, `semantic-guard-candidates.json`, and `semantic-call-candidates.json` into the host's candidate pool before calling `schedule`; use `selected_ids` for this round and preserve the full pool for later rounds. After writing the S8 ledger, run `coverage` again with the same workspace to refresh review status. The config-driven pipeline performs S1 indexing and S2 merging automatically.
 - **Coverage ledger:** S1 also builds the target-scoped `state/<target>/coverage/` index (source universe, entries, sinks, security controls) and writes the coverage summary. Every production source file is either `indexed` or carries an explicit `skip_reason`; excluded directories are recorded with a file count instead of being dropped silently. Query it at any time:
 
   ```bash
@@ -175,7 +175,7 @@ Run stages in order unless a hard gate or explicit scope rule ends a candidate.
   ```
 
   The audit's stop condition is `HIGH-risk uncovered == 0`, not "no new candidates". A zero denominator renders `n/a`, never `100%`.
-- **Cross-procedural layer:** the same index also carries `symbol-index.json`, `call-graph.json`, `flow-index.json`, `sink-reachability.json`, `control-map.json`, `sibling-groups.json`, `differential-index.json`, the bounded `capability-graph.json` / `capability-candidates.json`, `semantic-path-evidence.json` / `semantic-path-candidates.json`, and `semantic-guard-evidence.json` / `semantic-guard-candidates.json`. Sinks are analysed in both directions — forward from every external entry, and backward from every sink — so a path only the sink scan can see is either a confirmed flow or a recorded `coverage_gap`. Flow paths are `heuristic-callgraph`: they are leads, never proofs, and nothing in this layer may set `runtime-verified`. `FlowRecord.direction` states the path *shape*:
+- **Cross-procedural layer:** the same index also carries `symbol-index.json`, `call-graph.json`, `flow-index.json`, `sink-reachability.json`, `control-map.json`, `sibling-groups.json`, `differential-index.json`, the bounded `capability-graph.json` / `capability-candidates.json`, `semantic-path-evidence.json` / `semantic-path-candidates.json`, `semantic-guard-evidence.json` / `semantic-guard-candidates.json`, and bounded `semantic-call-evidence.json` / `semantic-call-candidates.json`. Sinks are analysed in both directions — forward from every external entry, and backward from every sink — so a path only the sink scan can see is either a confirmed flow or a recorded `coverage_gap`. Flow paths are `heuristic-callgraph`: they are leads, never proofs, and nothing in this layer may set `runtime-verified`. `FlowRecord.direction` states the path *shape*:
   - `cross-procedural` — at least one call edge (the useful case);
   - `intra-symbol` — entry and sink in the same method; this is the archetypal "handler does the dangerous thing" finding and keeps full priority;
   - `module-scope` — entry and sink both at module level in one file. Reported, but ranked below real call chains, because a file is not a handler.
@@ -209,6 +209,13 @@ Run stages in order unless a hard gate or explicit scope rule ends a candidate.
 
   ```bash
   python3 scripts/agent_cli.py semantic-guards <target> \
+    --workspace <audit-dir> --show-candidates --json
+  ```
+
+- **Semantic call binding evidence:** `semantic-call-evidence-v1` adds a bounded one-hop bridge over otherwise unresolved cross-symbol paths. It records callsite argument/parameter binding, limited tainted-parameter propagation, return-shape hints, and whether the eventual sink argument is statically bound. It does not model complete CFGs, types or aliases, virtual dispatch, DI, reflection, callbacks, async behavior, containers, or sanitizer semantics; `bound` is a research signal, not a data-flow proof. Rows and `call-*` candidates remain `claim_status=not-a-finding`, `heuristic-nearby`, and `requires_manual_dataflow=true`.
+
+  ```bash
+  python3 scripts/agent_cli.py semantic-calls <target> \
     --workspace <audit-dir> --show-candidates --json
   ```
 
@@ -313,10 +320,11 @@ What this buys across rounds:
 - the residual sweep (spec §14) recomputes the gaps, so each round's input is
   the *new* gap list rather than the same top-N.
 
-Five index-derived candidate families are **prepended** to the pool before
+Six index-derived candidate families are **prepended** to the pool before
 scoring: the control map's `ctl-*` candidates (spec §11), the differential's
 `dif-*` candidates (spec §12), the capability graph's `cap-*` research
-paths, semantic path `sem-*` leads, and semantic guard `guard-*` leads, all
+paths, semantic path `sem-*` leads, semantic guard `guard-*` leads, and
+semantic call `call-*` leads, all
 already persisted by S1. They are
 deliberately **not capped** — their ids are regenerated identically every round,
 so a truncated prefix would starve every later finding forever; oversize pools
@@ -1244,7 +1252,7 @@ reports/<target>/round-NN/...
   python3 "$PLUGIN_ROOT/scripts/agent_cli.py" coverage <target> --workspace <audit-dir> --root <source-root> --rebuild --json
   ```
 
-  `<audit-dir>` 必须在插件缓存之外。S2 先把 `control-candidates.json`、`differential-candidates.json`、`capability-candidates.json`、`semantic-path-candidates.json` 和 `semantic-guard-candidates.json` 的完整候选与宿主候选合并，再调用 `schedule`；本轮按 `selected_ids` 执行，完整池保留到后续轮次。S8 账本落盘后使用同一 workspace 再运行 `coverage` 刷新审计状态。配置驱动的管线会自动完成 S1 索引和 S2 合并。
+  `<audit-dir>` 必须在插件缓存之外。S2 先把 `control-candidates.json`、`differential-candidates.json`、`capability-candidates.json`、`semantic-path-candidates.json`、`semantic-guard-candidates.json` 和 `semantic-call-candidates.json` 的完整候选与宿主候选合并，再调用 `schedule`；本轮按 `selected_ids` 执行，完整池保留到后续轮次。S8 账本落盘后使用同一 workspace 再运行 `coverage` 刷新审计状态。配置驱动的管线会自动完成 S1 索引和 S2 合并。
 - **覆盖率账本：** S1 同时构建目标级 `state/<target>/coverage/` 索引（源码全集、入口、sink、安全控制），并写出覆盖率摘要。每个生产源码文件要么 `indexed`，要么带明确 `skip_reason`；被排除的目录会记录文件数，而不是被静默丢弃。随时可查：
 
   ```bash
@@ -1252,7 +1260,7 @@ reports/<target>/round-NN/...
   ```
 
   审计的停止条件是 `高风险未审计 == 0`，不是“没有新候选”。分母为 0 时渲染 `n/a`，绝不显示 `100%`。
-- **跨过程层：** 同一份索引还包含 `symbol-index.json`、`call-graph.json`、`flow-index.json`、`sink-reachability.json`、`control-map.json`、`sibling-groups.json`、`differential-index.json`、有界的 `capability-graph.json` / `capability-candidates.json`，以及 `semantic-path-evidence.json` / `semantic-path-candidates.json`、`semantic-guard-evidence.json` / `semantic-guard-candidates.json`。sink 做双向分析——从每个外部入口正向、从每个 sink 反向——只有 sink 扫描能看见的路径会成为有效 flow 或记录在案的 `coverage_gap`。flow 路径置信度是 `heuristic-callgraph`：它是线索，不是证明，本层任何结论都不得置为 `runtime-verified`。`FlowRecord.direction` 表示路径**形态**：
+- **跨过程层：** 同一份索引还包含 `symbol-index.json`、`call-graph.json`、`flow-index.json`、`sink-reachability.json`、`control-map.json`、`sibling-groups.json`、`differential-index.json`、有界的 `capability-graph.json` / `capability-candidates.json`，以及 `semantic-path-evidence.json` / `semantic-path-candidates.json`、`semantic-guard-evidence.json` / `semantic-guard-candidates.json`、`semantic-call-evidence.json` / `semantic-call-candidates.json`。sink 做双向分析——从每个外部入口正向、从每个 sink 反向——只有 sink 扫描能看见的路径会成为有效 flow 或记录在案的 `coverage_gap`。flow 路径置信度是 `heuristic-callgraph`：它是线索，不是证明，本层任何结论都不得置为 `runtime-verified`。`FlowRecord.direction` 表示路径**形态**：
   - `cross-procedural`：至少含一条调用边（有价值的一类）；
   - `intra-symbol`：入口与 sink 在同一个方法内——这正是「handler 直接做危险操作」的典型 finding，保留完整优先级；
   - `module-scope`：入口与 sink 都在同一文件的模块作用域。仍会记录，但排在真实调用链之后，因为文件不是 handler。
@@ -1279,6 +1287,13 @@ reports/<target>/round-NN/...
 
   ```bash
   python3 scripts/agent_cli.py semantic-guards <target> \
+    --workspace <audit-dir> --show-candidates --json
+  ```
+
+- **语义调用绑定证据：** `semantic-call-evidence-v1` 为仍未解析的跨符号路径增加一跳有界桥接，记录调用点实参/形参绑定、有限污染参数传播、返回形状提示，以及最终 sink 实参是否与这条静态绑定链对齐。它不建模完整 CFG、类型或别名、virtual dispatch、DI、reflection、callback、async、容器或 sanitizer 语义；`bound` 只是研究信号，不是数据流证明。记录和 `call-*` 候选始终保持 `claim_status=not-a-finding`、`heuristic-nearby` 与 `requires_manual_dataflow=true`。
+
+  ```bash
+  python3 scripts/agent_cli.py semantic-calls <target> \
     --workspace <audit-dir> --show-candidates --json
   ```
 
@@ -1366,9 +1381,9 @@ python3 scripts/agent_cli.py coverage <target> --schedule
 - 延后的候选保留分数与理由，下一轮针对已变化的覆盖重新调度；
 - 残留扫描（spec §14）重算缺口，因此每轮的输入是**新的**缺口列表，而不是固定的 top-N。
 
-五类索引派生的候选会在打分前被**前置**进候选池：控制图的 `ctl-*`（spec §11）、
-差分的 `dif-*`（spec §12）、能力图的 `cap-*` 研究链、语义路径的 `sem-*` 线索和语义守卫的
-`guard-*` 线索，它们都已由 S1 持久化。它们刻意**不设上限**——
+六类索引派生的候选会在打分前被**前置**进候选池：控制图的 `ctl-*`（spec §11）、
+差分的 `dif-*`（spec §12）、能力图的 `cap-*` 研究链、语义路径的 `sem-*` 线索、语义守卫的
+`guard-*` 线索和语义调用的 `call-*` 线索，它们都已由 S1 持久化。它们刻意**不设上限**——
 其 id 每轮确定性重建，截断前缀会让后面所有发现永远饿死；超大池由配额机制吸收。
 平分时优先取带有可引用 `file:line` 与具名缺失控制的候选。
 在目标配置里设 `static_candidates: false` 可只调度模型自己提出的候选。
