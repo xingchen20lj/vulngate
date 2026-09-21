@@ -657,6 +657,27 @@ This closure remains `claim_status=not-a-finding` and cannot confirm a
 finding, turn an environment gap into negative evidence, or change candidate
 status, CVSS, G4, or G5.
 
+S8 also derives `research-agenda-v1`, a bounded active queue from normalized
+strategy and portfolio recheck metadata. Each item contains only an allowlisted
+action, missing/required observations, falsifiers, prerequisites, expected
+information gain, estimated cost, priority score, and `selected`/`deferred`/
+`hold` status. Selection first spreads finite slots across explicit research
+surfaces and attack classes, then uses remaining slots for higher information
+gain. Environment repair, residual closure, review follow-up, and evidence debt
+remain scheduling signals only. Inspect or rebuild it with:
+
+```bash
+python3 scripts/agent_cli.py research-agenda <target> \
+  --workspace <audit-dir> [--rebuild] [--slots N] [--max-per-surface N] [--json]
+```
+
+The next scheduler round accepts only exact `research_key` or `candidate_id`
+matches and applies a small bounded boost; the match is retained in schedule
+evidence. Agenda and scheduler metadata remain `claim_status=not-a-finding` and
+cannot confirm a finding or change candidate status, CVSS, G4, or G5. Do not
+persist source prose, payloads, commands, stdout/stderr, credentials, or
+finding conclusions in the agenda.
+
 S3 residuals are carried across the same boundary as pending research debt.
 Memory stores only controlled kind/reason codes, bounded source locations, a
 probe digest, and whether a bounded probe plan exists. The portfolio emits one
@@ -1541,6 +1562,14 @@ python3 scripts/agent_cli.py research-consistency-rechecks <target> \
 
 该 closure 仍保持 `claim_status=not-a-finding`，不能确认漏洞、把环境缺口变成负证据，或改变
 candidate status、CVSS、G4、G5。
+
+S8 还会把策略与 portfolio 归一化成有界的 `research-agenda-v1` 主动研究议程。
+议程使用固定槽位、surface × attack-class 多样性、证据债务、预期信息增益与估计成本，明确区分
+`selected`、`deferred` 与 `hold`，并写入 `state/<target>/coverage/research-agenda.json` 以及
+round artifact。调度器只对精确匹配且被选中的议程项施加一个很小的优先级提示，并在 prompt 中展示
+议程证据债务；它不改变 candidate status、CVSS、G4、G5，也不把 `claim_status=not-a-finding`
+升级为漏洞结论。可用 `python3 scripts/agent_cli.py research-agenda <target> --workspace <path>`
+查看或重建议程。
 
 S2 还会写出有界的 `research-strategy-v1`：目标级为
 `state/<target>/coverage/research-strategy.json`，轮次快照为 `S2/research-strategy.json`。它将

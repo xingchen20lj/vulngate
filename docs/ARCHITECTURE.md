@@ -227,6 +227,27 @@ Closure remains `claim_status=not-a-finding`; it cannot confirm a vulnerability,
 turn an environment gap into negative evidence, or change candidate status,
 CVSS, G4, or G5.
 
+Stage 31 adds `research-agenda-v1`, an active finite-budget queue derived only
+from normalized strategy and portfolio recheck state. Each item carries a
+bounded action, missing/required observations, falsifiers, prerequisites,
+expected information gain, estimated cost, and priority score. Selection first
+spreads work across explicit research surfaces and attack classes, then uses
+remaining slots for the highest information-gain work; environment repair,
+residual closure, review follow-up, and evidence debt affect scheduling only.
+S8 writes `research-agenda.json` at target and round scope, and it is included
+in replay-pack provenance when present:
+
+```bash
+python3 scripts/agent_cli.py research-agenda <target> \
+  --workspace <audit-dir> [--rebuild] [--slots N] [--max-per-surface N] [--json]
+```
+
+The next scheduler round accepts only exact `research_key` or `candidate_id`
+matches and applies a small bounded boost, preserving the match in schedule
+evidence. Agenda metadata and the scheduler signal remain
+`claim_status=not-a-finding`; they cannot confirm a vulnerability or change
+candidate status, CVSS, G4, or G5.
+
 ## Two operating modes
 
 | Mode | Reasoning | Setup | Typical use |

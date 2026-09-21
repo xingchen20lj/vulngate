@@ -160,6 +160,22 @@ python3 scripts/agent_cli.py research-consistency-rechecks <target> \
 该 closure 仍是 `not-a-finding` 研究元数据，不确认漏洞、不降低环境缺口，也不能改变
 candidate status、CVSS、G4 或 G5。
 
+阶段 31 增加 `research-agenda-v1` 主动研究议程。它只消费归一化的 strategy 与 portfolio
+复核状态，把开放研究项转换为有限的 `selected`、`deferred`、`hold` 队列，并记录
+`expected_information_gain`、`estimated_cost`、`prerequisites`、surface diversity 和 bounded
+priority score。有限预算先覆盖不同研究面/攻击类别，再用剩余 slots 选择高信息增益项；环境
+修复、residual、人工复核和一致性证据债务只影响调度，不是漏洞证据。S8 写入 target/round
+`research-agenda.json`，可用：
+
+```bash
+python3 scripts/agent_cli.py research-agenda <target> \
+  --workspace <audit-dir> [--rebuild] [--slots N] [--max-per-surface N] [--json]
+```
+
+下一轮 scheduler 只接受 candidate 与 agenda 的精确 `research_key` 或 `candidate_id` 匹配，
+使用有界 boost 并在 schedule evidence 中保留匹配状态；agenda、schedule signal 和 replay pack
+仍是 `claim_status=not-a-finding`，不能改变 candidate status、CVSS、G4 或 G5。
+
 S1 中包含授权边界和危险 Sink 的启发式 Source→Sink 路径会写入
 `composite-chain-candidates.json`，并在 S2 进入与模型候选、控制图候选、同族差分候选相同的调度池。它们始终保留
 `heuristic-nearby` / `requires_manual_dataflow=true`，只能作为审计和 PoC

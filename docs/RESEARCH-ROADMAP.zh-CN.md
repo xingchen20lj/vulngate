@@ -45,6 +45,7 @@
 | 28 | 跨轮证据一致性与矛盾复核 | 已实现（bounded evidence consistency） | `research-consistency-v1`、`research-consistency` CLI、portfolio/strategy controlled follow-up、S8 自动产物 | 只从有界 research-memory 事件识别 effect/reproduction/comparison/context 漂移；冲突只生成受控复核动作，环境缺口不变成负证据，不改变候选、CVSS、G4/G5 |
 | 29 | 一致性矛盾的受控复核契约 | 已实现（bounded S2→S4 recheck contract） | `research-consistency-action-v1`、`research-consistency-actions` CLI、S2 `consistency-recheck`、S4 MatrixCell/fixture/env、replay pack | 每个非一致条目生成固定隔离轴、正/负向 lane、重复次数、required observations 与 falsifiers；契约可进入 S2→S4 但仍是 `not-a-finding`，不改变候选、CVSS、G4/G5 |
 | 30 | 一致性复核的真实执行与闭合 | 已实现（bounded S4→S8 recheck closure） | `research-consistency-recheck-v1`、S4 lane witness、`research-consistency-rechecks` CLI、S8/portfolio closure | 只有正/负向 lane、独立重复、fixture/context 锁、comparison、状态重置和 required observation 都有实际 witness 才标记 `observed`；缺失、部分执行和环境缺口保持可区分并继续 pending，不改变候选、CVSS、G4/G5 |
+| 31 | 主动研究议程与有限预算分配 | 已实现（bounded information-gain agenda） | `research-agenda-v1`、`research-agenda` CLI、S8 agenda、scheduler exact-match signal | 将 strategy 的证据债务转成 selected/deferred/hold 队列，显式记录 expected information gain、estimated cost、prerequisites 和 surface diversity；只改变下一轮调度，不改变候选、CVSS、G4/G5 |
 
 ## 已实现基础：可证伪实验规划
 
@@ -493,3 +494,12 @@ S2→S4→S8 的单向契约：
 - S4 在原始 runner row 仍位于内存时只提取 allowlist witness：执行/环境状态、独立 replay 次数、typed effect 或 safe-equivalent、显式状态重置、comparison arm 状态，以及 fixture/context 标识。不会把 stdout、stderr、命令、payload、凭据或 source prose 复制进 closure artifact；
 - S8 使用上一轮 pending action 与本轮 `S4/runtime-lab.json` 汇合，写出 target/round `research-consistency-rechecks.json`。它严格区分 `observed`、`partial`、`environment-gap` 和 `not-executed`；完整 lane 未闭合时 portfolio 继续生成下一步 probe，完整闭合时停止重复调度但保留历史矛盾供审计；
 - `python3 scripts/agent_cli.py research-consistency-rechecks <target> --workspace <audit-dir> [--round N] [--rebuild] [--json]` 只读取有界 runtime-lab artifact，不扫描 raw matrix output。recheck、portfolio、strategy 和 replay pack 全部保持 `claim_status=not-a-finding`，不能满足 G4/G5、确认漏洞或降低环境缺口。
+
+## 阶段 31 初步实现：主动研究议程与有限预算
+
+阶段 30 已经能判断一次受控复核是否真正闭合，但跨攻击面的大型项目仍缺少一个明确的“下一轮先做什么”决策层：策略项可能很多，简单按静态 priority 排序会重复消耗预算，也会让低收益路径挤掉尚未覆盖的研究面。阶段 31 增加 `research-agenda-v1`：
+
+- `build_research_agenda` 只消费归一化的 `research-strategy-v1` 与 portfolio recheck 状态，把每个策略项压缩为有限的 `action`、`missing_observations`、`required_observations`、falsifiers、prerequisites、expected information gain、estimated cost 和 bounded priority score；不复制源码、payload、命令、stdout/stderr、凭据或 finding 结论；
+- agenda 在有限 slots 内先按 surface × attack class 做一次多样性选择，再用剩余预算选择高信息增益项，显式区分 `selected`、`deferred` 和已满足证据的 `hold`。环境修复、residual、review follow-up 和 recheck evidence debt 会得到有界加权，但不会改变 G4/G5；
+- S8 写入 target/round `research-agenda.json`，replay pack 对其做可选 provenance；`python3 scripts/agent_cli.py research-agenda <target> --workspace <audit-dir> [--rebuild] [--slots N] [--max-per-surface N] [--json]` 可检查或重建；
+- 下一轮 scheduler 只在 candidate 与 agenda 的 `research_key` 或 `candidate_id` 精确匹配时使用小幅 boost，并把 agenda 选择证据写入 schedule。agenda 全部保持 `claim_status=not-a-finding`，不能确认漏洞、改变 candidate status、CVSS、G4 或 G5。

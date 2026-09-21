@@ -34,6 +34,7 @@ Usage:
   agent_cli.py research-consistency <target> --workspace <dir> [--rebuild] [--json]
   agent_cli.py research-consistency-actions <target> --workspace <dir> [--rebuild] [--json]
   agent_cli.py research-consistency-rechecks <target> --workspace <dir> [--rebuild] [--json]
+  agent_cli.py research-agenda <target> --workspace <dir> [--rebuild] [--json]
   agent_cli.py research-strategy <target> --workspace <dir> [--rebuild]
                                [--benchmark-feedback <json>] [--json]
   agent_cli.py coverage <target> [--workspace <dir>] [--rebuild] [--show-uncovered]
@@ -1101,6 +1102,65 @@ def cmd_research_consistency_rechecks(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_research_agenda(args: argparse.Namespace) -> int:
+    """Show or rebuild the bounded active research agenda."""
+    from agent.analysis.research_agenda import (
+        agenda_path,
+        build_research_agenda,
+        load_research_agenda,
+        write_research_agenda,
+    )
+    from agent.analysis.research_strategy import load_research_strategy
+    from agent.memory.portfolio import load_research_portfolio
+
+    workspace = Path(args.workspace).resolve()
+    agenda = load_research_agenda(workspace, args.target)
+    if args.rebuild or not agenda:
+        strategy = load_research_strategy(workspace, args.target)
+        portfolio = load_research_portfolio(workspace, args.target)
+        round_no = args.round or int((strategy or {}).get("round", 0) or 0)
+        agenda = build_research_agenda(
+            strategy, portfolio, target=args.target, round_no=round_no,
+            slots=args.slots, max_per_surface=args.max_per_surface)
+        write_research_agenda(workspace, args.target, agenda)
+    if not agenda:
+        _out({"error": "research agenda artifact not found",
+              "hint": "run an S8 round or pass --rebuild",
+              "artifact": str(agenda_path(workspace, args.target))})
+        return 2
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "artifact": str(agenda_path(
+            workspace, args.target).relative_to(workspace)),
+        "agenda": agenda,
+    }
+    if args.json:
+        _out(payload)
+    else:
+        summary = agenda.get("summary", {})
+        print("research agenda: %s" % payload["artifact"])
+        print("  entries=%s selected=%s deferred=%s hold=%s cost=%s gain=%s "
+              "claim_status=%s" % (
+                  summary.get("entry_count", 0),
+                  summary.get("selected_count", 0),
+                  summary.get("deferred_count", 0),
+                  summary.get("hold_count", 0),
+                  summary.get("selected_cost", 0),
+                  summary.get("selected_expected_information_gain", 0),
+                  agenda.get("claim_status", "not-a-finding")))
+        for row in agenda.get("items") or []:
+            if not isinstance(row, dict) or row.get("selection_status") != "selected":
+                continue
+            print("  selected: %s [%s] action=%s surface=%s score=%s gain=%s"
+                  % (row.get("candidate_id") or row.get("research_key"),
+                     row.get("agenda_id"), row.get("action"),
+                     row.get("surface") or "unknown",
+                     row.get("priority_score", 0),
+                     row.get("expected_information_gain", 0)))
+    return 0
+
+
 def cmd_coverage(args: argparse.Namespace) -> int:
     """Security audit coverage report (spec §16).
 
@@ -2008,6 +2068,25 @@ def build_parser() -> argparse.ArgumentParser:
     rcr.add_argument("--json", action="store_true",
                      help="machine-readable output")
     rcr.set_defaults(fn=cmd_research_consistency_rechecks)
+
+    ra = sub.add_parser(
+        "research-agenda",
+        help="show or rebuild the bounded active research agenda",
+    )
+    ra.add_argument("target", help="target name (state/<target>/...)")
+    ra.add_argument("--workspace", required=True,
+                    help="workspace root containing state/<target>/")
+    ra.add_argument("--round", type=int, default=0,
+                    help="agenda round; default: strategy round")
+    ra.add_argument("--slots", type=int, default=8,
+                    help="max selected work items (default: 8)")
+    ra.add_argument("--max-per-surface", type=int, default=3,
+                    help="max selected items per surface (default: 3)")
+    ra.add_argument("--rebuild", action="store_true",
+                    help="rebuild from the normalized strategy and portfolio")
+    ra.add_argument("--json", action="store_true",
+                    help="machine-readable output")
+    ra.set_defaults(fn=cmd_research_agenda)
 
     rs = sub.add_parser(
         "research-strategy",

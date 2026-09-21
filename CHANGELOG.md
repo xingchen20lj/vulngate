@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added `research-agenda-v1` active research budgeting. S8 converts the
+  normalized strategy into a bounded selected/deferred/hold queue with
+  expected information gain, estimated cost, prerequisites, and per-surface
+  diversity; the scheduler consumes only exact agenda matches as a small
+  priority signal, and `agent_cli.py research-agenda` can inspect or rebuild
+  it. Agenda metadata remains `not-a-finding` and cannot change candidate
+  status, CVSS, G4, or G5.
+
 - Added `research-consistency-recheck-v1` execution closure. S4 now expands a
   pending consistency action into bounded positive/negative or environment-gap
   lanes and records replay count, fixture/context identity, comparison status,

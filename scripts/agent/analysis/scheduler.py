@@ -60,6 +60,7 @@ from ..memory.research import (
     research_key,
 )
 from ..memory.portfolio import load_research_portfolio
+from .research_agenda import load_research_agenda, normalize_research_agenda
 from .research_strategy import (
     STRATEGY_GUIDANCE_ACTIONS,
     apply_research_guidance,
@@ -110,6 +111,12 @@ RESEARCH_SURFACE_TARGET_TYPES: Dict[str, str] = {
     "web-app": "web", "middleware": "protocol", "message-rpc": "protocol",
     "cloud-service": "cloud", "mobile-app": "mobile", "native-app": "native",
 }
+
+# The agenda is a bounded scheduling signal.  It can make an explicitly
+# selected research item visible within a finite candidate budget, but it is
+# deliberately smaller than a finding-impact adjustment and never suppresses
+# an otherwise eligible candidate.
+RESEARCH_AGENDA_BOOST = 3.0
 
 
 def _safe_weight(value: Any) -> int:
@@ -312,6 +319,7 @@ class ScheduleContext:
     research_memory: List[Dict[str, Any]] = field(default_factory=list)
     research_portfolio: Dict[str, Any] = field(default_factory=dict)
     research_strategy: Dict[str, Any] = field(default_factory=dict)
+    research_agenda: Dict[str, Any] = field(default_factory=dict)
     threat_model: Dict[str, Any] = field(default_factory=dict)
     weights: Dict[str, int] = field(default_factory=lambda: dict(DEFAULT_FACTOR_WEIGHTS))
     benchmark_feedback: Dict[str, Any] = field(default_factory=dict)
@@ -335,6 +343,7 @@ class ScheduleContext:
                    benchmark_feedback: Optional[Dict[str, Any]] = None,
                    research_portfolio: Optional[Dict[str, Any]] = None,
                    research_strategy: Optional[Dict[str, Any]] = None,
+                   research_agenda: Optional[Dict[str, Any]] = None,
                    threat_model: Optional[Dict[str, Any]] = None
                    ) -> "ScheduleContext":
         indices = load_inventory(store)
@@ -345,6 +354,9 @@ class ScheduleContext:
                      else load_research_portfolio(store.workspace, store.target))
         strategy = (research_strategy if isinstance(research_strategy, dict)
                     else load_research_strategy(store.workspace, store.target))
+        agenda = (normalize_research_agenda(research_agenda)
+                  if isinstance(research_agenda, dict)
+                  else load_research_agenda(store.workspace, store.target))
         model = (threat_model if isinstance(threat_model, dict)
                  else load_threat_model(store.workspace, store.target))
         effective_weights, weight_adjustments = apply_benchmark_feedback_weights(
@@ -367,6 +379,7 @@ class ScheduleContext:
                              if isinstance(item, dict)],
             research_portfolio=portfolio,
             research_strategy=strategy,
+            research_agenda=agenda,
             threat_model=model,
             weights=effective_weights,
             benchmark_feedback=feedback,
@@ -794,6 +807,57 @@ def _research_strategy_guidance(candidate: Dict[str, Any],
             "claim_status": "not-a-finding",
         },
         "guidance": guidance,
+        "claim_status": "not-a-finding",
+    }
+
+
+def _research_agenda_guidance(candidate: Dict[str, Any],
+                              agenda: Dict[str, Any]) -> Dict[str, Any]:
+    """Match one candidate to the bounded active research agenda.
+
+    Exact research-key and candidate-id matches are accepted.  A broad
+    surface/attack label is intentionally not enough: the agenda is a budget
+    signal, not a free-form priority hint.
+    """
+    if not isinstance(agenda, dict):
+        return {}
+    items = [item for item in agenda.get("items") or []
+             if isinstance(item, dict)]
+    if not items:
+        return {}
+    candidate_key = research_key(candidate)
+    candidate_id = str(candidate.get("candidate_id") or "")
+    matches: List[Tuple[int, int, str, Dict[str, Any]]] = []
+    for item in items:
+        strength = 0
+        match_kind = ""
+        if candidate_key and str(item.get("research_key") or "") == candidate_key:
+            strength, match_kind = 3, "research-key"
+        elif candidate_id and str(item.get("candidate_id") or "") == candidate_id:
+            strength, match_kind = 2, "candidate-id"
+        if not strength:
+            continue
+        matches.append((
+            strength,
+            1 if item.get("selection_status") == "selected" else 0,
+            str(item.get("agenda_id") or ""),
+            dict(item, _match_kind=match_kind),
+        ))
+    if not matches:
+        return {}
+    _, _, _, item = sorted(
+        matches, key=lambda row: (-row[0], -row[1], row[2]))[0]
+    return {
+        "agenda_id": str(item.get("agenda_id") or ""),
+        "strategy_id": str(item.get("strategy_id") or ""),
+        "selection_status": str(item.get("selection_status") or ""),
+        "rank": _safe_weight(item.get("rank")),
+        "priority_score": _safe_weight(item.get("priority_score")),
+        "expected_information_gain": _safe_weight(
+            item.get("expected_information_gain")),
+        "estimated_cost": _safe_weight(item.get("estimated_cost")),
+        "action": str(item.get("action") or ""),
+        "match_kind": str(item.get("_match_kind") or ""),
         "claim_status": "not-a-finding",
     }
 
@@ -1479,6 +1543,16 @@ def score_candidate(candidate: Dict[str, Any], ctx: ScheduleContext,
         total = min(scale, total + strategy_delta)
         strategy_guidance["applied_delta"] = round(total - before, 4)
         evidence["research_strategy"] = strategy_guidance
+    agenda_guidance = _research_agenda_guidance(
+        candidate, ctx.research_agenda)
+    if agenda_guidance:
+        if agenda_guidance.get("selection_status") == "selected":
+            before = total
+            total = min(scale, total + RESEARCH_AGENDA_BOOST)
+            agenda_guidance["applied_delta"] = round(total - before, 4)
+        else:
+            agenda_guidance["applied_delta"] = 0.0
+        evidence["research_agenda"] = agenda_guidance
     if ctx.benchmark_feedback:
         evidence["benchmark_feedback"] = {
             "benchmark_id": ctx.benchmark_feedback.get("benchmark_id", ""),
@@ -1532,6 +1606,7 @@ class SchedulePlan:
     benchmark_feedback: Dict[str, Any] = field(default_factory=dict)
     research_portfolio: Dict[str, Any] = field(default_factory=dict)
     research_strategy: Dict[str, Any] = field(default_factory=dict)
+    research_agenda: Dict[str, Any] = field(default_factory=dict)
     threat_model: Dict[str, Any] = field(default_factory=dict)
     weight_adjustments: Dict[str, int] = field(default_factory=dict)
     #: Candidates selected outside the quota because they carry runtime
@@ -1551,6 +1626,7 @@ class SchedulePlan:
             "research_portfolio": self.research_portfolio,
             "research_strategy": _research_strategy_snapshot(
                 self.research_strategy, item_limit=32),
+            "research_agenda": self.research_agenda,
             "threat_model": _threat_model_snapshot(self.threat_model),
             "selected": [s.as_dict() for s in self.selected],
             "deferred": [s.as_dict() for s in self.deferred],
@@ -1718,6 +1794,7 @@ def build_schedule(workspace: Path, target: str,
     portfolio = load_research_portfolio(workspace, target)
     threat_model = load_threat_model(workspace, target)
     prior_strategy = load_research_strategy(workspace, target)
+    research_agenda = load_research_agenda(workspace, target)
     # Replay calibration is an optional, bounded research-only input.  Keep
     # the import local so the scheduler's analysis imports do not create a
     # cycle through the evaluation package during CLI startup.
@@ -1746,6 +1823,7 @@ def build_schedule(workspace: Path, target: str,
         store, weights, research_memory=memory.get("entries") or [],
         benchmark_feedback=benchmark_feedback,
         research_portfolio=portfolio, research_strategy=strategy,
+        research_agenda=research_agenda,
         threat_model=threat_model)
     scores = score_candidates(candidates, ctx)
     selected, deferred, requested, filled, relocated = stratified_select(
@@ -1771,6 +1849,7 @@ def build_schedule(workspace: Path, target: str,
         benchmark_feedback=dict(ctx.benchmark_feedback),
         research_portfolio=dict(ctx.research_portfolio),
         research_strategy=dict(ctx.research_strategy),
+        research_agenda=dict(ctx.research_agenda),
         threat_model=dict(ctx.threat_model),
         weight_adjustments=dict(ctx.weight_adjustments),
         pinned=[str(cid) for cid in pinned if str(cid) in selected_ids],
@@ -2137,6 +2216,34 @@ def prompt_coverage_block(ctx: ScheduleContext, plan: Optional[SchedulePlan] = N
             "next_probes": list(portfolio.get("next_probes") or [])[:8],
             "benchmark": portfolio.get("benchmark", {}),
             "claim_status": portfolio.get("claim_status", "not-a-finding"),
+        }, ensure_ascii=False))
+
+    lines.append("## 主动研究议程 / Active Research Agenda")
+    if not ctx.research_agenda:
+        lines.append("  （暂无有界研究议程 / no bounded research agenda yet）")
+    else:
+        agenda = ctx.research_agenda
+        lines.append("  " + json.dumps({
+            "policy": agenda.get("policy", {}),
+            "summary": agenda.get("summary", {}),
+            "selected": [
+                {
+                    "agenda_id": item.get("agenda_id"),
+                    "research_key": item.get("research_key"),
+                    "candidate_id": item.get("candidate_id"),
+                    "surface": item.get("surface"),
+                    "action": item.get("action"),
+                    "priority_score": item.get("priority_score"),
+                    "expected_information_gain": item.get(
+                        "expected_information_gain"),
+                    "prerequisites": item.get("prerequisites", []),
+                    "claim_status": item.get("claim_status", "not-a-finding"),
+                }
+                for item in agenda.get("items", [])
+                if isinstance(item, dict)
+                and item.get("selection_status") == "selected"
+            ][:8],
+            "claim_status": agenda.get("claim_status", "not-a-finding"),
         }, ensure_ascii=False))
 
     lines.append("## 攻击路径威胁模型 / Attacker-Path Threat Model")

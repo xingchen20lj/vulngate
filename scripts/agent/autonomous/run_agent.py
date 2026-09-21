@@ -64,6 +64,8 @@ from ..analysis.research_strategy import (apply_strategy_observations,
                                            strategy_guidance_for_candidate,
                                            write_research_guidance,
                                            write_research_strategy)
+from ..analysis.research_agenda import (build_research_agenda,
+                                        write_research_agenda)
 from ..orchestrator.config import TargetConfig
 from ..orchestrator.gates import g3_novelty
 from ..sandbox.approval import ApprovalGate
@@ -2030,6 +2032,11 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                 strategy_feedback)
             ctx.write_artifact(
                 round_no, "S8", "research-guidance.json", research_guidance)
+    research_agenda = build_research_agenda(
+        strategy, portfolio, target=ctx.cfg.name, round_no=round_no)
+    research_agenda_file = write_research_agenda(
+        ctx.root, ctx.cfg.name, research_agenda)
+    ctx.write_artifact(round_no, "S8", "research-agenda.json", research_agenda)
     replay_calibration = build_replay_calibration(ctx.root, ctx.cfg.name)
     replay_calibration_file = write_replay_calibration(
         ctx.root, ctx.cfg.name, replay_calibration)
@@ -2113,6 +2120,19 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             if key in {"observed", "partial", "environment_gap",
                        "not_executed"}
         },
+        "claim_status": "not-a-finding",
+    }
+    research_agenda_info = {
+        "artifact": str(research_agenda_file.relative_to(
+            ctx.root.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-agenda.json"
+                          % (ctx.cfg.name, round_no),
+        "selected_count": (research_agenda.get("summary") or {}).get(
+            "selected_count", 0),
+        "deferred_count": (research_agenda.get("summary") or {}).get(
+            "deferred_count", 0),
+        "surface_counts": (research_agenda.get("summary") or {}).get(
+            "surface_counts", {}),
         "claim_status": "not-a-finding",
     }
     research_replay_calibration_info = {
@@ -2207,6 +2227,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             "research_consistency": research_consistency_info,
             "research_consistency_actions": research_consistency_actions_info,
             "research_consistency_rechecks": research_consistency_rechecks_info,
+            "research_agenda": research_agenda_info,
             "review_feedback": review_feedback_info,
             "research_portfolio": research_portfolio_info,
             "research_replay_calibration": research_replay_calibration_info,
@@ -2237,6 +2258,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                                 research_consistency_actions_info,
                                 "research_consistency_rechecks":
                                 research_consistency_rechecks_info,
+                                "research_agenda": research_agenda_info,
                                 "review_feedback": review_feedback_info,
                                 "research_portfolio": research_portfolio_info,
                                 "research_replay_calibration":
@@ -2252,6 +2274,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             "research_consistency": research_consistency_info,
             "research_consistency_actions": research_consistency_actions_info,
             "research_consistency_rechecks": research_consistency_rechecks_info,
+            "research_agenda": research_agenda_info,
             "review_feedback": review_feedback_info,
             "research_portfolio": research_portfolio_info,
             "research_replay_calibration": research_replay_calibration_info,

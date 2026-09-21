@@ -36,6 +36,8 @@ from ..analysis.research_strategy import (apply_strategy_observations,
                                            strategy_guidance_for_candidate,
                                            write_research_guidance,
                                            write_research_strategy)
+from ..analysis.research_agenda import (build_research_agenda,
+                                        write_research_agenda)
 from ..memory.state import CheckpointStore
 from ..analysis.languages import ALL_SUFFIXES
 from ..sandbox.approval import ApprovalGate
@@ -1313,6 +1315,11 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
                 "S8", "research-strategy-feedback.json", strategy_feedback)
             ctx.store.write_artifact(
                 "S8", "research-guidance.json", research_guidance)
+    research_agenda = build_research_agenda(
+        strategy, portfolio, target=ctx.target, round_no=ctx.round_no)
+    research_agenda_file = write_research_agenda(
+        ctx.workspace, ctx.target, research_agenda)
+    ctx.store.write_artifact("S8", "research-agenda.json", research_agenda)
     replay_calibration = build_replay_calibration(
         ctx.workspace, ctx.target)
     replay_calibration_file = write_replay_calibration(
@@ -1413,6 +1420,19 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
         },
         "claim_status": "not-a-finding",
     }
+    summary["research_agenda"] = {
+        "artifact": str(research_agenda_file.relative_to(
+            ctx.workspace.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-agenda.json"
+                          % (ctx.target, ctx.round_no),
+        "selected_count": (research_agenda.get("summary") or {}).get(
+            "selected_count", 0),
+        "deferred_count": (research_agenda.get("summary") or {}).get(
+            "deferred_count", 0),
+        "surface_counts": (research_agenda.get("summary") or {}).get(
+            "surface_counts", {}),
+        "claim_status": "not-a-finding",
+    }
     if strategy_file:
         summary["research_strategy"] = {
             "artifact": str(strategy_file.relative_to(ctx.workspace.resolve())),
@@ -1480,6 +1500,7 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
                 "research_consistency_actions"],
             "research_consistency_rechecks": summary[
                 "research_consistency_rechecks"],
+            "research_agenda": summary["research_agenda"],
             "research_portfolio": summary["research_portfolio"],
             "research_replay_calibration": summary[
             "research_replay_calibration"],
