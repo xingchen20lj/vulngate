@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added `research-agenda-outcome-v1` execution feedback. S8 joins the prior
+  active queue with the actual schedule and bounded S4/S8 observations, records
+  productive information, falsifiers, no-information repeats, environment
+  gaps, and not-executed work, and feeds the latest outcome into the next
+  agenda. `agent_cli.py research-agenda-outcomes` can inspect or rebuild it;
+  all metadata remains `not-a-finding` and cannot change candidate status,
+  CVSS, G4, or G5.
+
 - Added `research-agenda-v1` active research budgeting. S8 converts the
   normalized strategy into a bounded selected/deferred/hold queue with
   expected information gain, estimated cost, prerequisites, and per-surface

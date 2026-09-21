@@ -678,6 +678,26 @@ cannot confirm a finding or change candidate status, CVSS, G4, or G5. Do not
 persist source prose, payloads, commands, stdout/stderr, credentials, or
 finding conclusions in the agenda.
 
+S8 also derives `research-agenda-outcome-v1` before replacing the previous
+agenda. It joins the prior `selected`/`deferred`/`hold` queue to the actual
+scheduler snapshot, S4 verification matrix/runtime lab, and S8 strategy
+feedback using exact `agenda_id`, `strategy_id`, `research_key`, or
+`candidate_id` keys. The bounded outcome codes are `new-information`,
+`falsifier-observed`, `no-new-information`, `environment-gap`,
+`not-executed`, and `not-selected`; only information gain, allowlisted
+observation signals, execution state, cell/fixture counts, reason codes, and
+consecutive no-gain counts are retained. Target and round artifacts are
+`research-agenda-outcomes.json`, and the next agenda/scheduler prompt may use
+the latest outcome to prioritize environment recovery or replace low-yield
+repeats. Missing schedules and environment failures are never negative
+security evidence. The artifact remains `claim_status=not-a-finding` and
+cannot change candidate status, CVSS, G4, or G5. Inspect or rebuild it with:
+
+```bash
+python3 scripts/agent_cli.py research-agenda-outcomes <target> \
+  --workspace <audit-dir> [--round N] [--rebuild] [--json]
+```
+
 S3 residuals are carried across the same boundary as pending research debt.
 Memory stores only controlled kind/reason codes, bounded source locations, a
 probe digest, and whether a bounded probe plan exists. The portfolio emits one
@@ -1570,6 +1590,21 @@ round artifact。调度器只对精确匹配且被选中的议程项施加一个
 议程证据债务；它不改变 candidate status、CVSS、G4、G5，也不把 `claim_status=not-a-finding`
 升级为漏洞结论。可用 `python3 scripts/agent_cli.py research-agenda <target> --workspace <path>`
 查看或重建议程。
+
+S8 还会在覆盖上一轮议程前生成 `research-agenda-outcome-v1` 执行反馈。它按
+`agenda_id`、`strategy_id`、`research_key` 或 `candidate_id` 精确关联上一轮的
+`selected/deferred/hold`、实际 scheduler snapshot、S4 verification matrix/runtime lab 与 S8
+strategy feedback，只输出 `new-information`、`falsifier-observed`、`no-new-information`、
+`environment-gap`、`not-executed` 和 `not-selected` 等有界 outcome。产物只保留信息增益、白名单
+观测信号、执行状态、cell/fixture 计数、reason codes 和连续无增益计数，写入 target/round
+`research-agenda-outcomes.json`，下一轮 agenda 与 scheduler prompt 可用它优先修复环境或替换低收益
+重复实验。缺少 schedule 或环境失败不能成为负向安全证据；outcome 仍保持
+`claim_status=not-a-finding`，不能改变 candidate status、CVSS、G4 或 G5。可用：
+
+```bash
+python3 scripts/agent_cli.py research-agenda-outcomes <target> \
+  --workspace <audit-dir> [--round N] [--rebuild] [--json]
+```
 
 S2 还会写出有界的 `research-strategy-v1`：目标级为
 `state/<target>/coverage/research-strategy.json`，轮次快照为 `S2/research-strategy.json`。它将

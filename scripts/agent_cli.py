@@ -35,6 +35,8 @@ Usage:
   agent_cli.py research-consistency-actions <target> --workspace <dir> [--rebuild] [--json]
   agent_cli.py research-consistency-rechecks <target> --workspace <dir> [--rebuild] [--json]
   agent_cli.py research-agenda <target> --workspace <dir> [--rebuild] [--json]
+  agent_cli.py research-agenda-outcomes <target> --workspace <dir> [--round N]
+                           [--rebuild] [--json]
   agent_cli.py research-strategy <target> --workspace <dir> [--rebuild]
                                [--benchmark-feedback <json>] [--json]
   agent_cli.py coverage <target> [--workspace <dir>] [--rebuild] [--show-uncovered]
@@ -1161,6 +1163,73 @@ def cmd_research_agenda(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_research_agenda_outcomes(args: argparse.Namespace) -> int:
+    """Show or rebuild bounded execution feedback for an active agenda."""
+    from agent.analysis.research_agenda import load_research_agenda
+    from agent.analysis.research_agenda_outcomes import (
+        build_research_agenda_outcomes,
+        load_research_agenda_outcomes,
+        load_round_artifact,
+        load_schedule_snapshot,
+        outcomes_path,
+        write_research_agenda_outcomes,
+    )
+
+    workspace = Path(args.workspace).resolve()
+    outcomes = load_research_agenda_outcomes(workspace, args.target)
+    if args.rebuild or not outcomes:
+        agenda = load_research_agenda(workspace, args.target)
+        round_no = args.round or int(
+            (agenda or {}).get("round", 0) or
+            (outcomes or {}).get("round", 0) or 0)
+        schedule = load_schedule_snapshot(workspace, args.target, round_no)
+        verification = load_round_artifact(
+            workspace, args.target, round_no, "S4", "verification-matrix.json")
+        runtime_lab = load_round_artifact(
+            workspace, args.target, round_no, "S4", "runtime-lab.json")
+        feedback = load_round_artifact(
+            workspace, args.target, round_no, "S8",
+            "research-strategy-feedback.json")
+        outcomes = build_research_agenda_outcomes(
+            agenda, schedule, verification, runtime_lab, feedback,
+            prior_outcomes=outcomes, target=args.target, round_no=round_no)
+        write_research_agenda_outcomes(workspace, args.target, outcomes)
+    if not outcomes:
+        _out({"error": "research agenda outcomes artifact not found",
+              "hint": "run an S8 round or pass --rebuild",
+              "artifact": str(outcomes_path(workspace, args.target))})
+        return 2
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "artifact": str(outcomes_path(
+            workspace, args.target).relative_to(workspace)),
+        "outcomes": outcomes,
+    }
+    if args.json:
+        _out(payload)
+    else:
+        summary = outcomes.get("summary", {})
+        print("research agenda outcomes: %s" % payload["artifact"])
+        print("  round=%s entries=%s selected=%s scheduled=%s executed=%s "
+              "productive=%s yield=%s claim_status=%s" % (
+                  outcomes.get("round", 0), summary.get("entry_count", 0),
+                  summary.get("selected_count", 0),
+                  summary.get("scheduled_count", 0),
+                  summary.get("executed_count", 0),
+                  summary.get("productive_selected_count", 0),
+                  summary.get("selected_yield"),
+                  outcomes.get("claim_status", "not-a-finding")))
+        for row in outcomes.get("entries") or []:
+            if not isinstance(row, dict) or row.get("selection_status") != "selected":
+                continue
+            print("  outcome: %s [%s] gain=%s scheduled=%s executed=%s" % (
+                row.get("candidate_id") or row.get("research_key"),
+                row.get("outcome_code"), row.get("information_gain", 0),
+                row.get("scheduled", False), row.get("executed", False)))
+    return 0
+
+
 def cmd_coverage(args: argparse.Namespace) -> int:
     """Security audit coverage report (spec §16).
 
@@ -2087,6 +2156,21 @@ def build_parser() -> argparse.ArgumentParser:
     ra.add_argument("--json", action="store_true",
                     help="machine-readable output")
     ra.set_defaults(fn=cmd_research_agenda)
+
+    rao = sub.add_parser(
+        "research-agenda-outcomes",
+        help="show or rebuild bounded execution feedback for the active agenda",
+    )
+    rao.add_argument("target", help="target name (state/<target>/...)")
+    rao.add_argument("--workspace", required=True,
+                     help="workspace root containing state/<target>/")
+    rao.add_argument("--round", type=int, default=0,
+                     help="round to measure; default: agenda round")
+    rao.add_argument("--rebuild", action="store_true",
+                     help="rebuild from the agenda, schedule and S4/S8 summaries")
+    rao.add_argument("--json", action="store_true",
+                     help="machine-readable output")
+    rao.set_defaults(fn=cmd_research_agenda_outcomes)
 
     rs = sub.add_parser(
         "research-strategy",

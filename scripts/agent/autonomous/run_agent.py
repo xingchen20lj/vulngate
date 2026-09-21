@@ -65,7 +65,14 @@ from ..analysis.research_strategy import (apply_strategy_observations,
                                            write_research_guidance,
                                            write_research_strategy)
 from ..analysis.research_agenda import (build_research_agenda,
+                                        load_research_agenda,
                                         write_research_agenda)
+from ..analysis.research_agenda_outcomes import (
+    build_research_agenda_outcomes,
+    load_research_agenda_outcomes,
+    load_schedule_snapshot,
+    write_research_agenda_outcomes,
+)
 from ..orchestrator.config import TargetConfig
 from ..orchestrator.gates import g3_novelty
 from ..sandbox.approval import ApprovalGate
@@ -2032,8 +2039,36 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                 strategy_feedback)
             ctx.write_artifact(
                 round_no, "S8", "research-guidance.json", research_guidance)
+    # Measure the agenda that drove this round before replacing it with the
+    # next queue.  This is bounded scheduling feedback, not a security verdict.
+    prior_research_agenda = load_research_agenda(ctx.root, ctx.cfg.name)
+    prior_agenda_outcomes = load_research_agenda_outcomes(
+        ctx.root, ctx.cfg.name)
+    schedule_snapshot = load_schedule_snapshot(
+        ctx.root, ctx.cfg.name, round_no)
+    verification_matrix = {}
+    verification_path = (ctx.root / "state" / ctx.cfg.name
+                         / ("round-%02d" % round_no) / "S4"
+                         / "verification-matrix.json")
+    try:
+        loaded_verification = json.loads(
+            verification_path.read_text(encoding="utf-8"))
+        verification_matrix = (loaded_verification
+                               if isinstance(loaded_verification, dict) else {})
+    except (OSError, ValueError, TypeError):
+        verification_matrix = {}
+    research_agenda_outcomes = build_research_agenda_outcomes(
+        prior_research_agenda, schedule_snapshot, verification_matrix,
+        runtime_lab, strategy_feedback,
+        prior_outcomes=prior_agenda_outcomes,
+        target=ctx.cfg.name, round_no=round_no)
+    research_agenda_outcomes_file = write_research_agenda_outcomes(
+        ctx.root, ctx.cfg.name, research_agenda_outcomes)
+    ctx.write_artifact(round_no, "S8", "research-agenda-outcomes.json",
+                       research_agenda_outcomes)
     research_agenda = build_research_agenda(
-        strategy, portfolio, target=ctx.cfg.name, round_no=round_no)
+        strategy, portfolio, target=ctx.cfg.name, round_no=round_no,
+        outcomes=research_agenda_outcomes)
     research_agenda_file = write_research_agenda(
         ctx.root, ctx.cfg.name, research_agenda)
     ctx.write_artifact(round_no, "S8", "research-agenda.json", research_agenda)
@@ -2135,6 +2170,21 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             "surface_counts", {}),
         "claim_status": "not-a-finding",
     }
+    research_agenda_outcomes_info = {
+        "artifact": str(research_agenda_outcomes_file.relative_to(
+            ctx.root.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-agenda-outcomes.json"
+                          % (ctx.cfg.name, round_no),
+        "selected_count": (research_agenda_outcomes.get("summary") or {}
+                            ).get("selected_count", 0),
+        "productive_selected_count": (research_agenda_outcomes.get(
+            "summary") or {}).get("productive_selected_count", 0),
+        "selected_yield": (research_agenda_outcomes.get("summary") or {}
+                           ).get("selected_yield"),
+        "outcome_counts": (research_agenda_outcomes.get("summary") or {}
+                            ).get("outcome_counts", {}),
+        "claim_status": "not-a-finding",
+    }
     research_replay_calibration_info = {
         "artifact": str(replay_calibration_file.relative_to(ctx.root.resolve())),
         "round_artifact": "state/%s/round-%02d/S8/research-replay-calibration.json"
@@ -2228,6 +2278,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             "research_consistency_actions": research_consistency_actions_info,
             "research_consistency_rechecks": research_consistency_rechecks_info,
             "research_agenda": research_agenda_info,
+            "research_agenda_outcomes": research_agenda_outcomes_info,
             "review_feedback": review_feedback_info,
             "research_portfolio": research_portfolio_info,
             "research_replay_calibration": research_replay_calibration_info,
@@ -2259,6 +2310,8 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                                 "research_consistency_rechecks":
                                 research_consistency_rechecks_info,
                                 "research_agenda": research_agenda_info,
+                                "research_agenda_outcomes":
+                                research_agenda_outcomes_info,
                                 "review_feedback": review_feedback_info,
                                 "research_portfolio": research_portfolio_info,
                                 "research_replay_calibration":
@@ -2275,6 +2328,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             "research_consistency_actions": research_consistency_actions_info,
             "research_consistency_rechecks": research_consistency_rechecks_info,
             "research_agenda": research_agenda_info,
+            "research_agenda_outcomes": research_agenda_outcomes_info,
             "review_feedback": review_feedback_info,
             "research_portfolio": research_portfolio_info,
             "research_replay_calibration": research_replay_calibration_info,

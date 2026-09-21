@@ -46,6 +46,7 @@
 | 29 | 一致性矛盾的受控复核契约 | 已实现（bounded S2→S4 recheck contract） | `research-consistency-action-v1`、`research-consistency-actions` CLI、S2 `consistency-recheck`、S4 MatrixCell/fixture/env、replay pack | 每个非一致条目生成固定隔离轴、正/负向 lane、重复次数、required observations 与 falsifiers；契约可进入 S2→S4 但仍是 `not-a-finding`，不改变候选、CVSS、G4/G5 |
 | 30 | 一致性复核的真实执行与闭合 | 已实现（bounded S4→S8 recheck closure） | `research-consistency-recheck-v1`、S4 lane witness、`research-consistency-rechecks` CLI、S8/portfolio closure | 只有正/负向 lane、独立重复、fixture/context 锁、comparison、状态重置和 required observation 都有实际 witness 才标记 `observed`；缺失、部分执行和环境缺口保持可区分并继续 pending，不改变候选、CVSS、G4/G5 |
 | 31 | 主动研究议程与有限预算分配 | 已实现（bounded information-gain agenda） | `research-agenda-v1`、`research-agenda` CLI、S8 agenda、scheduler exact-match signal | 将 strategy 的证据债务转成 selected/deferred/hold 队列，显式记录 expected information gain、estimated cost、prerequisites 和 surface diversity；只改变下一轮调度，不改变候选、CVSS、G4/G5 |
+| 32 | 主动议程执行反馈与预算闭环 | 已实现（bounded agenda outcome feedback） | `research-agenda-outcome-v1`、`research-agenda-outcomes` CLI、S8 outcome、下一轮 agenda outcome fields | 将上一轮 selected 队列与实际 schedule、S4/S8 观测对齐，区分 new-information、falsifier、no-new-information、environment-gap、not-executed；用收益反馈调整下一轮优先级，不改变候选、CVSS、G4/G5 |
 
 ## 已实现基础：可证伪实验规划
 
@@ -503,3 +504,12 @@ S2→S4→S8 的单向契约：
 - agenda 在有限 slots 内先按 surface × attack class 做一次多样性选择，再用剩余预算选择高信息增益项，显式区分 `selected`、`deferred` 和已满足证据的 `hold`。环境修复、residual、review follow-up 和 recheck evidence debt 会得到有界加权，但不会改变 G4/G5；
 - S8 写入 target/round `research-agenda.json`，replay pack 对其做可选 provenance；`python3 scripts/agent_cli.py research-agenda <target> --workspace <audit-dir> [--rebuild] [--slots N] [--max-per-surface N] [--json]` 可检查或重建；
 - 下一轮 scheduler 只在 candidate 与 agenda 的 `research_key` 或 `candidate_id` 精确匹配时使用小幅 boost，并把 agenda 选择证据写入 schedule。agenda 全部保持 `claim_status=not-a-finding`，不能确认漏洞、改变 candidate status、CVSS、G4 或 G5。
+
+## 阶段 32 初步实现：主动议程执行反馈与预算闭环
+
+阶段 31 能选择有限的研究任务，但如果某个 selected 项没有真正进入 schedule、被环境阻断，或连续执行却没有新观测，下一轮仍可能只看到静态 priority。阶段 32 增加 `research-agenda-outcome-v1`：
+
+- S8 在覆盖上一轮 agenda 前，先把上一轮 `selected/deferred/hold` 项与实际 scheduler snapshot、S4 `verification-matrix`、S4 `runtime-lab` 和 S8 strategy feedback 按 `agenda_id`、`strategy_id`、`research_key`、`candidate_id` 的精确键对齐；
+- 每项只输出 allowlist outcome：`new-information`、`falsifier-observed`、`no-new-information`、`environment-gap`、`not-executed` 或 `not-selected`，并保留有限的 information gain、observed signals、execution state、cells/fixtures 计数、reason codes 与连续无增益计数；缺少 schedule 或运行环境失败不会被解释成负向安全证据；
+- 目标级写入 `state/<target>/coverage/research-agenda-outcomes.json`，轮次写入 `S8/research-agenda-outcomes.json`，同时保留有界 history。下一轮 agenda 将最近 outcome 作为 `last_outcome` 和 recovery/no-information priority signal，scheduler prompt/evidence 也会展示该反馈；
+- 可用 `python3 scripts/agent_cli.py research-agenda-outcomes <target> --workspace <audit-dir> [--round N] [--rebuild] [--json]` 检查或重建。outcome、agenda 和 scheduler feedback 都保持 `claim_status=not-a-finding`，不能确认漏洞、改变 candidate status、CVSS、G4 或 G5。

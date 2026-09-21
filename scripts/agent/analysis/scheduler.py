@@ -857,6 +857,16 @@ def _research_agenda_guidance(candidate: Dict[str, Any],
             item.get("expected_information_gain")),
         "estimated_cost": _safe_weight(item.get("estimated_cost")),
         "action": str(item.get("action") or ""),
+        "last_outcome": str(item.get("last_outcome") or ""),
+        "outcome_round": _safe_weight(item.get("outcome_round")),
+        "outcome_information_gain": _safe_weight(
+            item.get("outcome_information_gain")),
+        "outcome_observed_signals": [
+            str(value) for value in item.get("outcome_observed_signals", [])[:8]
+            if str(value)
+        ],
+        "outcome_consecutive_no_information": _safe_weight(
+            item.get("outcome_consecutive_no_information")),
         "match_kind": str(item.get("_match_kind") or ""),
         "claim_status": "not-a-finding",
     }
@@ -2236,6 +2246,13 @@ def prompt_coverage_block(ctx: ScheduleContext, plan: Optional[SchedulePlan] = N
                     "priority_score": item.get("priority_score"),
                     "expected_information_gain": item.get(
                         "expected_information_gain"),
+                    "last_outcome": item.get("last_outcome", ""),
+                    "outcome_information_gain": item.get(
+                        "outcome_information_gain", 0),
+                    "outcome_observed_signals": item.get(
+                        "outcome_observed_signals", []),
+                    "outcome_consecutive_no_information": item.get(
+                        "outcome_consecutive_no_information", 0),
                     "prerequisites": item.get("prerequisites", []),
                     "claim_status": item.get("claim_status", "not-a-finding"),
                 }

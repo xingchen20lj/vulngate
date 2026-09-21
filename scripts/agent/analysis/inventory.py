@@ -25,6 +25,7 @@ Storage layout follows spec §3::
     ├── threat-model.json        (attacker-path / trust-boundary research view)
     ├── research-strategy.json   (cross-artifact S2 research agenda)
     ├── research-agenda.json     (bounded active research queue)
+    ├── research-agenda-outcomes.json (bounded agenda execution feedback)
     ├── research-guidance.json   (bounded next-action scheduling layer)
     └── inventory-summary.json
 

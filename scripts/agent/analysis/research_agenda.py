@@ -67,6 +67,11 @@ AGENDA_REASON_CODES = frozenset({
     "surface-diversity",
     "budget-deferred",
     "evidence-satisfied",
+    "outcome-recovery",
+    "outcome-no-new-information",
+    "outcome-not-executed",
+    "outcome-falsifier",
+    "outcome-new-information",
 })
 PREREQUISITES = frozenset({
     "environment-ready",
@@ -252,7 +257,8 @@ def _prerequisites(action: str, missing: Sequence[str]) -> List[str]:
 
 
 def _priority_score(item: Mapping[str, Any], expected_gain: int,
-                    estimated_cost: int, recheck_status: str = "") -> int:
+                    estimated_cost: int, recheck_status: str = "",
+                    outcome_code: str = "") -> int:
     priority = _int(item.get("priority"), 1, 1, 5)
     guidance = item.get("guidance")
     guidance = guidance if isinstance(guidance, Mapping) else {}
@@ -272,24 +278,37 @@ def _priority_score(item: Mapping[str, Any], expected_gain: int,
         score += 4
     if recheck_status in {"partial", "environment-gap", "not-executed"}:
         score += 6
+    if outcome_code == "environment-gap":
+        score += 8
+    elif outcome_code == "not-executed":
+        score += 6
+    elif outcome_code == "no-new-information":
+        score += 3
     if expected_gain == 0:
         score -= 12
     score -= max(0, estimated_cost - 3) * 2
     return max(0, min(100, score))
 
 
-def _agenda_item(item: Mapping[str, Any], recheck_status: str = "") -> Dict[str, Any]:
+def _agenda_item(item: Mapping[str, Any], recheck_status: str = "",
+                 outcome: Optional[Mapping[str, Any]] = None
+                 ) -> Dict[str, Any]:
     strategy_id = _text(item.get("strategy_id"), 80)
     identity = (item.get("research_key") or item.get("candidate_id") or
                 item.get("residual_id") or item.get("path_id") or strategy_id)
     action = _action(item)
     status = _observation_status(item)
     missing = _missing(item)
+    outcome = outcome if isinstance(outcome, Mapping) else {}
+    outcome_code = _code(
+        outcome.get("outcome_code"),
+        {"new-information", "falsifier-observed", "no-new-information",
+         "environment-gap", "not-executed", "not-selected"}, "")
     expected_gain = _expected_information_gain(
         status, action, missing, recheck_status)
     estimated_cost = _estimated_cost(action, missing)
     score = _priority_score(item, expected_gain, estimated_cost,
-                            recheck_status)
+                            recheck_status, outcome_code)
     guidance = item.get("guidance")
     guidance = guidance if isinstance(guidance, Mapping) else {}
     surface = _surface(item.get("research_surface"), item.get("target_type"))
@@ -313,6 +332,16 @@ def _agenda_item(item: Mapping[str, Any], recheck_status: str = "") -> Dict[str,
         reasons.append("residual-closure")
     if guidance.get("replacement_recommended"):
         reasons.append("replacement")
+    if outcome_code == "environment-gap":
+        reasons.append("outcome-recovery")
+    elif outcome_code == "no-new-information":
+        reasons.append("outcome-no-new-information")
+    elif outcome_code == "not-executed":
+        reasons.append("outcome-not-executed")
+    elif outcome_code == "falsifier-observed":
+        reasons.append("outcome-falsifier")
+    elif outcome_code == "new-information":
+        reasons.append("outcome-new-information")
     if selection_status == "hold":
         reasons = ["evidence-satisfied"]
     return {
@@ -344,6 +373,14 @@ def _agenda_item(item: Mapping[str, Any], recheck_status: str = "") -> Dict[str,
         "recheck_status": _code(
             recheck_status, {"observed", "partial", "environment-gap",
                              "not-executed"}, ""),
+        "last_outcome": outcome_code,
+        "outcome_round": _int(outcome.get("round"), 0, 0, 1000000),
+        "outcome_information_gain": _int(
+            outcome.get("information_gain"), 0, 0, 5),
+        "outcome_observed_signals": _bounded(
+            outcome.get("observed_signals"), limit=8, item_limit=48),
+        "outcome_consecutive_no_information": _int(
+            outcome.get("consecutive_no_information"), 0, 0, 32),
         "claim_status": AGENDA_CLAIM_STATUS,
     }
 
@@ -372,6 +409,7 @@ def _empty(target: str = "", round_no: int = 0, slots: int = DEFAULT_SLOTS,
             "status_counts": {},
             "surface_counts": {},
             "action_counts": {},
+            "last_outcome_counts": {},
             "claim_status": AGENDA_CLAIM_STATUS,
         },
         "items": [],
@@ -409,6 +447,8 @@ def _summary(items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
                        if item.get("selection_status") == "selected")
     actions = Counter(_text(item.get("action"), 64) for item in items
                       if item.get("selection_status") == "selected")
+    outcomes = Counter(_text(item.get("last_outcome"), 40) for item in items
+                       if _text(item.get("last_outcome"), 40))
     return {
         "entry_count": len(items),
         "selected_count": statuses.get("selected", 0),
@@ -423,6 +463,7 @@ def _summary(items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         "status_counts": dict(sorted(statuses.items())),
         "surface_counts": dict(sorted(surfaces.items())),
         "action_counts": dict(sorted(actions.items())),
+        "last_outcome_counts": dict(sorted(outcomes.items())),
         "claim_status": AGENDA_CLAIM_STATUS,
     }
 
@@ -434,6 +475,7 @@ def build_research_agenda(
         round_no: int = 0,
         slots: int = DEFAULT_SLOTS,
         max_per_surface: int = DEFAULT_MAX_PER_SURFACE,
+        outcomes: Optional[Mapping[str, Any]] = None,
         ) -> Dict[str, Any]:
     """Select a diverse, information-seeking queue from normalized strategy."""
     normalized = normalize_research_strategy(strategy or {})
@@ -442,6 +484,22 @@ def build_research_agenda(
     max_per_surface = _int(max_per_surface, DEFAULT_MAX_PER_SURFACE, 1,
                            MAX_PER_SURFACE)
     rechecks = _recheck_statuses(normalized_portfolio)
+    outcome_index: Dict[str, Mapping[str, Any]] = {}
+    if isinstance(outcomes, Mapping):
+        rows = list(outcomes.get("entries") or [])
+        rows += list(outcomes.get("history") or [])
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            for key in (_text(row.get("agenda_id"), 80),
+                        _text(row.get("strategy_id"), 80),
+                        _text(row.get("research_key"), 80),
+                        _text(row.get("candidate_id"), 120)):
+                if key:
+                    previous = outcome_index.get(key)
+                    if previous is None or _int(row.get("round"), 0) >= _int(
+                            previous.get("round"), 0):
+                        outcome_index[key] = row
     candidates: List[Dict[str, Any]] = []
     seen_identity = set()
     for raw in normalized.get("items") or []:
@@ -455,7 +513,15 @@ def build_research_agenda(
         if not identity or identity in seen_identity:
             continue
         seen_identity.add(identity)
-        row = _agenda_item(raw, rechecks.get(identity, ""))
+        outcome = None
+        for key in (_stable_id(_text(raw.get("strategy_id"), 80), identity),
+                    _text(raw.get("strategy_id"), 80),
+                    _text(raw.get("research_key"), 80),
+                    _text(raw.get("candidate_id"), 120)):
+            if key and key in outcome_index:
+                outcome = outcome_index[key]
+                break
+        row = _agenda_item(raw, rechecks.get(identity, ""), outcome)
         candidates.append(row)
 
     candidates.sort(key=lambda item: (
@@ -577,6 +643,17 @@ def _normalize_item(raw: Any) -> Dict[str, Any]:
         "recheck_status": _code(
             raw.get("recheck_status"),
             {"observed", "partial", "environment-gap", "not-executed"}, ""),
+        "last_outcome": _code(
+            raw.get("last_outcome"),
+            {"new-information", "falsifier-observed", "no-new-information",
+             "environment-gap", "not-executed", "not-selected"}, ""),
+        "outcome_round": _int(raw.get("outcome_round"), 0, 0, 1000000),
+        "outcome_information_gain": _int(
+            raw.get("outcome_information_gain"), 0, 0, 5),
+        "outcome_observed_signals": _bounded(
+            raw.get("outcome_observed_signals"), limit=8, item_limit=48),
+        "outcome_consecutive_no_information": _int(
+            raw.get("outcome_consecutive_no_information"), 0, 0, 32),
         "claim_status": AGENDA_CLAIM_STATUS,
     }
 

@@ -176,6 +176,20 @@ python3 scripts/agent_cli.py research-agenda <target> \
 使用有界 boost 并在 schedule evidence 中保留匹配状态；agenda、schedule signal 和 replay pack
 仍是 `claim_status=not-a-finding`，不能改变 candidate status、CVSS、G4 或 G5。
 
+阶段 32 增加 `research-agenda-outcome-v1` 执行反馈闭环。S8 会在覆盖上一轮 agenda 前，按
+`agenda_id`、`strategy_id`、`research_key` 和 `candidate_id` 精确关联实际 schedule、S4
+`verification-matrix`、S4 `runtime-lab` 与 S8 strategy feedback，区分
+`new-information`、`falsifier-observed`、`no-new-information`、`environment-gap`、
+`not-executed` 和 `not-selected`。它只保存有界的信息增益、观测信号、执行状态、cell/fixture
+计数和连续无增益计数，写入 target/round `research-agenda-outcomes.json`；下一轮 agenda 和
+scheduler prompt 可据此提高环境恢复或低收益替换项的优先级。该反馈仍是
+`claim_status=not-a-finding`，不能改变 candidate status、CVSS、G4 或 G5。可用：
+
+```bash
+python3 scripts/agent_cli.py research-agenda-outcomes <target> \
+  --workspace <audit-dir> [--round N] [--rebuild] [--json]
+```
+
 S1 中包含授权边界和危险 Sink 的启发式 Source→Sink 路径会写入
 `composite-chain-candidates.json`，并在 S2 进入与模型候选、控制图候选、同族差分候选相同的调度池。它们始终保留
 `heuristic-nearby` / `requires_manual_dataflow=true`，只能作为审计和 PoC

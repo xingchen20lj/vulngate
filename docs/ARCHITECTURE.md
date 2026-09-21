@@ -248,6 +248,24 @@ evidence. Agenda metadata and the scheduler signal remain
 `claim_status=not-a-finding`; they cannot confirm a vulnerability or change
 candidate status, CVSS, G4, or G5.
 
+Stage 32 adds `research-agenda-outcome-v1`, closing the execution-feedback loop
+around the finite queue. Before S8 replaces the previous agenda, it joins its
+items by exact `agenda_id`, `strategy_id`, `research_key`, and `candidate_id`
+against the actual scheduler snapshot, S4 `verification-matrix`, S4
+`runtime-lab`, and S8 strategy feedback. It classifies only bounded outcomes:
+`new-information`, `falsifier-observed`, `no-new-information`,
+`environment-gap`, `not-executed`, and `not-selected`. Target and round
+`research-agenda-outcomes.json` artifacts retain information gain, observed
+signals, execution state, cell/fixture counts, and consecutive no-gain counts,
+then expose the latest outcome to the next agenda and scheduler prompt. This
+is still `claim_status=not-a-finding`; it cannot change candidate status, CVSS,
+G4, or G5. Inspect or rebuild it with:
+
+```bash
+python3 scripts/agent_cli.py research-agenda-outcomes <target> \
+  --workspace <audit-dir> [--round N] [--rebuild] [--json]
+```
+
 ## Two operating modes
 
 | Mode | Reasoning | Setup | Typical use |
