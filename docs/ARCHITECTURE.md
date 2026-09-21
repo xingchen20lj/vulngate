@@ -37,6 +37,17 @@ It defines:
 - the safety model (loopback-only, approval logging, no pre-fix disclosure);
 - the precondition-tier → CVSS mapping.
 
+The source inventory also persists a semantic path evidence layer. It checks
+whether a path control is before the sink in the same lexical scope and runs a
+bounded same-symbol parameter/alias walk. `semantic-path-evidence.json`
+distinguishes `direct`, `propagated`, `not-traced`, and
+`cross-symbol-unresolved` data-flow states; its control rows distinguish
+`before-sink`, `after-sink`, `same-line`, and `cross-symbol-unverified`.
+This is not branch-dominance, type, virtual-dispatch, DI, reflection,
+callback, or sanitizer-semantic proof. It does not copy source text, and all
+rows and derived candidates remain `claim_status=not-a-finding` for S2/S3/S4
+follow-up.
+
 S8 also emits a bounded `research-strategy-guidance-v1` view. It joins only
 strategy observation metadata, the latest review status, and explicit variant
 coverage, then maps them to finite next-action classes. Guidance can adjust

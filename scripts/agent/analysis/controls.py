@@ -819,6 +819,11 @@ def static_candidates(store: Any) -> List[Dict[str, Any]]:
     # construction; S2 only merges the persisted, explicitly non-finding leads.
     from . import capability_graph as capability_analysis
     candidates.extend(capability_analysis.load_capability_candidates(store))
+    # Semantic path leads are also persisted by inventory.  Keep this import
+    # late so the semantic module can use the control vocabulary without a
+    # module-import cycle.
+    from . import semantic_paths as semantic_path_analysis
+    candidates.extend(semantic_path_analysis.load_semantic_candidates(store))
     return candidates
 
 

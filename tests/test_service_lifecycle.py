@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +49,36 @@ class ServiceLifecycleTests(unittest.TestCase):
             self.assertTrue(stopped["stopped"], stopped)
             self.assertIn(stopped["status"], {"stopped", "killed-after-timeout"})
             self.assertFalse(json.loads(registry.read_text(encoding="utf-8"))["processes"][-1]["active"])
+
+    def test_loopback_healthcheck_ignores_host_proxy_environment(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            port = _free_port()
+            cfg = TargetConfig(
+                name="proxied-service", discovery_date="2026-09-21",
+                runtime_lab={"service": {
+                    "start_command": [sys.executable, "-u", "-m", "http.server",
+                                      str(port), "--bind", "127.0.0.1"],
+                    "healthcheck_url": "http://127.0.0.1:%d/" % port,
+                    "startup_timeout": 5,
+                    "poll_interval": 0.05,
+                }},
+            )
+            lifecycle = ServiceLifecycle(root, "proxied-service", 1, cfg)
+            proxy_env = {
+                "HTTP_PROXY": "http://127.0.0.1:1",
+                "HTTPS_PROXY": "http://127.0.0.1:1",
+                "ALL_PROXY": "http://127.0.0.1:1",
+            }
+            with patch.dict("os.environ", proxy_env, clear=False), \
+                    patch.dict("os.environ", {"NO_PROXY": "", "no_proxy": ""},
+                               clear=False):
+                ready = lifecycle.ensure_ready()
+            try:
+                self.assertTrue(ready["ready"], ready)
+                self.assertEqual(ready["status"], "started-ready")
+            finally:
+                lifecycle.stop()
 
     def test_non_loopback_healthcheck_is_a_policy_gap(self):
         with tempfile.TemporaryDirectory() as td:

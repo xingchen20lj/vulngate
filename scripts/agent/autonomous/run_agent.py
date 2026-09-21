@@ -416,7 +416,7 @@ def _persist_coverage_inventory(root: Path, name: str, dest: Path,
 
 
 def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
-    """Refresh the capability graph for older autonomous workspaces once.
+    """Refresh the derived path indices for older autonomous workspaces once.
 
     New targets already pass through :func:`_persist_coverage_inventory`, but
     an existing workspace may predate the capability index.  Rebuild only when
@@ -425,15 +425,18 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
     """
     from ..analysis import capability_graph as capability
     from ..analysis import coverage as cov
+    from ..analysis import semantic_paths as semantic
     from ..analysis import threat_model as threat_model_analysis
     from ..analysis.inventory import (CoverageStore, build_inventory,
                                       load_inventory, persist_inventory)
 
     store = CoverageStore(ctx.root, ctx.cfg.name)
     if (store.path(capability.CAPABILITY_GRAPH_INDEX).exists()
-            and store.path(threat_model_analysis.THREAT_MODEL_INDEX).exists()):
+            and store.path(threat_model_analysis.THREAT_MODEL_INDEX).exists()
+            and store.path(semantic.SEMANTIC_PATH_INDEX).exists()):
         return {"rebuilt": False, "graph": capability.load_capability_graph(store),
                 "candidates": capability.load_capability_candidates(store),
+                "semantic": semantic.load_semantic_evidence(store),
                 "threat_model": threat_model_analysis.load_threat_model(
                     ctx.root, ctx.cfg.name)}
 
@@ -453,13 +456,15 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
         return {"rebuilt": True,
                 "graph": capability.load_capability_graph(store),
                 "candidates": capability.load_capability_candidates(store),
+                "semantic": semantic.load_semantic_evidence(store),
                 "threat_model": threat_model_analysis.load_threat_model(
                     ctx.root, ctx.cfg.name),
                 "root": str(target_root)}
     except Exception as exc:  # pragma: no cover - autonomous is best-effort
         return {"rebuilt": False,
                 "error": "%s: %s" % (type(exc).__name__, exc),
-                "graph": {}, "candidates": [], "threat_model": {}}
+                "graph": {}, "candidates": [], "semantic": {},
+                "threat_model": {}}
 
 
 class AutoCtx:

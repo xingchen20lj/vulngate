@@ -48,6 +48,7 @@
 | 31 | 主动研究议程与有限预算分配 | 已实现（bounded information-gain agenda） | `research-agenda-v1`、`research-agenda` CLI、S8 agenda、scheduler exact-match signal | 将 strategy 的证据债务转成 selected/deferred/hold 队列，显式记录 expected information gain、estimated cost、prerequisites 和 surface diversity；只改变下一轮调度，不改变候选、CVSS、G4/G5 |
 | 32 | 主动议程执行反馈与预算闭环 | 已实现（bounded agenda outcome feedback） | `research-agenda-outcome-v1`、`research-agenda-outcomes` CLI、S8 outcome、下一轮 agenda outcome fields | 将上一轮 selected 队列与实际 schedule、S4/S8 观测对齐，区分 new-information、falsifier、no-new-information、environment-gap、not-executed；用收益反馈调整下一轮优先级，不改变候选、CVSS、G4/G5 |
 | 33 | 结果自适应研究预算分配 | 已实现（bounded outcome-cost adaptive budget） | `research-budget-v1`、`research-budget` CLI、S8 surface budget、agenda budget hints、replay pack provenance | 按 research surface 汇总成本、信息增益、环境缺口和无信息重复；产生 recovery/exploit/explore/cooldown 策略并影响下一轮有限预算，保留探索与假设，不改变候选、CVSS、G4/G5 |
+| 34 | 语义路径证据与有限同符号数据流 | 已实现（bounded semantic path evidence） | `semantic-path-evidence-v1`、`semantic-path-evidence.json`、`semantic-path-candidates.json`、`semantic-paths` CLI | 区分控制在 sink 前/后/同一行及语义块关系；对同符号参数/简单别名给出 direct/propagated/not-traced，跨符号明确 unresolved；不复制源码、不升级 candidate/CVSS/G4/G5 |
 
 ## 已实现基础：可证伪实验规划
 
@@ -523,3 +524,13 @@ S2→S4→S8 的单向契约：
 - 策略固定分为 `recover-environment`、`exploit-high-yield`、`explore-undercovered`、`continue-balanced` 和 `cooldown-low-yield`。环境缺口获得有限恢复权重，连续无信息项降温但不删除，生产性研究面得到小幅 exploitation 权重，未观察研究面保留探索机会；
 - S8 同时写入 target/round `research-budget.json`，下一轮 `research-agenda-v1` 只消费其中的 surface hint、bounded priority delta 和 cap hint；`agent_cli.py research-budget <target> --workspace <audit-dir> [--round N] [--rebuild] [--slots N] [--json]` 可检查或重建；
 - budget、agenda、replay pack 和 scheduler 仍是 `claim_status=not-a-finding`，策略只影响研究顺序和预算，不确认漏洞、不改变 candidate status、CVSS、G4 或 G5。样本不足时保持默认探索策略，策略合并按 round 去重并可重复回放。
+
+## 阶段 34 初步实现：语义路径证据与有限同符号数据流
+
+早期 control map 只能回答“某类控制是否出现在启发式调用路径上”，而 source→sink 图只能回答“入口和危险操作是否被近似连起来”。这两个答案对顶级审计仍不够：控制可能在 sink 之后、处于另一分支，或者只保护了不同的主体；同一 handler 内的输入也可能经过一层简单别名后才进入 sink。阶段 34 增加一个保守的、源码局部的确定性证据层：
+
+- `semantic-path-evidence-v1` 对每条 flow 保存 entry/sink、路径、控制行与 sink 的相对关系：`before-sink`、`after-sink`、`same-line` 或 `cross-symbol-unverified`，并用 brace/indent 计算 `same-lexical-block`、`enclosing-block`、`nested-block` 等有限 scope 关系；
+- 当 entry/source symbol 与 sink symbol 相同时，从符号签名提取参数，对简单 `lhs = rhs` / `lhs := rhs` 做有界别名追踪，区分 `direct`、`propagated` 和 `not-traced`；跨符号一律保留为 `cross-symbol-unresolved`，不因为静态图连通就假设参数已传递；
+- 对 static control map 已经认为存在控制、但顺序/语义块未对齐的路径，生成 `semantic-control-order`；对中高风险同符号路径未能闭合参数到 sink 的线索，生成 `semantic-dataflow-gap`。这些候选进入 S2 静态候选池，并保持稳定 ID、`requires_manual_dataflow=true` 和明确代码位置；
+- 产物不保存源码原文，不建模 branch dominance、类型、virtual dispatch、DI、reflection、callback 或 sanitizer 语义。所有行、summary 和候选保持 `claim_status=not-a-finding`、`confidence=heuristic-nearby`、`evidence_type=static-inferred`，S3/S4 仍必须补真实路径、授权和 typed-effect 证据；
+- 可用 `python3 scripts/agent_cli.py semantic-paths <target> --workspace <audit-dir> --show-candidates --json` 查看。覆盖索引发现缺少该 artifact 时会自动重建，autonomous/config-driven 两条管线使用同一份候选源。

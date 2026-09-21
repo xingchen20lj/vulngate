@@ -193,15 +193,16 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
     they do.  Without this check an upgraded checkout silently keeps scoring
     flows it never computed.
 
-    PR4's control map and differential index join that required set for the same
-    reason: a store built by PR3 has flows but no control verdicts, and a
-    scheduler that silently scored without them would look identical to one that
-    had them.
+    PR4's control map, differential index and semantic path evidence join that
+    required set for the same reason: a store built by an earlier phase has
+    flows but no complete path evidence, and a scheduler that silently scored
+    without it would look identical to one that had it.
     """
     from ..analysis import controls as ctl
     from ..analysis import capability_graph as capability
     from ..analysis import coverage as cov
     from ..analysis import differential as diff
+    from ..analysis import semantic_paths as semantic
     from ..analysis import threat_model as threat_model_analysis
     from ..analysis.inventory import CoverageStore, build_inventory, persist_inventory
 
@@ -209,6 +210,7 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
     required = ("source-inventory", "flow-index", "symbol-index",
                 ctl.CONTROL_MAP_INDEX, diff.DIFFERENTIAL_INDEX,
                 capability.CAPABILITY_GRAPH_INDEX,
+                semantic.SEMANTIC_PATH_INDEX,
                 threat_model_analysis.THREAT_MODEL_INDEX)
     missing = [name for name in required if not store.path(name).exists()]
     built = False
@@ -227,6 +229,7 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
     control_summary = (store.read(ctl.CONTROL_MAP_INDEX) or {}).get("summary") or {}
     differential_summary = (store.read(diff.DIFFERENTIAL_INDEX) or {}).get("summary") or {}
     capability_summary = (store.read(capability.CAPABILITY_GRAPH_INDEX) or {}).get("summary") or {}
+    semantic_summary = (store.read(semantic.SEMANTIC_PATH_INDEX) or {}).get("summary") or {}
     threat_model_summary = (store.read(
         threat_model_analysis.THREAT_MODEL_INDEX) or {}).get("summary") or {}
     if control_summary:
@@ -255,6 +258,17 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
             "complete_hypotheses": capability_summary.get("complete_hypotheses"),
             "partial_hypotheses": capability_summary.get("partial_hypotheses"),
             "truncated": capability_summary.get("truncated"),
+        }
+    if semantic_summary:
+        info["semantic_paths"] = {
+            "flows": semantic_summary.get("flows"),
+            "same_symbol_flows": semantic_summary.get("same_symbol_flows"),
+            "taint_status": semantic_summary.get("taint_status"),
+            "semantic_verdicts": semantic_summary.get("semantic_verdicts"),
+            "order_gap_flows": semantic_summary.get("order_gap_flows"),
+            "dataflow_gap_flows": semantic_summary.get("dataflow_gap_flows"),
+            "candidates": semantic_summary.get("candidates"),
+            "claim_status": semantic_summary.get("claim_status", "not-a-finding"),
         }
     if threat_model_summary:
         info["threat_model"] = {
@@ -418,6 +432,7 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
     # auditable without duplicating the graph-building logic.
     try:
         from ..analysis import capability_graph as capability
+        from ..analysis import semantic_paths as semantic
         from ..analysis.inventory import CoverageStore
         coverage_store = CoverageStore(ctx.workspace, ctx.target)
         ctx.store.write_artifact(
@@ -429,6 +444,12 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
         ctx.store.write_artifact(
             "S1", "threat-model.json",
             threat_model_analysis.load_threat_model(ctx.workspace, ctx.target))
+        ctx.store.write_artifact(
+            "S1", "semantic-path-evidence.json",
+            semantic.load_semantic_evidence(coverage_store))
+        ctx.store.write_artifact(
+            "S1", "semantic-path-candidates.json",
+            semantic.load_semantic_candidates(coverage_store))
     except Exception as exc:  # pragma: no cover - evidence mirror is best-effort
         ctx.store.write_artifact("S1", "capability-graph-error.json", {
             "error": "%s: %s" % (type(exc).__name__, exc)})
@@ -453,9 +474,10 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
     fix-completeness candidates this stage just generated, and the next round
     re-schedules the same pool against coverage that has since moved.
 
-    PR4 adds the index-derived candidates (spec §11/§12) to that same pool: an
-    unguarded path and a sibling control differential are deterministic
-    artifacts with a citable ``file:line``, and the spec asks for them to be
+    PR4 adds the index-derived candidates (spec §11/§12 and semantic path
+    evidence) to that same pool: an unguarded path, a sibling control
+    differential, or a source-local order/data-flow gap is a deterministic
+    artifact with a citable ``file:line``, and the spec asks for them to be
     promoted automatically rather than left in a JSON file nobody reads.
     """
     patch_history = ctx.store.read_artifact("S1", "security-fix-history.json") or []

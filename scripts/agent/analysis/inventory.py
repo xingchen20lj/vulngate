@@ -22,6 +22,7 @@ Storage layout follows spec §3::
     ├── sibling-groups.json      differential-index.json        (PR4, spec §12)
     ├── differential-candidates.json
     ├── capability-graph.json    capability-candidates.json     (research paths)
+    ├── semantic-path-evidence.json semantic-path-candidates.json (path evidence)
     ├── threat-model.json        (attacker-path / trust-boundary research view)
     ├── research-strategy.json   (cross-artifact S2 research agenda)
     ├── research-agenda.json     (bounded active research queue)
@@ -50,6 +51,7 @@ from . import capability_graph as capability_analysis
 from . import controls as control_map
 from . import differential as differential_analysis
 from . import models
+from . import semantic_paths as semantic_path_analysis
 from . import threat_model as threat_model_analysis
 from .callgraph import build_call_graph
 from .dataflow import build_flow_index
@@ -697,6 +699,9 @@ class InventoryResult:
     #: Bounded capability-primitive graph and its S2 research candidates.
     capability_graph: Dict[str, Any] = field(default_factory=dict)
     capability_candidates: List[Dict[str, Any]] = field(default_factory=list)
+    #: Bounded source-local order and same-symbol data-flow evidence.
+    semantic_path_evidence: Dict[str, Any] = field(default_factory=dict)
+    semantic_path_candidates: List[Dict[str, Any]] = field(default_factory=list)
     symbol_read_failures: Dict[str, str] = field(default_factory=dict)
     callgraph_summary: Dict[str, Any] = field(default_factory=dict)
     flow_summary: Dict[str, Any] = field(default_factory=dict)
@@ -771,6 +776,8 @@ class InventoryResult:
             "differential_candidates": len(self.differential_candidates),
             "capability_graph": self.capability_graph.get("summary", {}),
             "capability_candidates": len(self.capability_candidates),
+            "semantic_paths": self.semantic_path_evidence.get("summary", {}),
+            "semantic_path_candidates": len(self.semantic_path_candidates),
             "records_relinked": self.relinked,
         }
 
@@ -795,6 +802,8 @@ class InventoryResult:
             "control_map": self.control_map,
             "differential": self.differential,
             "capability_graph": self.capability_graph,
+            "semantic_path_evidence": self.semantic_path_evidence,
+            "semantic_path_candidates": self.semantic_path_candidates,
             "symbol_read_failures": dict(self.symbol_read_failures),
         }
 
@@ -845,6 +854,8 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
     diff_candidates: List[Dict[str, Any]] = []
     capability_dict: Dict[str, Any] = {}
     capability_candidates: List[Dict[str, Any]] = []
+    semantic_dict: Dict[str, Any] = {}
+    semantic_candidates: List[Dict[str, Any]] = []
     if with_flows:
         symbol_records, read_failures = extract_symbols(root, production_rels, flt)
         # Replace PR1's ``<file>#<nearest-declaration>`` hint with the real
@@ -879,6 +890,10 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
         capability_dict = capability_analysis.build_capability_graph(
             entries, sinks, flows, controls)
         capability_candidates = list(capability_dict.get("candidates") or [])
+        semantic_dict = semantic_path_analysis.build_semantic_path_evidence(
+            root, entries, sinks, flows, controls, symbol_records,
+            control_map=cmap)
+        semantic_candidates = list(semantic_dict.get("candidates") or [])
 
     entry_counts: Dict[str, int] = {}
     for entry in entries:
@@ -916,6 +931,8 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
         differential_candidates=diff_candidates,
         capability_graph=capability_dict,
         capability_candidates=capability_candidates,
+        semantic_path_evidence=semantic_dict,
+        semantic_path_candidates=semantic_candidates,
         relinked=relinked,
         non_source_files=universe.non_source_files,
         scanned_files=universe.scanned_files,
@@ -976,6 +993,13 @@ def persist_inventory(store: CoverageStore, result: InventoryResult,
         written[capability_analysis.CAPABILITY_CANDIDATE_INDEX] = str(
             store.write(capability_analysis.CAPABILITY_CANDIDATE_INDEX,
                         result.capability_candidates))
+    if result.semantic_path_evidence:
+        written[semantic_path_analysis.SEMANTIC_PATH_INDEX] = str(
+            store.write(semantic_path_analysis.SEMANTIC_PATH_INDEX,
+                        result.semantic_path_evidence))
+        written[semantic_path_analysis.SEMANTIC_CANDIDATE_INDEX] = str(
+            store.write(semantic_path_analysis.SEMANTIC_CANDIDATE_INDEX,
+                        result.semantic_path_candidates))
     # The threat model is a deterministic join of the inventory, control map,
     # and capability graph.  Persist it beside the source ledger so the
     # scheduler and both pipeline drivers consume the same attacker-path view.
@@ -1026,6 +1050,10 @@ def load_inventory(store: CoverageStore) -> Dict[str, Any]:
             capability_analysis.CAPABILITY_GRAPH_INDEX) or {},
         capability_analysis.CAPABILITY_CANDIDATE_INDEX: store.read_records(
             capability_analysis.CAPABILITY_CANDIDATE_INDEX),
+        semantic_path_analysis.SEMANTIC_PATH_INDEX: store.read(
+            semantic_path_analysis.SEMANTIC_PATH_INDEX) or {},
+        semantic_path_analysis.SEMANTIC_CANDIDATE_INDEX: store.read_records(
+            semantic_path_analysis.SEMANTIC_CANDIDATE_INDEX),
         threat_model_analysis.THREAT_MODEL_INDEX: threat_model_analysis.load_threat_model(
             store.workspace, store.target),
         "inventory-summary": store.read("inventory-summary") or {},

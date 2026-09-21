@@ -25,7 +25,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import (HTTPRedirectHandler, ProxyHandler, Request,
+                            build_opener)
 import ipaddress
 
 from ..sandbox.approval import ApprovalGate
@@ -402,7 +403,11 @@ class ServiceLifecycle:
             if not info.get("valid"):
                 return {"kind": "url", "ready": False, "status": "policy-denied"}
             request = Request(self.health_url, headers={"User-Agent": "VulnGate-HealthCheck/1"})
-            opener = build_opener(_NoRedirect())
+            # A PoC/service healthcheck is explicitly loopback-only.  Do not
+            # let the host's proxy environment turn a local probe into an
+            # outbound proxy request (or make a healthy local service look
+            # unavailable on CI/macOS hosts with forced proxies).
+            opener = build_opener(_NoRedirect(), ProxyHandler({}))
             try:
                 with opener.open(request, timeout=self.health_timeout) as response:
                     code = int(response.getcode() or 0)

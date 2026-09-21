@@ -213,6 +213,19 @@ S1 中包含授权边界和危险 Sink 的启发式 Source→Sink 路径会写�
 `heuristic-nearby` / `requires_manual_dataflow=true`，只能作为审计和 PoC
 验证任务，不能直接升级为漏洞结论。
 
+## 语义路径证据层
+
+控制图只能证明控制出现在启发式路径上，不能证明它在 sink 之前、处于同一分支或绑定了正确主体。语义路径层在此基础上增加
+`semantic-path-evidence-v1`：记录 `before-sink`、`after-sink`、`same-line`、`cross-symbol-unverified` 控制关系及有限的
+brace/indent 语义块关系；当入口与 sink 位于同一符号时，再对参数和简单别名做 `direct` / `propagated` / `not-traced`
+追踪，跨符号则明确记为 `cross-symbol-unresolved`。
+
+该层不是编译器或严格证明器，不建模 branch dominance、类型、virtual dispatch、DI、reflection、callback 与 sanitizer
+语义；不复制源码原文，所有记录保持 `claim_status=not-a-finding`，候选携带 `requires_manual_dataflow=true`，只能用于
+S2 排序和 S3/S4 的下一步验证。产物为 `state/<target>/coverage/semantic-path-evidence.json` 与
+`semantic-path-candidates.json`，可用 `python3 scripts/agent_cli.py semantic-paths <target> --workspace <audit-dir> --json`
+查看。
+
 ## 两种运行模式
 
 | 模式 | 推理方 | 配置 | 典型用途 |

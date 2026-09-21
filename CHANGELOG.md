@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Added deterministic `semantic-path-evidence-v1` and
+  `semantic-path-candidates.json`. S1 now records bounded control-order
+  evidence and same-symbol parameter/alias reachability, while leaving
+  cross-symbol data flow, branch dominance, and all claim promotion to S3/S4.
+- Added `agent_cli.py semantic-paths` and merged semantic path leads into the
+  static S2 candidate pool.
+
+### Fixed
+
+- Loopback service healthchecks now ignore inherited proxy environment
+  variables, so a forced host proxy cannot turn a healthy local S4 service into
+  a false `precondition-unavailable` result.
+
 ## [1.2.0] - 2026-09-21
 
 ### Added

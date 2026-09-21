@@ -1312,7 +1312,8 @@ def cmd_coverage(args: argparse.Namespace) -> int:
 
     need_build = args.rebuild or any(
         not store.path(name).exists()
-        for name in ("source-inventory", "symbol-index", "flow-index"))
+        for name in ("source-inventory", "symbol-index", "flow-index",
+                     "semantic-path-evidence"))
     if need_build:
         root = Path(args.root).resolve() if args.root else (
             workspace / "targets" / target)
@@ -1345,6 +1346,7 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     print(cov.render_coverage_text(summary, args.lang, gap_limit=1))
     callgraph_summary = store.read("call-graph-summary") or {}
     flow_summary = store.read("flow-summary") or {}
+    semantic_summary = (store.read("semantic-path-evidence") or {}).get("summary") or {}
     if callgraph_summary or flow_summary:
         print("\n%s" % ("跨过程分析" if args.lang == "zh" else "Cross-procedural analysis"))
         print("─" * 46)
@@ -1366,6 +1368,17 @@ def cmd_coverage(args: argparse.Namespace) -> int:
             if flow_summary.get("truncated"):
                 print("  !! flow index truncated: %s flows dropped (--max-flows)"
                       % flow_summary.get("dropped_flows", 0))
+    if semantic_summary:
+        print("\n%s" % ("语义路径证据" if args.lang == "zh"
+                        else "Semantic path evidence"))
+        print("─" * 46)
+        print("  flows %s  same-symbol %s  candidates %s"
+              % (semantic_summary.get("flows", 0),
+                 semantic_summary.get("same_symbol_flows", 0),
+                 semantic_summary.get("candidates", 0)))
+        print("  taint %s  verdicts %s"
+              % (semantic_summary.get("taint_status") or {},
+                 semantic_summary.get("semantic_verdicts") or {}))
     if args.schedule:
         from agent.analysis import scheduler as sched
         plan_payload = sched.load_schedule(store)
@@ -1713,6 +1726,50 @@ def cmd_capability(args: argparse.Namespace) -> int:
             print("  %-16s %-42s missing=%s" % (
                 candidate.get("candidate_id", ""),
                 candidate.get("chain_equation", ""), missing))
+    if rebuilt is not None:
+        print("\n[index rebuilt from %s]" % rebuilt["root"])
+    return 0
+
+
+def cmd_semantic_paths(args: argparse.Namespace) -> int:
+    """Show source-local path order and bounded same-symbol data-flow leads."""
+    from agent.analysis import semantic_paths as semantic
+
+    try:
+        workspace, store, rebuilt, _ = _ensure_coverage_analysis(
+            args, (semantic.SEMANTIC_PATH_INDEX,))
+    except FileNotFoundError as exc:
+        _out({"error": "target source root not found", "root": str(exc),
+              "hint": "pass --root <src root> (with --rebuild) or run S1 first"})
+        return 2
+
+    evidence = semantic.load_semantic_evidence(store)
+    candidates = semantic.load_semantic_candidates(store)
+    if args.limit_candidates:
+        candidates = candidates[:args.limit_candidates]
+    payload: Dict[str, Any] = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "summary": evidence.get("summary") or {},
+        "candidates": candidates,
+        "claim_status": evidence.get("claim_status", "not-a-finding"),
+        "limitations": evidence.get("limitations") or [],
+    }
+    if rebuilt is not None:
+        payload["rebuilt"] = rebuilt
+    if args.json:
+        payload["flows"] = (evidence.get("flows") or [])[:max(0, args.limit)]
+        _out(payload)
+        return 0
+
+    print(semantic.render_semantic_paths_text(evidence, args.lang, limit=args.limit))
+    if args.show_candidates and not args.json:
+        print("\n%s" % ("待验证线索详情" if args.lang == "zh"
+                        else "Verification lead details"))
+        print("─" * 52)
+        for candidate in candidates[:max(0, args.limit)]:
+            print("  %-22s %s" % (candidate.get("candidate_id", ""),
+                                  candidate.get("hypothesis", "")))
     if rebuilt is not None:
         print("\n[index rebuilt from %s]" % rebuilt["root"])
     return 0
@@ -2392,6 +2449,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_analysis_args(cap)
     cap.set_defaults(fn=cmd_capability)
+
+    sem = sub.add_parser(
+        "semantic-paths",
+        help="source-local control-order and same-symbol data-flow evidence; "
+             "all outputs are research leads, not findings",
+    )
+    _add_analysis_args(sem)
+    sem.set_defaults(fn=cmd_semantic_paths)
 
     tm = sub.add_parser(
         "threat-model",

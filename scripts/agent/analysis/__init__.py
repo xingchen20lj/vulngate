@@ -44,5 +44,6 @@ __all__ = [
     "languages",
     "models",
     "scheduler",
+    "semantic_paths",
     "symbols",
 ]

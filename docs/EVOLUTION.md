@@ -1,7 +1,33 @@
 # Feature evolution
 
-VulnGate 1.1.0 expands the audit engine while keeping the host-agent and
+VulnGate 1.2.0 expands the audit engine while keeping the host-agent and
 deterministic-executor boundary intact.
+
+## Unreleased semantic path evidence
+
+The next analysis layer closes a specific gap in the earlier heuristic control
+map: path membership did not say whether a control occurred before the sink or
+whether a same-symbol input token reached the sink argument. S1 now persists
+`semantic-path-evidence-v1` and `semantic-path-candidates.json` beside the
+existing coverage indices. It records bounded control alignment
+(`before-sink`, `after-sink`, `same-line`, or `cross-symbol-unverified`), a
+brace/indent lexical-scope relation, and a same-symbol parameter/alias result
+(`direct`, `propagated`, `not-traced`, or `cross-symbol-unresolved`).
+
+The layer is deliberately not a compiler or a proof engine. It does not model
+branch dominance, types, virtual dispatch, DI, reflection, callbacks, or
+sanitizer semantics. Every row is `claim_status=not-a-finding`, every
+candidate carries `requires_manual_dataflow=true`, and only S3/S4 can establish
+reachability or typed effect. Use:
+
+```bash
+python3 scripts/agent_cli.py semantic-paths <target> \
+  --workspace <audit-dir> --show-candidates --json
+```
+
+The candidate pool consumes these leads after the control, differential, and
+capability candidates. The order is deterministic and the raw source text is
+not copied into the artifact.
 
 ## Analysis coverage
 
