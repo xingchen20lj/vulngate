@@ -29,6 +29,7 @@ Storage layout follows spec §3::
     ├── semantic-ast-evidence.json semantic-ast-candidates.json (Python AST evidence)
     ├── semantic-transform-evidence.json semantic-transform-candidates.json (transform binding)
     ├── semantic-python-binding-evidence.json semantic-python-binding-candidates.json (AST value binding)
+    ├── evidence-provenance.json (raw/derived evidence lineage and correlation)
     ├── threat-model.json        (attacker-path / trust-boundary research view)
     ├── research-strategy.json   (cross-artifact S2 research agenda)
     ├── research-agenda.json     (bounded active research queue)
@@ -64,6 +65,7 @@ from . import semantic_controlflow as semantic_controlflow_analysis
 from . import semantic_ast as semantic_ast_analysis
 from . import semantic_transforms as semantic_transform_analysis
 from . import semantic_bindings as semantic_binding_analysis
+from . import evidence_provenance as evidence_provenance_analysis
 from . import threat_model as threat_model_analysis
 from .callgraph import build_call_graph
 from .dataflow import build_flow_index
@@ -726,6 +728,8 @@ class InventoryResult:
     semantic_transform_candidates: List[Dict[str, Any]] = field(default_factory=list)
     semantic_binding_evidence: Dict[str, Any] = field(default_factory=dict)
     semantic_binding_candidates: List[Dict[str, Any]] = field(default_factory=list)
+    #: Unified lineage for raw facts, derived semantic rows, and candidates.
+    evidence_provenance: Dict[str, Any] = field(default_factory=dict)
     symbol_read_failures: Dict[str, str] = field(default_factory=dict)
     callgraph_summary: Dict[str, Any] = field(default_factory=dict)
     flow_summary: Dict[str, Any] = field(default_factory=dict)
@@ -814,6 +818,7 @@ class InventoryResult:
             "semantic_transform_candidates": len(self.semantic_transform_candidates),
             "semantic_bindings": self.semantic_binding_evidence.get("summary", {}),
             "semantic_binding_candidates": len(self.semantic_binding_candidates),
+            "evidence_provenance": self.evidence_provenance.get("summary", {}),
             "records_relinked": self.relinked,
         }
 
@@ -852,6 +857,7 @@ class InventoryResult:
             "semantic_transform_candidates": self.semantic_transform_candidates,
             "semantic_binding_evidence": self.semantic_binding_evidence,
             "semantic_binding_candidates": self.semantic_binding_candidates,
+            "evidence_provenance": self.evidence_provenance,
             "symbol_read_failures": dict(self.symbol_read_failures),
         }
 
@@ -916,6 +922,7 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
     semantic_transform_candidates: List[Dict[str, Any]] = []
     semantic_binding_dict: Dict[str, Any] = {}
     semantic_binding_candidates: List[Dict[str, Any]] = []
+    evidence_provenance_dict: Dict[str, Any] = {}
     if with_flows:
         symbol_records, read_failures = extract_symbols(root, production_rels, flt)
         # Replace PR1's ``<file>#<nearest-declaration>`` hint with the real
@@ -978,6 +985,33 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
                 root, semantic_transform_dict, symbol_records))
         semantic_binding_candidates = list(
             semantic_binding_dict.get("candidates") or [])
+        evidence_provenance_dict = evidence_provenance_analysis.build_evidence_provenance(
+            root=root,
+            entries=entries, sinks=sinks, controls=controls, symbols=symbol_records,
+            flows=flows,
+            artifacts={
+                "semantic_paths": semantic_dict,
+                "semantic_guards": semantic_guard_dict,
+                "semantic_calls": semantic_call_dict,
+                "semantic_controlflow": semantic_controlflow_dict,
+                "semantic_ast": semantic_ast_dict,
+                "semantic_transforms": semantic_transform_dict,
+                "semantic_bindings": semantic_binding_dict,
+            },
+            candidates={
+                "control-map": control_candidates,
+                "differential": diff_candidates,
+                "capability-graph": capability_candidates,
+                "semantic-paths": semantic_candidates,
+                "semantic-guards": semantic_guard_candidates,
+                "semantic-calls": semantic_call_candidates,
+                "semantic-controlflow": semantic_controlflow_candidates,
+                "semantic-ast": semantic_ast_candidates,
+                "semantic-transforms": semantic_transform_candidates,
+                "semantic-python-binding": semantic_binding_candidates,
+            },
+            target=target,
+        )
 
     entry_counts: Dict[str, int] = {}
     for entry in entries:
@@ -1029,6 +1063,7 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
         semantic_transform_candidates=semantic_transform_candidates,
         semantic_binding_evidence=semantic_binding_dict,
         semantic_binding_candidates=semantic_binding_candidates,
+        evidence_provenance=evidence_provenance_dict,
         relinked=relinked,
         non_source_files=universe.non_source_files,
         scanned_files=universe.scanned_files,
@@ -1138,6 +1173,10 @@ def persist_inventory(store: CoverageStore, result: InventoryResult,
         written[semantic_binding_analysis.SEMANTIC_BINDING_CANDIDATE_INDEX] = str(
             store.write(semantic_binding_analysis.SEMANTIC_BINDING_CANDIDATE_INDEX,
                         result.semantic_binding_candidates))
+    if result.evidence_provenance:
+        written[evidence_provenance_analysis.EVIDENCE_PROVENANCE_INDEX] = str(
+            store.write(evidence_provenance_analysis.EVIDENCE_PROVENANCE_INDEX,
+                        result.evidence_provenance))
     # The threat model is a deterministic join of the inventory, control map,
     # and capability graph.  Persist it beside the source ledger so the
     # scheduler and both pipeline drivers consume the same attacker-path view.
@@ -1217,6 +1256,8 @@ def load_inventory(store: CoverageStore) -> Dict[str, Any]:
             semantic_binding_analysis.SEMANTIC_BINDING_INDEX) or {},
         semantic_binding_analysis.SEMANTIC_BINDING_CANDIDATE_INDEX:
             store.read_records(semantic_binding_analysis.SEMANTIC_BINDING_CANDIDATE_INDEX),
+        evidence_provenance_analysis.EVIDENCE_PROVENANCE_INDEX: store.read(
+            evidence_provenance_analysis.EVIDENCE_PROVENANCE_INDEX) or {},
         threat_model_analysis.THREAT_MODEL_INDEX: threat_model_analysis.load_threat_model(
             store.workspace, store.target),
         "inventory-summary": store.read("inventory-summary") or {},

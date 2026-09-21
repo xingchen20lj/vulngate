@@ -432,6 +432,7 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
     from ..analysis import semantic_bindings as semantic_binding
     from ..analysis import semantic_guards as semantic_guard
     from ..analysis import semantic_paths as semantic
+    from ..analysis import evidence_provenance as evidence_provenance_analysis
     from ..analysis import threat_model as threat_model_analysis
     from ..analysis.inventory import (CoverageStore, build_inventory,
                                       load_inventory, persist_inventory)
@@ -445,7 +446,8 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
             and store.path(semantic_controlflow.SEMANTIC_CONTROLFLOW_INDEX).exists()
             and store.path(semantic_ast.SEMANTIC_AST_INDEX).exists()
             and store.path(semantic_transform.SEMANTIC_TRANSFORM_INDEX).exists()
-            and store.path(semantic_binding.SEMANTIC_BINDING_INDEX).exists()):
+            and store.path(semantic_binding.SEMANTIC_BINDING_INDEX).exists()
+            and store.path(evidence_provenance_analysis.EVIDENCE_PROVENANCE_INDEX).exists()):
         return {"rebuilt": False, "graph": capability.load_capability_graph(store),
                 "candidates": capability.load_capability_candidates(store),
                 "semantic": semantic.load_semantic_evidence(store),
@@ -461,6 +463,7 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
                 "semantic_transform_candidates": semantic_transform.load_semantic_transform_candidates(store),
                 "semantic_bindings": semantic_binding.load_semantic_binding_evidence(store),
                 "semantic_binding_candidates": semantic_binding.load_semantic_binding_candidates(store),
+                "evidence_provenance": evidence_provenance_analysis.load_evidence_provenance(store),
                 "threat_model": threat_model_analysis.load_threat_model(
                     ctx.root, ctx.cfg.name)}
 
@@ -493,6 +496,7 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
                 "semantic_transform_candidates": semantic_transform.load_semantic_transform_candidates(store),
                 "semantic_bindings": semantic_binding.load_semantic_binding_evidence(store),
                 "semantic_binding_candidates": semantic_binding.load_semantic_binding_candidates(store),
+                "evidence_provenance": evidence_provenance_analysis.load_evidence_provenance(store),
                 "threat_model": threat_model_analysis.load_threat_model(
                     ctx.root, ctx.cfg.name),
                 "root": str(target_root)}
@@ -512,6 +516,7 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
                 "semantic_transform_candidates": [],
                 "semantic_bindings": {},
                 "semantic_binding_candidates": [],
+                "evidence_provenance": {},
                 "threat_model": {}}
 
 
@@ -1727,6 +1732,8 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                        capability_state.get("semantic_bindings") or {})
     ctx.write_artifact(round_no, "S1", "semantic-python-binding-candidates.json",
                        capability_state.get("semantic_binding_candidates") or [])
+    ctx.write_artifact(round_no, "S1", "evidence-provenance.json",
+                       capability_state.get("evidence_provenance") or {})
     if capability_state.get("error"):
         ctx.write_artifact(round_no, "S1", "capability-graph-error.json", {
             "error": capability_state["error"]})

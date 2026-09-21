@@ -142,6 +142,43 @@ python3 scripts/agent_cli.py semantic-bindings <target> \
   --workspace <audit-dir> --show-candidates --json
 ```
 
+### Evidence provenance and correlation
+
+The layered static passes share a deterministic `evidence-provenance-v1`
+artifact at `state/<target>/coverage/evidence-provenance.json`. It joins raw
+entry/sink/control/symbol facts to flow facts, then to semantic path, call,
+guard, control-flow, AST, transform, and Python value-binding rows. Each row
+has an `evidence_id`, `source_fact_ids`, `parent_evidence_ids`,
+`independence_group`, `file`, `line`, and optional `span`; source text is not
+copied.
+
+The static candidate pool uses the same join. A candidate may retain several
+derived evidence ids, but the scheduler counts its distinct independence
+groups rather than treating each semantic restatement as an independent
+witness. Duplicate damping additionally requires a complete lineage, the same
+control and category, and a known shared verification question (transform/value
+binding, branch/CFG/AST, or subject binding). Different or unknown questions
+are not damped merely for occupying the same flow or location. Leads are not
+removed. This is provenance and scheduling metadata only: every
+record remains `claim_status=not-a-finding`, and it cannot promote a result or
+override S4/G4/G5.
+
+IDs incorporate full payload digests and source-file SHA-256 revisions. Nested
+control/guard/transform/call/taint records retain their concrete upstream links;
+`artifact_row_digest` and `artifact_field` locate them in the producer artifact.
+Missing files, facts, upstream rows and unmodeled non-semantic candidate producers
+are explicit `provenance_gaps`, not invented independent evidence. A complete
+lineage does not mean complete semantics or a validated finding. Files are read
+once per build, capped at 8 MiB/file and 64 MiB total; exceeded budgets are gaps.
+Peer lists are stored once per group, not copied quadratically per candidate.
+The snapshot is not atomic across passes; rerun with `--rebuild` after source
+changes. Both configured/autonomous S1 and native CLI scheduling use this index.
+
+```bash
+python3 scripts/agent_cli.py evidence-provenance <target> \
+  --workspace <audit-dir> --root <source-dir> --rebuild --json --limit 20
+```
+
 S8 also emits a bounded `research-strategy-guidance-v1` view. It joins only
 strategy observation metadata, the latest review status, and explicit variant
 coverage, then maps them to finite next-action classes. Guidance can adjust

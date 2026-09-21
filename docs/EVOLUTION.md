@@ -3,6 +3,35 @@
 VulnGate 1.2.0 expands the audit engine while keeping the host-agent and
 deterministic-executor boundary intact.
 
+## Unreleased evidence provenance and correlation
+
+The semantic path, guard, call, control-flow, AST, transform, and Python value
+binding passes can describe the same underlying Source→Sink fact at different
+abstraction levels. S1 now writes `evidence-provenance-v1` with deterministic
+records for raw source facts, the flow index, derived semantic rows, and static
+candidates. Each record carries `evidence_id`, `source_fact_ids`,
+`parent_evidence_ids`, `confidence`, `independence_group`, `file`, `line`, and
+`span`.
+
+Candidates remain available to S2, but correlated rows for one flow are joined
+under one independence group. The scheduler reports the number of independent
+groups separately from derived rows and applies deterministic duplicate damping
+only to complete same-group, same-control/category peers with a known shared
+verification question. Different questions on one flow are preserved. Source
+revision hashes and concrete nested-row parents make lineage auditable; missing
+sources/upstream rows remain gaps. Configured/autonomous S1 and native scheduling
+read the same persisted graph. Provenance is always
+`claim_status=not-a-finding` and cannot satisfy S4/G4/G5.
+
+The fixed-budget regression in `tests/test_evidence_provenance.py` compares the
+legacy location-only input path with provenance-aware scheduling: five same-flow
+binding leads plus one distinct branch question, two slots. Legacy selection
+spends both on binding (one repeated question); provenance selects binding and
+branch (zero repeated questions). This is a synthetic scheduling benchmark, not
+a historical-CVE recall/precision result or evidence of fewer runtime experiments
+in real projects. A 100→200 candidate check guards against quadratic peer-list
+serialization; source hashing is cached and capped at 8 MiB/file, 64 MiB/build.
+
 ## Unreleased semantic transform binding evidence
 
 The existing semantic path/control layers can show that a validation or

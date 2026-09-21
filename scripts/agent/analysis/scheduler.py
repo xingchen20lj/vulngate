@@ -37,7 +37,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import coverage as cov
 from .inventory import CoverageStore, load_inventory
@@ -1295,6 +1295,40 @@ def _score_control_gap(candidate, ctx, link):
     return 0.0, "no control dimension applicable", {}
 
 
+def candidate_evidence_signal(candidate: Mapping[str, Any]) -> Dict[str, Any]:
+    """Count provenance groups, not repeated derived evidence rows.
+
+    A semantic path, guard, CFG, AST and value-binding row may all describe
+    the same flow.  The rows remain useful for review, but they are not five
+    independent witnesses.  This helper is deliberately side-effect free so
+    tests and prompt builders can inspect the exact scheduler interpretation.
+    """
+    def strings(value):
+        if not isinstance(value, (list, tuple)):
+            return []
+        return sorted({v for v in value if isinstance(v, str) and v})
+
+    evidence_ids = strings(candidate.get("evidence_ids"))
+    groups = strings(candidate.get("independence_groups"))
+    if not groups:
+        group = str(candidate.get("independence_group") or "")
+        if group:
+            groups = [group]
+    groups = sorted(set(groups))
+    derived_count = len(evidence_ids)
+    independent_count = len(groups)
+    # Legacy/manual candidates receive no invented independence bonus. Row
+    # multiplicity and externally supplied counts never increase the score.
+    return {
+        "evidence_ids": sorted(set(evidence_ids)),
+        "independence_groups": groups,
+        "independent_evidence_count": independent_count,
+        "derived_evidence_count": max(0, derived_count),
+        "correlated_evidence_count": max(0, derived_count - independent_count),
+        "provenance_complete": bool(candidate.get("provenance_complete")),
+    }
+
+
 def _score_evidence_quality(candidate, ctx, link):
     """Monotone in evidence: absence never scores, and it cannot be gamed."""
     value = EVIDENCE_NO_LOCATION
@@ -1317,13 +1351,20 @@ def _score_evidence_quality(candidate, ctx, link):
         reason = "no file:line evidence in the candidate record"
     elif link.fallback_used:
         reason += "; linked by line window (no symbol index for the file)"
+    provenance = candidate_evidence_signal(candidate)
+    if provenance["derived_evidence_count"]:
+        reason += ("; %d source provenance group(s), %d derived row(s)" %
+                   (provenance["independent_evidence_count"],
+                    provenance["derived_evidence_count"]))
     return value, reason, {
         "code_locations": ["%s:%d" % (f, n) for f, n in link.locations],
         "indexed_files": indexed_files, "sinks": len(link.sinks),
         "flows_reaching": len(link.flows_reaching),
         "flows_on_path": len(link.flows_on_path),
         "symbols": sorted(link.symbols)[:10],
-        "line_window_fallback": link.fallback_used}
+        "line_window_fallback": link.fallback_used,
+        "provenance": provenance,
+    }
 
 
 def _score_coverage_novelty(candidate, ctx, link):
@@ -1394,7 +1435,9 @@ def _near_duplicate_of(candidate: Dict[str, Any], ctx: ScheduleContext,
                        link: Optional[LinkedRegions] = None) -> str:
     """The id this candidate duplicates, or ``""``.
 
-    Two deterministic sources, checked in this order:
+    Complete provenance peers are first compared by source group AND a known
+    verification question. Other provenance-bearing hypotheses are never
+    merged by coarse location overlap. Legacy candidates use these fallbacks:
 
     * a region already **reviewed** in an earlier round (``candidate-coverage``)
       -- re-running it spends a slot without closing a new gap;
@@ -1416,6 +1459,15 @@ def _near_duplicate_of(candidate: Dict[str, Any], ctx: ScheduleContext,
     if link is None:
         link = linked_regions(candidate, ctx)
     cid = str(candidate.get("candidate_id") or "")
+    from .evidence_provenance import research_question_key
+
+    question = research_question_key(candidate)
+    if question:
+        peers = [str(other.get("candidate_id")) for other in pool or ()
+                 if other.get("candidate_id") and str(other["candidate_id"]) < cid
+                 and research_question_key(other) == question]
+        if peers:
+            return min(peers)
     own_sinks = {str(s.get("sink_id")) for s in link.sinks}
     own_key = own_sinks or {f for f, _ in link.locations}
     if not own_key:
@@ -1426,6 +1478,10 @@ def _near_duplicate_of(candidate: Dict[str, Any], ctx: ScheduleContext,
             continue
         other_id = str(record.get("candidate_id") or "")
         if not other_id:
+            continue
+        # Old coverage rows lack a research-question key. A reviewed sink alone
+        # cannot close a different, now explicitly modeled question on it.
+        if candidate.get("provenance_schema_version") and other_id != cid:
             continue
         other = {str(x) for x in record.get("sinks") or []} or \
             {str(x) for x in record.get("files") or []}
@@ -1438,6 +1494,8 @@ def _near_duplicate_of(candidate: Dict[str, Any], ctx: ScheduleContext,
     for other_candidate in pool or ():
         other_id = str(other_candidate.get("candidate_id") or "")
         if not other_id or other_id >= cid:
+            continue
+        if candidate.get("provenance_schema_version") or other_candidate.get("provenance_schema_version"):
             continue
         other_locations = {"%s:%d" % (f, n)
                            for f, n in candidate_locations(other_candidate)}
@@ -1804,6 +1862,9 @@ def build_schedule(workspace: Path, target: str,
     """
     workspace = Path(workspace).resolve()
     store = CoverageStore(workspace, target)
+    from .evidence_provenance import enrich_candidates, load_evidence_provenance
+
+    candidates = enrich_candidates(candidates, load_evidence_provenance(store))
     # Order matters: the sweep must run *before* the context is loaded, or the
     # scores are computed against the previous round's coverage and this round
     # re-picks exactly the same candidates.  The sweep doubles as the scoring

@@ -36,6 +36,8 @@ Module map:
 ``semantic_ast`` bounded Python-AST branch and scope evidence
 ``semantic_bindings`` bounded Python-AST value-binding evidence with explicit
                        non-Python adapter gaps
+``evidence_provenance`` bounded raw/derived evidence lineage and independence
+                       correlation for the static candidate pool
 """
 
 from __future__ import annotations
@@ -47,6 +49,7 @@ __all__ = [
     "controls",
     "dataflow",
     "differential",
+    "evidence_provenance",
     "inventory",
     "languages",
     "models",

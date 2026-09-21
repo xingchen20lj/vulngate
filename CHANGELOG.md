@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added `evidence-provenance-v1` for deterministic lineage from raw source
+  facts through semantic layers to static candidates. Related path, guard,
+  call, control-flow, AST, transform, and value-binding rows now share an
+  `independence_group`, revision-bound IDs and explicit missing-parent gaps;
+  S2 keeps the leads and damps only same-control, same-question restatements,
+  without counting repeated derived rows as independent evidence. Configured,
+  autonomous and native CLI paths share the persisted graph. Fixed missing S1
+  imports that prevented semantic/threat-model evidence mirroring.
+  All provenance remains `not-a-finding` and
+  cannot change S4/G4/G5.
 - Added `semantic-python-binding-evidence-v1` and
   `semantic-python-binding-candidates.json`. The bounded Python AST adapter
   follows simple assignments, aliases, guards, exceptions, and finite branch /

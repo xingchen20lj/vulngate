@@ -58,6 +58,8 @@ Usage:
                                 [--show-candidates] [--json]
   agent_cli.py semantic-bindings <target> [--workspace <dir>] [--rebuild]
                                 [--show-candidates] [--json]
+  agent_cli.py evidence-provenance <target> [--workspace <dir>] [--rebuild]
+                                [--show-candidates] [--json]
   agent_cli.py threat-model <target> [--workspace <dir>] [--rebuild]
                                 [--json]
   agent_cli.py spawn-probe --workspace <dir> --target <name> --round <N>
@@ -1330,7 +1332,7 @@ def cmd_coverage(args: argparse.Namespace) -> int:
                      "semantic-path-evidence", "semantic-guard-evidence",
                      "semantic-call-evidence", "semantic-controlflow-evidence",
                      "semantic-ast-evidence", "semantic-transform-evidence",
-                     "semantic-python-binding-evidence"))
+                     "semantic-python-binding-evidence", "evidence-provenance"))
     if need_build:
         root = Path(args.root).resolve() if args.root else (
             workspace / "targets" / target)
@@ -1376,6 +1378,8 @@ def cmd_coverage(args: argparse.Namespace) -> int:
         "semantic-transform-evidence") or {}).get("summary") or {}
     semantic_binding_summary = (store.read(
         "semantic-python-binding-evidence") or {}).get("summary") or {}
+    provenance_summary = (store.read("evidence-provenance") or {}).get(
+        "summary") or {}
     if callgraph_summary or flow_summary:
         print("\n%s" % ("跨过程分析" if args.lang == "zh" else "Cross-procedural analysis"))
         print("─" * 46)
@@ -1480,6 +1484,14 @@ def cmd_coverage(args: argparse.Namespace) -> int:
                  semantic_binding_summary.get("candidates", 0)))
         print("  relations %s"
               % (semantic_binding_summary.get("relations") or {}))
+    if provenance_summary:
+        print("\n%s" % ("证据溯源" if args.lang == "zh"
+                        else "Evidence provenance"))
+        print("─" * 46)
+        print("  records %s  groups %s  correlated candidates %s"
+              % (provenance_summary.get("records", 0),
+                 provenance_summary.get("independence_groups", 0),
+                 provenance_summary.get("correlated_candidates", 0)))
     if args.schedule:
         from agent.analysis import scheduler as sched
         plan_payload = sched.load_schedule(store)
@@ -2145,6 +2157,53 @@ def cmd_semantic_bindings(args: argparse.Namespace) -> int:
         for candidate in candidates[:max(0, args.limit)]:
             print("  %-22s %s" % (candidate.get("candidate_id", ""),
                                   candidate.get("hypothesis", "")))
+    if rebuilt is not None:
+        print("\n[index rebuilt from %s]" % rebuilt["root"])
+    return 0
+
+
+def cmd_evidence_provenance(args: argparse.Namespace) -> int:
+    """Show raw/derived static evidence lineage and candidate correlation."""
+    from agent.analysis import evidence_provenance as provenance_analysis
+
+    try:
+        workspace, store, rebuilt, _ = _ensure_coverage_analysis(
+            args, (provenance_analysis.EVIDENCE_PROVENANCE_INDEX,))
+    except FileNotFoundError as exc:
+        _out({"error": "target source root not found", "root": str(exc),
+              "hint": "pass --root <src root> (with --rebuild) or run S1 first"})
+        return 2
+
+    provenance = provenance_analysis.load_evidence_provenance(store)
+    correlations = list(provenance.get("candidate_correlations") or [])
+    if args.limit_candidates:
+        correlations = correlations[:args.limit_candidates]
+    payload: Dict[str, Any] = {
+        "schema_version": provenance.get("schema_version"),
+        "target": args.target,
+        "workspace": str(workspace),
+        "summary": provenance.get("summary") or {},
+        "candidate_correlations": correlations,
+        "claim_status": provenance.get("claim_status", "not-a-finding"),
+        "limitations": provenance.get("limitations") or [],
+    }
+    if rebuilt is not None:
+        payload["rebuilt"] = rebuilt
+    if args.json:
+        payload["records"] = (provenance.get("records") or [])[:max(0, args.limit)]
+        _out(payload)
+        return 0
+
+    print(provenance_analysis.render_evidence_provenance_text(
+        provenance, args.lang))
+    if args.show_candidates:
+        print("\n%s" % ("相关候选组" if args.lang == "zh"
+                        else "Correlated candidate groups"))
+        print("─" * 52)
+        for row in correlations[:max(0, args.limit)]:
+            print("  %-24s %s" % (
+                row.get("independence_group", ""),
+                ", ".join(row.get("candidate_ids") or [])))
     if rebuilt is not None:
         print("\n[index rebuilt from %s]" % rebuilt["root"])
     return 0
@@ -2880,6 +2939,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_analysis_args(sb)
     sb.set_defaults(fn=cmd_semantic_bindings)
+
+    ep = sub.add_parser(
+        "evidence-provenance",
+        help="raw/derived static evidence lineage and independence correlation; "
+             "all outputs are research metadata, not findings",
+    )
+    _add_analysis_args(ep)
+    ep.set_defaults(fn=cmd_evidence_provenance)
 
     tm = sub.add_parser(
         "threat-model",

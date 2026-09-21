@@ -853,7 +853,13 @@ def static_candidates(store: Any) -> List[Dict[str, Any]]:
     from . import semantic_bindings as semantic_binding_analysis
     candidates.extend(
         semantic_binding_analysis.load_semantic_binding_candidates(store))
-    return candidates
+    # Correlate layered static leads against the persisted provenance graph.
+    # This keeps every research lead available, but gives the scheduler the
+    # information needed to damp repeated interpretations of one flow instead
+    # of treating them as independent witnesses.
+    from . import evidence_provenance as provenance_analysis
+    return provenance_analysis.enrich_candidates(
+        candidates, provenance_analysis.load_evidence_provenance(store))
 
 
 def merge_static_candidates(store: Any, candidates: Sequence[Dict[str, Any]],

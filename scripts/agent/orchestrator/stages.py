@@ -208,6 +208,7 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
     from ..analysis import semantic_ast as semantic_ast
     from ..analysis import semantic_transforms as semantic_transform
     from ..analysis import semantic_bindings as semantic_binding
+    from ..analysis import evidence_provenance as evidence_provenance_analysis
     from ..analysis import semantic_paths as semantic
     from ..analysis import threat_model as threat_model_analysis
     from ..analysis.inventory import CoverageStore, build_inventory, persist_inventory
@@ -223,6 +224,7 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
                 semantic_ast.SEMANTIC_AST_INDEX,
                 semantic_transform.SEMANTIC_TRANSFORM_INDEX,
                 semantic_binding.SEMANTIC_BINDING_INDEX,
+                evidence_provenance_analysis.EVIDENCE_PROVENANCE_INDEX,
                 threat_model_analysis.THREAT_MODEL_INDEX)
     missing = [name for name in required if not store.path(name).exists()]
     built = False
@@ -254,6 +256,8 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
         semantic_transform.SEMANTIC_TRANSFORM_INDEX) or {}).get("summary") or {}
     semantic_binding_summary = (store.read(
         semantic_binding.SEMANTIC_BINDING_INDEX) or {}).get("summary") or {}
+    provenance_summary = (store.read(
+        evidence_provenance_analysis.EVIDENCE_PROVENANCE_INDEX) or {}).get("summary") or {}
     threat_model_summary = (store.read(
         threat_model_analysis.THREAT_MODEL_INDEX) or {}).get("summary") or {}
     if control_summary:
@@ -367,6 +371,18 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
             "relations": semantic_binding_summary.get("relations"),
             "candidates": semantic_binding_summary.get("candidates"),
             "claim_status": semantic_binding_summary.get(
+                "claim_status", "not-a-finding"),
+        }
+    if provenance_summary:
+        info["evidence_provenance"] = {
+            "records": provenance_summary.get("records"),
+            "raw_source_facts": provenance_summary.get("raw_source_facts"),
+            "derived_evidence": provenance_summary.get("derived_evidence"),
+            "candidate_evidence": provenance_summary.get("candidate_evidence"),
+            "independence_groups": provenance_summary.get("independence_groups"),
+            "correlated_groups": provenance_summary.get("correlated_groups"),
+            "correlated_candidates": provenance_summary.get("correlated_candidates"),
+            "claim_status": provenance_summary.get(
                 "claim_status", "not-a-finding"),
         }
     if threat_model_summary:
@@ -538,6 +554,8 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
         from ..analysis import semantic_transforms as semantic_transform
         from ..analysis import semantic_bindings as semantic_binding
         from ..analysis import semantic_paths as semantic
+        from ..analysis import evidence_provenance as evidence_provenance_analysis
+        from ..analysis import threat_model as threat_model_analysis
         from ..analysis.inventory import CoverageStore
         coverage_store = CoverageStore(ctx.workspace, ctx.target)
         ctx.store.write_artifact(
@@ -591,6 +609,9 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
         ctx.store.write_artifact(
             "S1", "semantic-python-binding-candidates.json",
             semantic_binding.load_semantic_binding_candidates(coverage_store))
+        ctx.store.write_artifact(
+            "S1", "evidence-provenance.json",
+            evidence_provenance_analysis.load_evidence_provenance(coverage_store))
     except Exception as exc:  # pragma: no cover - evidence mirror is best-effort
         ctx.store.write_artifact("S1", "capability-graph-error.json", {
             "error": "%s: %s" % (type(exc).__name__, exc)})

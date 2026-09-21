@@ -291,6 +291,35 @@ python3 scripts/agent_cli.py semantic-bindings <target> \
   --workspace <audit-dir> --show-candidates --json
 ```
 
+## 证据溯源与相关性
+
+各个静态语义层现在共享确定性的 `evidence-provenance-v1` 产物：
+`state/<target>/coverage/evidence-provenance.json`。它把入口、sink、控制、
+符号等原始事实连接到 flow，再连接到语义路径、调用、守卫、控制流、AST、
+变换和 Python 值绑定记录。每条记录包含 `evidence_id`、
+`source_fact_ids`、`parent_evidence_ids`、`independence_group`、`file`、
+`line` 和可选 `span`，不会复制源码原文。
+
+静态候选池复用同一份关联关系。一个候选可以保留多个派生证据 id，但调度器
+只统计不同的 independence group，不会把同一条语义流的多层重复解释当成多份
+独立证据。重复降权还要求溯源完整、同一控制和类别，以及已知相同验证问题
+（变换/值绑定、分支/CFG/AST、主体绑定）。不同或未知问题不会仅因同流或同位置
+被一起降权，研究线索不会删除。该机制只是溯源和调度元数据：所有记录仍是 `claim_status=not-a-finding`，
+不能升级结论，也不能覆盖 S4/G4/G5。
+
+ID 绑定完整 payload 摘要和源码文件 SHA-256。嵌套的控制/守卫/变换/调用/污点
+记录保留具体上游关系，通过 `artifact_row_digest` 和 `artifact_field` 定位原产物。
+文件、原始事实、上游记录缺失及尚未建模的非语义候选来源都记为 `provenance_gaps`，
+不虚构独立证据。溯源完整不等于语义完整，更不等于漏洞成立。每次构建每个文件
+只读一次，限制为每文件 8 MiB、总计 64 MiB，超限明确记缺口。同源候选名单每组
+只存一份，避免逐候选复制带来的平方级膨胀。跨分析层不是原子快照，源码变化后
+须用 `--rebuild` 重建。配置式/自主式 S1 和原生命令行调度复用同一索引。
+
+```bash
+python3 scripts/agent_cli.py evidence-provenance <target> \
+  --workspace <audit-dir> --root <source-dir> --rebuild --json --limit 20
+```
+
 ## 两种运行模式
 
 | 模式 | 推理方 | 配置 | 典型用途 |
