@@ -2126,6 +2126,14 @@ def prompt_coverage_block(ctx: ScheduleContext, plan: Optional[SchedulePlan] = N
             "summary": portfolio.get("summary", {}),
             "variant_coverage": list(
                 portfolio.get("variant_coverage") or [])[:12],
+            "surface_lane_coverage": {
+                "summary": (portfolio.get("surface_lane_coverage") or {}
+                            ).get("summary", {}),
+                "lanes": list((portfolio.get("surface_lane_coverage") or {}
+                               ).get("lanes") or [])[:12],
+                "claim_status": ((portfolio.get("surface_lane_coverage") or {}
+                                  ).get("claim_status", "not-a-finding")),
+            },
             "next_probes": list(portfolio.get("next_probes") or [])[:8],
             "benchmark": portfolio.get("benchmark", {}),
             "claim_status": portfolio.get("claim_status", "not-a-finding"),

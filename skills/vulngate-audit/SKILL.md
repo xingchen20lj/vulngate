@@ -552,6 +552,17 @@ identify cross-surface or variant gaps. It must remain
 arguments, payloads, commands, stdout/stderr, credentials, CVSS, or G4/G5
 evidence; a portfolio gap is a research priority, never proof of absence.
 
+S8 also derives `surface-variant-coverage-v1` inside the project portfolio from
+the persisted lane witnesses. Group by explicit research surface, variant, and
+lane; retain bounded historical status/signal counts plus the latest status per
+research key, including state-sequence, typed-effect, safe-equivalent,
+sequence-status, cell-count, and environment-gap metadata. Only a latest
+actual `observed` lane is closed. Partial, `not-executed`, and
+`environment-gap` lanes must produce bounded next probes linked by the exact
+research key, so a stable primary replay cannot hide an unverified lane. This
+view is scheduling metadata only, remains `claim_status=not-a-finding`, and
+cannot alter candidate status, CVSS, G4, or G5.
+
 S3 residuals are carried across the same boundary as pending research debt.
 Memory stores only controlled kind/reason codes, bounded source locations, a
 probe digest, and whether a bounded probe plan exists. The portfolio emits one
@@ -1376,6 +1387,13 @@ kind/reason code、有界源码位置、probe 摘要哈希和是否存在有界 
 residual 生成一个 `state=pending-residual` 的 next probe，并把对应变体标为 unresolved，即使主
 replay 已经稳定。不能复制 residual 原文或 probe 文本；S4 仍必须用明确 falsifier 关闭 residual，
 每条记录继续保持 `claim_status=not-a-finding`。
+
+S8 还会在 project portfolio 内从已持久化的 lane witness 生成
+`surface-variant-coverage-v1`。按明确的研究面、变体和 lane 聚合，保留有界的历史状态/信号计数，以及每个
+research key 的最新状态，包括 state-sequence、typed-effect、safe-equivalent、sequence status、cell 计数和
+environment-gap 元数据。只有最新真实状态为 `observed` 的 lane 才能闭合；partial、`not-executed` 和
+`environment-gap` 必须按精确 research key 生成有界 next probe，不能让稳定的主 replay 掩盖未验证 lane。这个视图
+只用于调度，始终是 `claim_status=not-a-finding`，不能改变 candidate status、CVSS、G4 或 G5。
 
 S2 还会写出有界的 `research-strategy-v1`：目标级为
 `state/<target>/coverage/research-strategy.json`，轮次快照为 `S2/research-strategy.json`。它将

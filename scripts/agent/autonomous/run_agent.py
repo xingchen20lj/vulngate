@@ -1989,6 +1989,8 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         "unresolved_mechanisms": portfolio.get("summary", {}).get(
             "unresolved_mechanisms", 0),
         "next_probe_count": len(portfolio.get("next_probes") or []),
+        "surface_lane_coverage": (portfolio.get("surface_lane_coverage") or {}
+                                  ).get("summary", {}),
         "claim_status": "not-a-finding",
     }
     research_replay_calibration_info = {

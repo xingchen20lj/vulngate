@@ -1653,6 +1653,9 @@ def _normalize_evidence(value: Any) -> Dict[str, Any]:
     comparison = _normalize_comparison_evidence(value.get("comparison"))
     if comparison:
         out["comparison"] = comparison
+    variant_evidence = _normalize_variant_evidence(value.get("variant_evidence"))
+    if variant_evidence:
+        out["variant_evidence"] = variant_evidence
     context = _normalize_runtime_context(value.get("runtime_context"))
     if context:
         out["runtime_context"] = context

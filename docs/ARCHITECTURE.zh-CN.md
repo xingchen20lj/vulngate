@@ -57,6 +57,12 @@ S4 还会从真实 replay/differential runner row 生成 `surface-variant-eviden
 这份有界 witness 选择下一步探针，但它始终保持 `claim_status=not-a-finding`；原始输出、effect 细节、payload、命令和
 凭据不会进入 artifact，也不会改变任何闸门、CVSS 或 candidate conclusion。
 
+S8 会把这些 witness 汇聚为 project portfolio 内的 `surface-variant-coverage-v1`。它按研究面、变体和 lane
+同时保留历史信号/状态计数与最新状态，包括 state-sequence、typed-effect、safe-equivalent 和 environment-gap
+覆盖。只有最新状态确实为 observed 的 lane 才视为闭合；partial、not-executed 和 environment-gap 会生成绑定精确
+research key 的有界 next probe。调度器可以用它优先补缺失实验，但该视图始终是 `claim_status=not-a-finding`，不能改变
+candidate conclusion、CVSS 或 G4/G5。
+
 对于存在多个配置版本或修复元数据的候选，S2 还会生成
 `comparison-orchestration-v1`。S4 将比较绑定到同一个 fixture 和 lane，并把真实配对 cell 分类为 bucket
 变化、仅签名漂移、相同观测或 inconclusive；如果没有操作者提供的构建产物，源码 revision 和同族路径会明确

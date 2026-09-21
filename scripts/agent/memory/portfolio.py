@@ -38,6 +38,11 @@ from .research import (
     STATE_STABLE_REPRODUCER,
     STATE_UNSTABLE_REPLAY,
 )
+from .surface_coverage import (
+    build_surface_lane_coverage,
+    empty_surface_lane_coverage,
+    normalize_surface_lane_coverage,
+)
 
 
 PORTFOLIO_SCHEMA_VERSION = "research-portfolio-v1"
@@ -203,6 +208,24 @@ def _review_index(review_feedback: Optional[Dict[str, Any]]) -> Dict[str, Dict[s
     return latest
 
 
+def _surface_lane_probe_hints(row: Dict[str, Any]) -> List[str]:
+    """Explain the smallest bounded follow-up for one unresolved lane."""
+    status = _text(row.get("status"), 32).lower()
+    missing = set(row.get("missing_observations") or [])
+    if status == "environment-gap":
+        return ["先修复该研究面 lane 的 runtime/harness 缺口；缺口不等于安全"]
+    hints: List[str] = []
+    if "state-sequence" in missing:
+        hints.append("补齐有序 STEP/STATE 观测，不把声明当成已执行")
+    if "typed-effect" in missing:
+        hints.append("补 typed-effect 或 safe-equivalent 观测，区分中间轨迹与真实影响")
+    if "negative-baseline" in missing or "safe-equivalent" in missing:
+        hints.append("补对应 lane 的负向/安全等价基线，避免只跑正向路径")
+    if not hints:
+        hints.append("补齐该研究面 lane 的必需观测，避免把部分覆盖当成完整")
+    return _bounded_strings(hints, MAX_HINTS, 220)
+
+
 def _empty_portfolio() -> Dict[str, Any]:
     return {
         "schema_version": PORTFOLIO_SCHEMA_VERSION,
@@ -221,6 +244,7 @@ def _empty_portfolio() -> Dict[str, Any]:
         },
         "dimensions": {dimension: [] for dimension in DIMENSIONS},
         "variant_coverage": [],
+        "surface_lane_coverage": empty_surface_lane_coverage(),
         "next_probes": [],
         "benchmark": {},
         "claim_status": PORTFOLIO_CLAIM_STATUS,
@@ -425,6 +449,59 @@ def build_research_portfolio(
                 "claim_status": PORTFOLIO_CLAIM_STATUS,
             })
 
+    surface_lane_coverage = build_surface_lane_coverage(memory)
+    lane_probe_keys = set()
+    for lane_row in surface_lane_coverage.get("lanes") or []:
+        if not isinstance(lane_row, dict):
+            continue
+        lane_status = _text(lane_row.get("status"), 32).lower()
+        if lane_status == "observed":
+            continue
+        if lane_status == "environment-gap":
+            lane_state = STATE_ENVIRONMENT_GAP
+            priority = 5
+        elif lane_status == "partial":
+            lane_state = STATE_INCONCLUSIVE
+            priority = 4
+        else:
+            lane_state = STATE_INCONCLUSIVE
+            priority = 3
+        hints = _surface_lane_probe_hints(lane_row)
+        for ref in lane_row.get("entry_refs") or []:
+            if not isinstance(ref, dict):
+                continue
+            research_key = _text(ref.get("research_key"), MAX_KEY)
+            if not research_key:
+                continue
+            probe_key = (research_key, lane_row.get("variant_id"),
+                         lane_row.get("lane"))
+            if probe_key in lane_probe_keys:
+                continue
+            lane_probe_keys.add(probe_key)
+            next_candidates.append({
+                "research_key": research_key,
+                "candidate_id": _text(ref.get("candidate_id"), 120),
+                "residual_id": "",
+                "residual_kind": "",
+                "residual_reason_code": "",
+                "research_surface": _text(lane_row.get("surface"), 32),
+                "target_type": "",
+                "attack_class": "",
+                "variant": [_text(lane_row.get("variant_id"), 100)],
+                "precondition_class": "",
+                "state": lane_state,
+                "round": _safe_int(lane_row.get("latest_round"), 0),
+                "priority": priority,
+                "review_status": "",
+                "reason_code": "surface-lane-witness",
+                "surface_variant_id": _text(
+                    lane_row.get("variant_id"), 100),
+                "surface_lane": _text(lane_row.get("lane"), 24),
+                "lane_status": lane_status,
+                "next_probe_hints": hints,
+                "claim_status": PORTFOLIO_CLAIM_STATUS,
+            })
+
     def dimension_rows(dimension: str) -> List[Dict[str, Any]]:
         rows = []
         for value, bucket in dimensions[dimension].items():
@@ -486,6 +563,7 @@ def build_research_portfolio(
         },
         "dimensions": dimension_output,
         "variant_coverage": variant_coverage,
+        "surface_lane_coverage": surface_lane_coverage,
         "next_probes": next_candidates[:MAX_NEXT_PROBES],
         "benchmark": benchmark,
         "claim_status": PORTFOLIO_CLAIM_STATUS,
@@ -540,6 +618,10 @@ def normalize_research_portfolio(raw: Any) -> Dict[str, Any]:
             if row["value"]:
                 rows.append(row)
         result["dimensions"][dimension] = rows[:MAX_DIMENSION_VALUES]
+    lane_coverage = normalize_surface_lane_coverage(
+        raw.get("surface_lane_coverage"))
+    if lane_coverage:
+        result["surface_lane_coverage"] = lane_coverage
     result["variant_coverage"] = [
         {
             "variant": _text(row.get("variant"), 100),
@@ -579,6 +661,15 @@ def normalize_research_portfolio(raw: Any) -> Dict[str, Any]:
                 raw_probe.get("next_probe_hints"), MAX_HINTS, 220),
             "claim_status": PORTFOLIO_CLAIM_STATUS,
         }
+        surface_variant_id = _text(raw_probe.get("surface_variant_id"), 100)
+        surface_lane = _text(raw_probe.get("surface_lane"), 24)
+        lane_status = _text(raw_probe.get("lane_status"), 32)
+        if surface_variant_id or surface_lane or lane_status:
+            probe.update({
+                "surface_variant_id": surface_variant_id,
+                "surface_lane": surface_lane,
+                "lane_status": lane_status,
+            })
         if probe["research_key"] and probe["state"]:
             probes.append(probe)
     result["next_probes"] = probes[:MAX_NEXT_PROBES]

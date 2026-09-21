@@ -47,6 +47,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   separate signals. S8/S2 reuse missing signals as next-probe hints, without
   persisting raw output or changing candidate status, CVSS, G4, or G5.
 
+- S8 now aggregates persisted lane witnesses as
+  `surface-variant-coverage-v1` inside `research-portfolio-v1`. Historical and
+  latest status/signal counts stay separate; only a latest actual `observed`
+  lane closes, while partial, not-executed, and environment-gap lanes produce
+  exact research-key next probes. The coverage view remains
+  `not-a-finding` and cannot affect candidate status, CVSS, G4, or G5.
+
 - S2 experiment plans now carry a shared `surface-variant-plan-v1` for Web,
   protocol, cloud, mobile, and native research. Each selected state-machine,
   identity-boundary, lifecycle, route, parser, or method-body variant is

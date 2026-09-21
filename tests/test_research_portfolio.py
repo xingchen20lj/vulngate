@@ -33,8 +33,13 @@ from agent.memory.portfolio import (  # noqa: E402
     normalize_research_portfolio,
     write_research_portfolio,
 )
+from agent.memory.surface_coverage import (  # noqa: E402
+    SURFACE_LANE_COVERAGE_SCHEMA_VERSION,
+)
 from agent.memory.research import (  # noqa: E402
     STATE_RESIDUAL_FALSIFIED,
+    STATE_INCONCLUSIVE,
+    STATE_ENVIRONMENT_GAP,
     STATE_PENDING_RESIDUAL,
     build_round_memory,
     merge_research_memory,
@@ -84,6 +89,44 @@ class ResearchPortfolioTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix="vulngate-portfolio-"))
         self.addCleanup(lambda: shutil.rmtree(self.root, ignore_errors=True))
+
+    def _lane_witness(self, status="partial"):
+        observed = ["execution", "state-sequence"]
+        missing = ["typed-effect"]
+        if status == "observed":
+            observed.append("typed-effect")
+            missing = []
+        if status == "environment-gap":
+            observed = ["environment-gap"]
+            missing = ["execution", "state-sequence", "typed-effect"]
+        return {
+            "schema_version": "surface-variant-evidence-v1",
+            "fixture_key": "vf-" + "a" * 20,
+            "surface": "protocol",
+            "variant_id": "protocol-frame-state-order",
+            "lane": "positive",
+            "expected_observation": "typed-effect",
+            "required_observations": ["execution", "state-sequence",
+                                       "typed-effect"],
+            "observed_signals": observed,
+            "missing_observations": missing,
+            "falsifier_signals": ["typed-effect-missing"] if missing else [],
+            "sequence_statuses": ["complete" if status == "observed"
+                                  else "partial"],
+            "cells_observed": 1 if status != "environment-gap" else 0,
+            "cells_with_gap": 1 if status == "environment-gap" else 0,
+            "status": status,
+            "cells": [{
+                "version": "1.0", "safe_mode": False,
+                "status": "environment-gap"
+                if status == "environment-gap" else "observed",
+                "signals": observed,
+                "sequence_status": "complete"
+                if status == "observed" else "partial",
+                "typed_effect_observed": status == "observed",
+            }],
+            "raw_output": "secret=not-persist",
+        }
 
     def _memory(self):
         web = candidate(
@@ -178,6 +221,74 @@ class ResearchPortfolioTests(unittest.TestCase):
             build_research_portfolio(memory, reviews, feedback),
         )
 
+    def test_surface_lane_coverage_preserves_latest_state_and_schedules_gap(self):
+        c = candidate(
+            "LANE-1", research_surface="protocol", target_type="message-rpc",
+            attack_class="parser", variant="state-order",
+        )
+        lab = lab_for("LANE-1")
+        lab["fixtures"][0]["variant_evidence"] = self._lane_witness()
+        memory = build_round_memory([c], {"LANE-1": {}}, {}, lab, 1)
+        portfolio = build_research_portfolio(memory)
+        coverage = portfolio["surface_lane_coverage"]
+        self.assertEqual(SURFACE_LANE_COVERAGE_SCHEMA_VERSION,
+                         coverage["schema_version"])
+        row = coverage["lanes"][0]
+        self.assertEqual("partial", row["status"])
+        self.assertEqual(["typed-effect"], row["missing_observations"])
+        self.assertEqual(["execution", "state-sequence"],
+                         sorted(row["latest_observed_signals"]))
+        probe = next(item for item in portfolio["next_probes"]
+                     if item.get("reason_code") == "surface-lane-witness")
+        self.assertEqual(STATE_INCONCLUSIVE, probe["state"])
+        self.assertEqual("protocol-frame-state-order",
+                         probe["surface_variant_id"])
+        self.assertEqual("positive", probe["surface_lane"])
+        self.assertIn("补 typed-effect", " ".join(probe["next_probe_hints"]))
+        self.assertNotIn("secret=not-persist",
+                         json.dumps(portfolio, ensure_ascii=False))
+        prompt = prompt_coverage_block(
+            ScheduleContext.from_store(
+                CoverageStore(self.root, "target"),
+                research_portfolio=portfolio))
+        self.assertIn("protocol-frame-state-order", prompt)
+        self.assertIn("surface-lane-witness", prompt)
+
+        observed_lab = lab_for("LANE-1")
+        observed_lab["fixtures"][0]["variant_evidence"] = self._lane_witness(
+            "observed")
+        later = build_round_memory([c], {"LANE-1": {}}, {}, observed_lab, 2)
+        merged = merge_research_memory(memory, later)
+        latest = build_research_portfolio(merged)
+        latest_row = latest["surface_lane_coverage"]["lanes"][0]
+        self.assertEqual("observed", latest_row["status"])
+        self.assertEqual(2, latest_row["latest_round"])
+        self.assertEqual({"partial": 1, "observed": 1},
+                         latest_row["status_counts"])
+        self.assertFalse(any(item.get("reason_code") == "surface-lane-witness"
+                             for item in latest["next_probes"]))
+
+    def test_surface_lane_environment_gap_remains_gap_after_portfolio_normalization(self):
+        c = candidate(
+            "LANE-GAP", research_surface="cloud", target_type="cloud-service",
+            attack_class="ssrf", variant="metadata-boundary",
+        )
+        lab = lab_for("LANE-GAP")
+        lab["fixtures"][0]["variant_evidence"] = self._lane_witness(
+            "environment-gap")
+        memory = build_round_memory([c], {"LANE-GAP": {}}, {}, lab, 3)
+        portfolio = build_research_portfolio(memory)
+        normalized = normalize_research_portfolio(portfolio)
+        row = normalized["surface_lane_coverage"]["lanes"][0]
+        self.assertEqual("environment-gap", row["status"])
+        self.assertEqual(1, normalized["surface_lane_coverage"]["summary"]
+                         ["environment_gap_lanes"])
+        probe = next(item for item in normalized["next_probes"]
+                     if item.get("reason_code") == "surface-lane-witness")
+        self.assertEqual(STATE_ENVIRONMENT_GAP, probe["state"])
+        self.assertIn("缺口不等于安全", " ".join(probe["next_probe_hints"]))
+        self.assertEqual("not-a-finding", row["claim_status"])
+
     def test_portfolio_round_trip_is_bounded_and_rejects_unknown_fields(self):
         memory, _web, _protocol, _cloud = self._memory()
         portfolio = build_research_portfolio(memory)
@@ -192,10 +303,22 @@ class ResearchPortfolioTests(unittest.TestCase):
             "research_key": "rk-forged", "state": "environment-gap",
             "payload": "raw payload", "claim_status": "confirmed",
         }]
+        forged["surface_lane_coverage"] = {
+            "schema_version": SURFACE_LANE_COVERAGE_SCHEMA_VERSION,
+            "lanes": [{
+                "surface": "protocol",
+                "variant_id": "protocol-frame-state-order",
+                "lane": "positive",
+                "status": "partial",
+                "raw_output": "secret=not-persist",
+            }],
+            "raw_payload": "raw payload",
+        }
         normalized = normalize_research_portfolio(forged)
         encoded = json.dumps(normalized, ensure_ascii=False)
         self.assertNotIn("do-not-copy", encoded)
         self.assertNotIn("raw payload", encoded)
+        self.assertNotIn("secret=not-persist", encoded)
         self.assertNotIn('"claim_status": "confirmed"', encoded)
         self.assertEqual("not-a-finding", normalized["claim_status"])
 
@@ -320,6 +443,13 @@ class ResearchPortfolioTests(unittest.TestCase):
         self.assertEqual("research-portfolio-v1",
                          payload["portfolio"]["schema_version"])
         self.assertEqual("not-a-finding", payload["portfolio"]["claim_status"])
+        text_output = io.StringIO()
+        with contextlib.redirect_stdout(text_output):
+            code = agent_cli.main([
+                "portfolio", "target", "--workspace", str(self.root),
+            ])
+        self.assertEqual(0, code)
+        self.assertIn("lanes=0", text_output.getvalue())
 
 
 if __name__ == "__main__":

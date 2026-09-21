@@ -96,6 +96,7 @@ Evidence Gates
 - **运行时研究实验室** —— 定向 fuzz 输入会固化为 corpus fixture 和缩减 reproducer；有界重放与版本 × SafeMode 对照会保留稳定性、差分、签名漂移和前置缺口证据，但不会直接升级为漏洞结论。
 - **普通 S4 fixture 适配器** —— Java 与 Shell PoC cell 可固化为脱敏执行 fixture 并有界重放；`S4/runtime-lab.json` 将稳定性、版本/SafeMode 差异和 harness 缺口与 G4/G5 结论分开。
 - **研究面 lane witness** —— `surface-variant-evidence-v1` 将真实 S4 runner row 与 lane 契约对照，区分 observed/partial/environment-gap/not-executed 覆盖，并把有界缺失信号回写到 S2/S8，不改变漏洞结论、CVSS 或 G4/G5。
+- **跨轮研究面覆盖** —— `surface-variant-coverage-v1` 在 project portfolio 中汇聚 lane witness 的历史与最新状态；只有最新真实状态为 `observed` 才闭合，partial/not-executed/environment-gap 会按精确 research key 生成下一轮 probe。
 - **受控 source-revision arm** —— 操作者可通过 `source_revision_artifacts` 为精确的 before/after commit ref 提供 workspace 内 `.jar`/`.war`/`.zip`；VulnGate 只做校验、指纹和隔离 Java 矩阵执行，不 checkout、不构建源码，缺失或无效产物始终记录为明确的不可判定缺口。
 - **跨轮研究记忆** —— S8 将稳定机制键、重放/差分状态、环境缺口、受限的 S3 residual 元数据和 next probe 写入 `state/<target>/research-memory.json`；即使主 replay 已稳定，残余变体仍保持 pending，S2 也不会把记忆升级成漏洞结论。
 - **人工复核反馈闭环** —— `agent_cli.py review` 按稳定 research key 记录 accepted/rejected/needs-evidence/scope-corrected；S8 回放到目标记忆，S2 只据此调整后续优先级，不替代 G4/G5。

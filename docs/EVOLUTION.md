@@ -231,6 +231,16 @@ signals into the next probe, while S2 reuses the same observation taxonomy.
 The witness is research metadata with `claim_status=not-a-finding` and never
 copies raw output, effect details, payloads, commands, or credentials.
 
+Stage 25 carries the witness across rounds as
+`surface-variant-coverage-v1` inside the project portfolio. For each explicit
+surface/variant/lane key it retains bounded historical counts and the latest
+per-research-key status, observed signals, missing observations, sequence
+statuses, cell counts, and environment-gap counts. A lane is closed only when
+the latest actual observation is `observed`; partial, not-executed, and
+environment-gap states create exact research-key next probes for S2. This is a
+coverage and scheduling view, not a finding channel, and remains
+`claim_status=not-a-finding`.
+
 For multi-version or fix-completeness candidates, the next deterministic layer
 is `comparison-orchestration-v1`. It binds configured before/after version
 pairs, read-only parent/fixed revision references, and canonical sibling hints

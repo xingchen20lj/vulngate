@@ -70,6 +70,16 @@ bounded witness to select the next probe, but it is always
 and credentials never enter the artifact, and no gate, CVSS value, or candidate
 conclusion is changed.
 
+S8 aggregates those witnesses into `surface-variant-coverage-v1` inside the
+project portfolio. It keeps historical signal/status counts alongside the
+latest status for each research surface, variant, and lane, including observed
+state-sequence, typed-effect, safe-equivalent, and environment-gap coverage.
+Only a latest lane that is actually observed is treated as closed; partial,
+not-executed, and environment-gap lanes produce bounded next probes linked by
+the exact research key. The scheduler may use this view to prioritize the
+missing experiment, but the view remains `claim_status=not-a-finding` and
+cannot alter a candidate verdict, CVSS, or G4/G5.
+
 For candidates with multiple configured versions or patch metadata, S2 also
 emits `comparison-orchestration-v1`. S4 binds the comparison to the same
 fixture and lane, classifies actual paired cells as bucket change, signature

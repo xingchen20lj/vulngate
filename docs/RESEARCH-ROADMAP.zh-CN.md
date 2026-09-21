@@ -38,6 +38,8 @@
 | 21 | 跨版本与修复变体自动对照编排 | 已实现（bounded comparison orchestration） | `comparison-orchestration-v1`、S2 comparison contract、S4 `comparison` summaries | 将配置版本对、只读 patch parent/fixed 引用和同族变体提示绑定到同一 fixture/lane；区分 bucket 变化、签名漂移、环境缺口和未执行 arm；差异仍不是漏洞结论 |
 | 22 | 真实项目回放校准与替换阈值 | 已实现（bounded replay calibration） | `research-replay-calibration-v1`、`state/<target>/coverage/research-replay-calibration.json`、`S8/research-replay-calibration.json`、`replay-calibrate` CLI | 只从有界 guidance/feedback/runtime-lab 快照计算替换命中率、环境恢复、fixture 截断和 comparison gap；样本不足保持默认，样本充分时阈值最多为 1/2 轮；不改变候选、CVSS、G4/G5 |
 | 23 | 受控历史构建产物与 source-revision arm 执行 | 已实现（bounded artifact adapter） | `source-revision-artifacts-v1`、`source_revision_artifacts`、S4 source arm records/comparison、S8 research memory | 操作者显式提供 workspace 内匹配 commit ref 的 JAR/WAR/ZIP；校验路径、大小、类型和 digest 后复用隔离 Java runner；不 checkout/构建/远程执行；缺失或损坏产物保持 environment gap/inconclusive，不改变 G4/G5/CVSS |
+| 24 | Surface lane 的真实观测见证 | 已实现（bounded lane witness） | `surface-variant-evidence-v1`、S4 lane evidence、S8/S2 bounded signals | 只从真实 runner row 提取 observed/partial/environment-gap/not-executed、state sequence 和 typed effect 信号；计划不等于观测，不改变 G4/G5/CVSS |
+| 25 | 跨轮研究面 lane coverage 与闭环调度 | 已实现（bounded surface coverage view） | `surface-variant-coverage-v1`、`research-portfolio-v1.surface_lane_coverage`、lane-specific `next_probes` | 跨轮合并历史/最新 lane 状态，保留信号、序列状态、环境缺口和 research key；未闭合 lane 生成精确下一步 probe，仍不升级为漏洞结论 |
 
 ## 已实现基础：可证伪实验规划
 
@@ -432,7 +434,7 @@ S2→S4→S8 的单向契约：
 
 ## 后续优先级
 
-1. 用更多真实 lane witness 和细粒度 fixture/state-machine 回放样例校准五类研究面的状态步骤、负向基线和 typed-effect 覆盖，
+1. 用更多真实项目 lane witness 和细粒度 fixture/state-machine 回放样例校准五类研究面的状态步骤、负向基线和 typed-effect 覆盖，
    保留 runner 的回环、审批和资源上限。
 2. 增加更多受控历史产物格式与 project replay 样本，但继续禁止自动 checkout、构建和远程执行，把 artifact provenance 与
    comparison gap 分开统计。

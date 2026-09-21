@@ -753,6 +753,22 @@ def cmd_portfolio(args: argparse.Namespace) -> int:
             summary.get("unresolved_mechanisms", 0),
             len(portfolio.get("next_probes") or []),
             portfolio.get("claim_status", "not-a-finding")))
+        lane_coverage = portfolio.get("surface_lane_coverage") or {}
+        lane_summary = lane_coverage.get("summary") or {}
+        print("  lanes=%s observed=%s partial=%s environment_gap=%s "
+              "not_executed=%s" % (
+                  lane_summary.get("lane_count", 0),
+                  lane_summary.get("observed_lanes", 0),
+                  lane_summary.get("partial_lanes", 0),
+                  lane_summary.get("environment_gap_lanes", 0),
+                  lane_summary.get("not_executed_lanes", 0)))
+        for lane in lane_coverage.get("lanes") or []:
+            if not isinstance(lane, dict) or lane.get("status") == "observed":
+                continue
+            print("  lane: %s/%s/%s [%s] missing=%s" % (
+                lane.get("surface"), lane.get("variant_id"),
+                lane.get("lane"), lane.get("status"),
+                ",".join(lane.get("missing_observations") or []) or "-"))
         for probe in portfolio.get("next_probes") or []:
             print("  next: %s [%s] %s" % (
                 probe.get("candidate_id") or probe.get("research_key"),
