@@ -22,6 +22,31 @@ def _free_port():
     return port
 
 
+def _nc_http_start_command(root, port):
+    """Create a portable loopback fixture for lifecycle subprocess tests.
+
+    Current macOS-latest GitHub runners can leave Python's listener in CLOSED
+    rather than LISTEN, while the runner's netcat listener works normally.
+    The fixture still exercises the real lifecycle boundary: it is a child
+    process, binds only to loopback, returns an HTTP status, and stays alive
+    until ServiceLifecycle terminates its process group.
+    """
+    fixture = (root / "loopback-http-fixture.sh").resolve()
+    fixture.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "port=\"$1\"\n"
+        "while :; do\n"
+        "  printf 'HTTP/1.0 200 OK\\r\\nContent-Length: 0\\r\\n'\n"
+        "  printf 'Connection: close\\r\\n\\r\\n'\n"
+        "  sleep 1\n"
+        "done | nc -lk 127.0.0.1 \"$port\"\n",
+        encoding="utf-8",
+    )
+    fixture.chmod(fixture.stat().st_mode | 0o700)
+    return ["sh", str(fixture), str(port)]
+
+
 class ServiceLifecycleTests(unittest.TestCase):
     def test_starts_healthchecks_and_kills_owned_process_group(self):
         with tempfile.TemporaryDirectory() as td:
@@ -30,8 +55,7 @@ class ServiceLifecycleTests(unittest.TestCase):
             cfg = TargetConfig(
                 name="service-lab", discovery_date="2026-09-21",
                 runtime_lab={"service": {
-                    "start_command": [sys.executable, "-u", "-m", "http.server",
-                                      str(port), "--bind", "127.0.0.1"],
+                    "start_command": _nc_http_start_command(root, port),
                     "healthcheck_url": "http://127.0.0.1:%d/" % port,
                     "startup_timeout": 5,
                     "poll_interval": 0.05,
@@ -57,8 +81,7 @@ class ServiceLifecycleTests(unittest.TestCase):
             cfg = TargetConfig(
                 name="proxied-service", discovery_date="2026-09-21",
                 runtime_lab={"service": {
-                    "start_command": [sys.executable, "-u", "-m", "http.server",
-                                      str(port), "--bind", "127.0.0.1"],
+                    "start_command": _nc_http_start_command(root, port),
                     "healthcheck_url": "http://127.0.0.1:%d/" % port,
                     "startup_timeout": 5,
                     "poll_interval": 0.05,
