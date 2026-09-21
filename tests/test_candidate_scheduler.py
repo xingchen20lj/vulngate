@@ -34,6 +34,9 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from agent.analysis import inventory as INV  # noqa: E402
 from agent.analysis import scheduler as SCH  # noqa: E402
+from agent.evaluation.benchmark import (  # noqa: E402
+    BENCHMARK_FEEDBACK_SCHEMA_VERSION,
+)
 
 
 # --- fixture: two HTTP handlers, one with an authorization control ----------
@@ -668,6 +671,11 @@ class ResidualTests(ScheduleFixture):
         latest = SCH.load_schedule(self.store)
         self.assertEqual(plan.selected_ids(), round_file.get("selected_ids"))
         self.assertEqual(round_file, latest)
+        strategy_file = (self.root / "state" / "fixture" / "coverage"
+                         / "research-strategy.json")
+        self.assertTrue(strategy_file.exists())
+        self.assertEqual("research-strategy-v1",
+                         round_file["research_strategy"]["schema_version"])
 
     def test_persisted_plan_carries_provenance(self):
         self.plan([self.candidate("C1", RUNNER_SINK)], refresh=False)
@@ -890,6 +898,33 @@ class ContextTests(ScheduleFixture):
 class IntegrationTests(ScheduleFixture):
     """The seam the pipeline actually calls: ``round_selection``."""
 
+    def benchmark_feedback(self):
+        return {
+            "schema_version": BENCHMARK_FEEDBACK_SCHEMA_VERSION,
+            "benchmark_id": "scheduler-feedback",
+            "metric_snapshot": {"evidence_completeness": 0.5},
+            "alerts": [{
+                "code": "evidence-completeness-low", "priority": "medium",
+                "metric": "evidence_completeness", "value": 0.5,
+                "threshold": 0.85, "direction": "lt",
+                "action": "require-missing-evidence",
+            }],
+            "weight_deltas": {
+                "evidence_quality": 4,
+                "coverage_novelty": -2,
+                "sink_impact": -2,
+            },
+            "planner_guidance": {
+                "strategy_tags": ["benchmark-evidence-completeness"],
+                "required_observations": [
+                    "required evidence fields must be observed or explicitly unsupported",
+                ],
+                "falsifiers": ["missing required evidence is not a negative result"],
+            },
+            "prompt_hints": ["证据完整度偏低：下一轮把缺失字段转成显式实验观测。"],
+            "claim_status": "not-a-finding",
+        }
+
     def test_selection_is_capped_to_the_slot_budget(self):
         pool = [self.candidate("C%d" % n, RUNNER_SINK, surface="exec %d" % n)
                 for n in range(6)]
@@ -947,6 +982,68 @@ class IntegrationTests(ScheduleFixture):
         self.assertEqual(["C1"], SCH.load_schedule(self.store, 2)["selected_ids"])
         self.assertEqual(SCH.load_schedule(self.store, 2),
                          SCH.load_schedule(self.store))
+
+    def test_benchmark_feedback_changes_only_bounded_scheduler_weights(self):
+        feedback = self.benchmark_feedback()
+        ctx = SCH.ScheduleContext.from_store(self.store,
+                                             benchmark_feedback=feedback)
+        self.assertEqual(100, sum(ctx.weights.values()))
+        self.assertEqual(4, ctx.weight_adjustments["evidence_quality"])
+        self.assertEqual(-2, ctx.weight_adjustments["coverage_novelty"])
+        self.assertEqual(-2, ctx.weight_adjustments["sink_impact"])
+        score = SCH.score_candidate(self.candidate("C1", RUNNER_SINK), ctx)
+        self.assertEqual("scheduler-feedback",
+                         score.evidence["benchmark_feedback"]["benchmark_id"])
+        self.assertEqual("not-a-finding",
+                         score.evidence["benchmark_feedback"]["claim_status"])
+
+    def test_surface_feedback_only_boosts_explicit_matching_candidates(self):
+        feedback = self.benchmark_feedback()
+        feedback["surface_guidance"] = [{
+            "surface": "web",
+            "priority_delta": 4,
+            "metric_snapshot": {"evidence_completeness": 0.5},
+            "strategy_tags": ["benchmark-surface-coverage"],
+            "required_observations": [
+                "each research surface needs an observed status or explicit execution gap",
+            ],
+            "falsifiers": ["unobserved surface coverage is not evidence of absence"],
+            "claim_status": "not-a-finding",
+        }]
+        ctx = SCH.ScheduleContext.from_store(self.store,
+                                             benchmark_feedback=feedback)
+        no_surface = SCH.score_candidate({"candidate_id": "C-no-surface"}, ctx)
+        free_text = SCH.score_candidate({"candidate_id": "C-free-text",
+                                         "surface": "web authz"}, ctx)
+        web = SCH.score_candidate({"candidate_id": "C-web",
+                                   "research_surface": "web"}, ctx)
+        target_type = SCH.score_candidate({"candidate_id": "C-target-type",
+                                           "target_type": "web-app"}, ctx)
+        self.assertEqual(no_surface.total + 4.0, web.total)
+        self.assertEqual(no_surface.total + 4.0, target_type.total)
+        self.assertEqual(no_surface.total, free_text.total)
+        self.assertEqual("web",
+                         web.evidence["benchmark_feedback"]["surface_guidance"]["surface"])
+        self.assertEqual(4.0,
+                         web.evidence["benchmark_feedback"]["surface_guidance"]["applied_delta"])
+
+    def test_feedback_is_persisted_and_prompt_is_explicit(self):
+        feedback = self.benchmark_feedback()
+        pool = [self.candidate("C1", RUNNER_SINK, surface="command exec")]
+        plan = SCH.build_schedule(self.root, "fixture", pool, slots=1,
+                                  round_no=3, refresh=False,
+                                  benchmark_feedback=feedback)
+        payload = plan.as_dict()
+        self.assertEqual("scheduler-feedback",
+                         payload["benchmark_feedback"]["benchmark_id"])
+        self.assertTrue(payload["weight_adjustments"])
+        self.assertEqual(payload, SCH.load_schedule(self.store, 3))
+        context = SCH.ScheduleContext.from_store(
+            self.store, benchmark_feedback=feedback)
+        prompt = SCH.prompt_coverage_block(context, plan=plan)
+        self.assertIn("Benchmark Feedback", prompt)
+        self.assertIn("evidence-completeness-low", prompt)
+        self.assertIn("证据完整度偏低", prompt)
 
 
 if __name__ == "__main__":

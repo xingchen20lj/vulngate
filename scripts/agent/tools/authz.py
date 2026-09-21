@@ -7,6 +7,8 @@ through the researcher's own fixture/runtime, but they never enter artifacts.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Dict, List, Optional
 
 
@@ -87,6 +89,27 @@ def normalize_authz_cases(cases: Any) -> List[Dict[str, Any]]:
         if item:
             normalized.append(item)
     return normalized
+
+
+def authz_fixture_id(case: Any) -> str:
+    """Return a stable id for a credential-free authz/tenant fixture.
+
+    The id intentionally excludes credentials (this module never accepts
+    them) and also excludes the operator-facing ``case_id``.  Renaming a case
+    must not make the same principal/role/tenant/object contract look like a
+    new research surface.
+    """
+    item = normalize_authz_case(case)
+    if not item:
+        return "azfx-none"
+    identity = {
+        key: (sorted(item[key]) if key == "expected_http_codes" else item[key])
+        for key in sorted(item) if key != "case_id"
+    }
+    digest = hashlib.sha256(json.dumps(
+        identity, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":")).encode("utf-8")).hexdigest()
+    return "azfx-" + digest[:16]
 
 
 def authz_env(case: Any) -> Dict[str, str]:

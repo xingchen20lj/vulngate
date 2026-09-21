@@ -38,6 +38,46 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..llm.adapter import BudgetExceeded, LLMClient
 from ..memory.ledger import render_finding_md, write_round_artifacts
+from ..memory.research import (build_residual_closure_report,
+                                build_round_memory, load_research_memory,
+                                load_review_feedback, merge_research_memory,
+                                research_key, write_research_memory)
+from ..memory.portfolio import (build_research_portfolio,
+                                write_research_portfolio)
+from ..evaluation.research_consistency import (
+    build_research_consistency,
+    write_research_consistency,
+)
+from ..evaluation.research_consistency_actions import (
+    action_for_research_key,
+    build_research_consistency_actions,
+    load_research_consistency_actions,
+    write_research_consistency_actions,
+)
+from ..evaluation.research_consistency_rechecks import (
+    build_research_consistency_rechecks,
+    write_research_consistency_rechecks,
+)
+from ..analysis.research_strategy import (apply_strategy_observations,
+                                           apply_research_guidance,
+                                           load_research_strategy,
+                                           strategy_guidance_for_candidate,
+                                           write_research_guidance,
+                                           write_research_strategy)
+from ..analysis.research_agenda import (build_research_agenda,
+                                        load_research_agenda,
+                                        write_research_agenda)
+from ..analysis.research_agenda_outcomes import (
+    build_research_agenda_outcomes,
+    load_research_agenda_outcomes,
+    load_schedule_snapshot,
+    write_research_agenda_outcomes,
+)
+from ..analysis.research_budget import (
+    build_research_budget,
+    load_research_budget,
+    write_research_budget,
+)
 from ..orchestrator.config import TargetConfig
 from ..orchestrator.gates import g3_novelty
 from ..sandbox.approval import ApprovalGate
@@ -54,6 +94,11 @@ from ..tools.novelty import (Disclosure, NoveltyChecker, UpstreamRef,
                              mechanism_audit_llm)
 from ..tools.patch_variants import analyze_patch_history
 from ..tools.project_profile import build_project_profile
+from ..tools.experiment_planner import plan_candidate_experiments
+from ..tools.experiment import capability_contract_from_candidate
+from ..tools.research_strategies import composite_chain_candidates
+from ..tools.s4_runtime_lab import (merge_runtime_lab_artifacts,
+                                    run_s4_runtime_lab)
 from ..tools.target_rules import collect_target_rule_hits, composite_chain_hints
 from ..tools.public_scan import scan_all
 from ..tools.seeds import load_seeds, seed_reference_block
@@ -77,7 +122,15 @@ SYSTEM_POC = (
     "你是资深 Java 安全 PoC 作者。直接输出最终 Java 源码，"
     "不要输出思考过程，不要解释，无 Markdown 围栏，不要 package 声明（单文件默认包）。"
     "main 必须至少输出一行机器可读观测（ERROR=/GATE_BLOCKED=/INSTANTIATED=/LEAKED= 之一，"
-    "基于真实运行结果），禁止空输出。"
+    "基于真实运行结果），禁止空输出。对于能力链，CAPABILITY/"
+    "CAPABILITY_EVIDENCE/TRANSITION/TRANSITION_EVIDENCE 也只能记录实际观察，"
+    "不能照抄声明或把对象实例化当成终点效果。"
+    "若存在 residual contract，只能在实际执行且无副作用时输出"
+    "RESIDUAL_ID/RESIDUAL_STATUS=falsified/RESIDUAL_FALSIFIER。"
+    "若存在 surface variant fixture 上下文，读取 VULNGATE_VARIANT_SURFACE、"
+    "VULNGATE_VARIANT_ID、VULNGATE_VARIANT_LANE、VULNGATE_VARIANT_STATE_STEPS；"
+    "positive/negative/environment-gap 只是实验车道，不能直接当成观测或结论，"
+    "只有真实完成的状态步骤和真实证据才能输出 STEP/STATE/typed effect。"
 )
 
 SYSTEM_SECURITY_WEB = (
@@ -96,6 +149,14 @@ SYSTEM_POC_WEB = (
     "HTTP_CODE=<状态码>\nRESP_MATCH=<响应体/头中的特征串>\n"
     "EVIDENCE=<副作用证据，如写入成功的标记/会话接管邮箱>\n"
     "GATE_BLOCKED=<原因>\nERROR=<异常>\n"
+    "CAPABILITY=<实际观察到的能力原语>\nCAPABILITY_EVIDENCE=<原语证据>\n"
+    "TRANSITION=<实际观察到的 from->to>\nTRANSITION_EVIDENCE=<transition 证据>\n"
+    "RESIDUAL_ID=<从 VULNGATE_RESIDUAL_IDS 中选择的实际 residual id>\n"
+    "RESIDUAL_STATUS=falsified\nRESIDUAL_FALSIFIER=<合同允许的安全反证代码>\n"
+    "若存在 surface variant fixture，读取 VULNGATE_VARIANT_SURFACE、"
+    "VULNGATE_VARIANT_ID、VULNGATE_VARIANT_LANE、"
+    "VULNGATE_VARIANT_STATE_STEPS；车道与要求不是观测，只有真实完成的"
+    "步骤和真实响应/副作用才可输出 STEP/STATE/EVIDENCE。"
     "目标 base URL 必须从环境变量 VULNGATE_TARGET_URL 读取（脚本内使用该变量拼接路径，"
     "禁止硬编码其他主机；网络目标只允许 127.0.0.1/localhost）。"
     "允许使用 curl 与 python3，但只能访问明确的回环 URL；禁止 SSH/SCP/远程 rsync、云 CLI、"
@@ -310,6 +371,7 @@ def prepare_target(root: Path, name: str, target_dir: Path) -> TargetConfig:
         "target_urls": target_urls,
         "scope_constraints": scope_constraints,
         "upstream_repo": "",
+        "runtime_lab": {},
         "jars": [{"version": "local", "path": jars[0]}] if jars else [],
         "deps": [],
         "source_dirs": source_dirs,
@@ -353,6 +415,90 @@ def _persist_coverage_inventory(root: Path, name: str, dest: Path,
         return {"error": "%s: %s" % (type(exc).__name__, exc)}
 
 
+def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
+    """Refresh the derived path indices for older autonomous workspaces once.
+
+    New targets already pass through :func:`_persist_coverage_inventory`, but
+    an existing workspace may predate the capability index.  Rebuild only when
+    that index is absent, and keep the failure as an explicit best-effort note
+    so S2 can still run with the model/configured pool.
+    """
+    from ..analysis import capability_graph as capability
+    from ..analysis import coverage as cov
+    from ..analysis import semantic_calls as semantic_call
+    from ..analysis import semantic_controlflow as semantic_controlflow
+    from ..analysis import semantic_ast as semantic_ast
+    from ..analysis import semantic_guards as semantic_guard
+    from ..analysis import semantic_paths as semantic
+    from ..analysis import threat_model as threat_model_analysis
+    from ..analysis.inventory import (CoverageStore, build_inventory,
+                                      load_inventory, persist_inventory)
+
+    store = CoverageStore(ctx.root, ctx.cfg.name)
+    if (store.path(capability.CAPABILITY_GRAPH_INDEX).exists()
+            and store.path(threat_model_analysis.THREAT_MODEL_INDEX).exists()
+            and store.path(semantic.SEMANTIC_PATH_INDEX).exists()
+            and store.path(semantic_guard.SEMANTIC_GUARD_INDEX).exists()
+            and store.path(semantic_call.SEMANTIC_CALL_INDEX).exists()
+            and store.path(semantic_controlflow.SEMANTIC_CONTROLFLOW_INDEX).exists()
+            and store.path(semantic_ast.SEMANTIC_AST_INDEX).exists()):
+        return {"rebuilt": False, "graph": capability.load_capability_graph(store),
+                "candidates": capability.load_capability_candidates(store),
+                "semantic": semantic.load_semantic_evidence(store),
+                "semantic_guards": semantic_guard.load_semantic_guards(store),
+                "semantic_guard_candidates": semantic_guard.load_semantic_guard_candidates(store),
+                "semantic_calls": semantic_call.load_semantic_call_evidence(store),
+                "semantic_call_candidates": semantic_call.load_semantic_call_candidates(store),
+                "semantic_controlflow": semantic_controlflow.load_semantic_controlflow(store),
+                "semantic_controlflow_candidates": semantic_controlflow.load_semantic_controlflow_candidates(store),
+                "semantic_ast": semantic_ast.load_semantic_ast(store),
+                "semantic_ast_candidates": semantic_ast.load_semantic_ast_candidates(store),
+                "threat_model": threat_model_analysis.load_threat_model(
+                    ctx.root, ctx.cfg.name)}
+
+    target_root = ctx.root / "targets" / ctx.cfg.name
+    if not target_root.exists():
+        target_root = ctx.root
+    source_dirs = list(ctx.cfg.source_dirs or [])
+    if target_root != ctx.root and source_dirs and not any(
+            (target_root / source_dir).exists() for source_dir in source_dirs):
+        target_root = ctx.root
+    try:
+        result = build_inventory(target_root, source_dirs or None,
+                                 target=ctx.cfg.name,
+                                 target_type=ctx.cfg.target_type)
+        persist_inventory(store, result, target_type=ctx.cfg.target_type)
+        store.write("coverage-summary", cov.compute_coverage(load_inventory(store)))
+        return {"rebuilt": True,
+                "graph": capability.load_capability_graph(store),
+                "candidates": capability.load_capability_candidates(store),
+                "semantic": semantic.load_semantic_evidence(store),
+                "semantic_guards": semantic_guard.load_semantic_guards(store),
+                "semantic_guard_candidates": semantic_guard.load_semantic_guard_candidates(store),
+                "semantic_calls": semantic_call.load_semantic_call_evidence(store),
+                "semantic_call_candidates": semantic_call.load_semantic_call_candidates(store),
+                "semantic_controlflow": semantic_controlflow.load_semantic_controlflow(store),
+                "semantic_controlflow_candidates": semantic_controlflow.load_semantic_controlflow_candidates(store),
+                "semantic_ast": semantic_ast.load_semantic_ast(store),
+                "semantic_ast_candidates": semantic_ast.load_semantic_ast_candidates(store),
+                "threat_model": threat_model_analysis.load_threat_model(
+                    ctx.root, ctx.cfg.name),
+                "root": str(target_root)}
+    except Exception as exc:  # pragma: no cover - autonomous is best-effort
+        return {"rebuilt": False,
+                "error": "%s: %s" % (type(exc).__name__, exc),
+                "graph": {}, "candidates": [], "semantic": {},
+                "semantic_guards": {},
+                "semantic_guard_candidates": [],
+                "semantic_calls": {},
+                "semantic_call_candidates": [],
+                "semantic_controlflow": {},
+                "semantic_controlflow_candidates": [],
+                "semantic_ast": {},
+                "semantic_ast_candidates": [],
+                "threat_model": {}}
+
+
 class AutoCtx:
     def __init__(self, root: Path, cfg: TargetConfig, llm: LLMClient,
                  offline: bool, max_candidates: int, max_rounds: int,
@@ -373,6 +519,8 @@ class AutoCtx:
         self.carryover: List[Dict[str, Any]] = []
         self.stop_file = root / "state" / cfg.name / "STOP"
         self._public_scan_cache: Optional[Dict[str, Any]] = None
+        self._benchmark_feedback_cache: Optional[Dict[str, Any]] = None
+        self._replay_cohort_cache: Optional[Dict[str, Any]] = None
 
     def public_disclosures(self) -> Dict[str, Any]:
         """Memoized internet disclosure scan (plan 2.7); [] when offline."""
@@ -394,6 +542,42 @@ class AutoCtx:
 
     def jars_by_version(self) -> Dict[str, List[Path]]:
         return self.cfg.resolve_jars(self.root)
+
+    def benchmark_feedback(self) -> Dict[str, Any]:
+        """Load only explicitly configured benchmark feedback for this target."""
+        if self._benchmark_feedback_cache is not None:
+            return dict(self._benchmark_feedback_cache)
+        from ..evaluation.benchmark import benchmark_feedback_from_input
+
+        value: Any = getattr(self.cfg, "benchmark_feedback", {}) or {}
+        configured_path = getattr(self.cfg, "benchmark_feedback_path", None)
+        if configured_path:
+            path = Path(configured_path)
+            if not path.is_absolute():
+                path = self.root / path
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                value = {}
+        self._benchmark_feedback_cache = benchmark_feedback_from_input(value)
+        return dict(self._benchmark_feedback_cache)
+
+    def replay_cohort_calibration(self) -> Dict[str, Any]:
+        """Load only explicitly configured cross-project replay metadata."""
+        if self._replay_cohort_cache is not None:
+            return dict(self._replay_cohort_cache)
+        configured_path = getattr(
+            self.cfg, "replay_cohort_calibration_path", None)
+        value: Dict[str, Any] = {}
+        if configured_path:
+            from ..evaluation.replay_cohort import load_replay_cohort_file
+
+            path = Path(configured_path)
+            if not path.is_absolute():
+                path = self.root / path
+            value = load_replay_cohort_file(path)
+        self._replay_cohort_cache = value
+        return dict(value)
 
 
 def _fmt_entries(entries: List[Dict[str, Any]]) -> str:
@@ -466,8 +650,13 @@ def _coverage_prompt_block(ctx: AutoCtx, round_no: int) -> str:
     try:
         from ..analysis import scheduler as sched
         from ..analysis.inventory import CoverageStore
+        from ..memory.research import load_research_memory
         store = CoverageStore(ctx.root, ctx.cfg.name)
-        sctx = sched.ScheduleContext.from_store(store)
+        memory = load_research_memory(ctx.root, ctx.cfg.name)
+        benchmark_feedback = ctx.benchmark_feedback()
+        sctx = sched.ScheduleContext.from_store(
+            store, research_memory=memory.get("entries") or [],
+            benchmark_feedback=benchmark_feedback)
         if not sctx.entries and not sctx.sinks:
             return ""
         plan = sched.load_schedule(store, round_no)
@@ -490,8 +679,11 @@ def schedule_candidates(ctx: AutoCtx, round_no: int,
     from ..analysis import scheduler as sched
     selected, plan, note = sched.round_selection(
         ctx.root, ctx.cfg.name, candidates, ctx.max_candidates,
-        round_no=round_no, pinned=pinned or ())
+        round_no=round_no, pinned=pinned or (),
+        benchmark_feedback=ctx.benchmark_feedback())
     if plan is not None:
+        ctx.write_artifact(round_no, "S2", "research-strategy.json",
+                           plan.research_strategy)
         print("[round-%02d] schedule: %d/%d selected, %s"
               % (round_no, len(selected), len(candidates),
                  ", ".join("%s=%d" % (k, v)
@@ -501,24 +693,85 @@ def schedule_candidates(ctx: AutoCtx, round_no: int,
     return selected, note
 
 
-def static_candidates(ctx: AutoCtx) -> Tuple[List[Dict[str, Any]], List[str]]:
+def _attach_experiment_plans(ctx: AutoCtx, round_no: int,
+                             candidates: List[Dict[str, Any]],
+                             pool: Optional[List[Dict[str, Any]]] = None
+                             ) -> List[Dict[str, Any]]:
+    """Attach and persist bounded, falsifiable research plans for S2 candidates.
+
+    A fresh round passes the full pre-schedule pool so deferred candidates keep
+    their research plan. A resumed round has only the checkpointed selection,
+    which is treated as the scheduled subset.
+    """
+    versions = sorted({str(j.get("version")) for j in ctx.cfg.jars
+                       if j.get("version")})
+    selected_ids = {str(c.get("candidate_id")) for c in candidates}
+    plan_candidates = pool if pool is not None else candidates
+    benchmark_feedback = ctx.benchmark_feedback()
+    strategy = load_research_strategy(ctx.root, ctx.cfg.name)
+    consistency_actions = load_research_consistency_actions(
+        ctx.root, ctx.cfg.name)
+    if benchmark_feedback:
+        ctx.write_artifact(round_no, "S2", "benchmark-feedback.json",
+                           benchmark_feedback)
+    plans = []
+    for candidate in plan_candidates:
+        candidate_action = action_for_research_key(
+            consistency_actions, research_key(candidate),
+            candidate.get("candidate_id"))
+        research_plan = plan_candidate_experiments(
+            candidate, versions, benchmark_feedback=benchmark_feedback,
+            research_guidance=strategy_guidance_for_candidate(
+                strategy, candidate),
+            consistency_action=candidate_action,
+            target_type=ctx.cfg.target_type)
+        candidate["experiment_plan"] = research_plan
+        plan_row = dict(research_plan)
+        plan_row["scheduled"] = (str(candidate.get("candidate_id")) in selected_ids
+                                  if pool is not None else True)
+        plans.append(plan_row)
+    ctx.write_artifact(round_no, "S2", "experiment-plans.json", plans)
+    return plans
+
+
+def static_candidates(ctx: AutoCtx, round_no: Optional[int] = None
+                      ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Index-derived candidates from the persisted coverage store (spec §11/§12).
 
     Returns ``(candidates, added_ids)``.  Best-effort by contract: a missing or
     partial coverage store means "none this round", never a failed round --
     these are leads the static layer already produced, not a precondition for
-    the LLM proposal.
+    the LLM proposal.  S1 composite-chain candidates are merged here as well
+    so the autonomous and config-driven pipelines schedule the same research
+    strategies.
     """
     if not bool(getattr(ctx.cfg, "static_candidates", True)):
         return [], []
     try:
         from ..analysis import controls as ctl
         from ..analysis.inventory import CoverageStore
+        _ensure_capability_inventory(ctx)
         store = CoverageStore(ctx.root, ctx.cfg.name)
         candidates = ctl.static_candidates(store)
     except Exception as exc:  # pragma: no cover - defensive
         print("[S2] static candidates unavailable: %s: %s" % (type(exc).__name__, exc))
-        return [], []
+        candidates = []
+    if round_no is not None:
+        path = (ctx.root / "state" / ctx.cfg.name /
+                ("round-%02d" % round_no) / "S1" /
+                "composite-chain-candidates.json")
+        try:
+            chain_candidates = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            chain_candidates = []
+        seen = {str(c.get("candidate_id")) for c in candidates
+                if c.get("candidate_id")}
+        for candidate in (chain_candidates if isinstance(chain_candidates, list)
+                          else []):
+            cid = str(candidate.get("candidate_id", ""))
+            if cid and cid not in seen:
+                candidates.append(candidate)
+                seen.add(cid)
     ids = [str(c.get("candidate_id")) for c in candidates if c.get("candidate_id")]
     return candidates, ids
 
@@ -592,6 +845,9 @@ def propose_candidates(ctx: AutoCtx, round_no: int,
         '类型混淆/DoS 类候选可为 []), '
         'authz_cases(可选数组；每项仅含 case_id、principal、role、tenant_id、object_id、object_tenant_id、'
         'expected_http_codes、expected_object_mutated、expected_authz；禁止放 token/cookie/password), '
+        'sequence(可选数组，仅填有界步骤标识如 ["seed","mutate","probe"]), '
+        'concurrency(可选 1..64 的整数；并发声明不等于已证明并发效果), '
+        'availability_probe(可选布尔；只有真实观测 SERVICE_UNAVAILABLE 时才支持 A:H), '
         'chain_components(可选数组；例如 ["request-body", "parser", "authorization", "file-write"]), '
         'novelty_keywords(数组,上游检索关键词), cvss_vector(可选)。\n'
         "只输出 JSON：{\"candidates\":[...]}"
@@ -627,6 +883,9 @@ def propose_candidates(ctx: AutoCtx, round_no: int,
         c.setdefault("jvm", {})
         c.setdefault("target_classes", [])
         c.setdefault("novelty_keywords", [])
+        c.setdefault("sequence", [])
+        c.setdefault("concurrency", 1)
+        c.setdefault("availability_probe", False)
         c["authz_cases"] = normalize_authz_cases(c.get("authz_cases"))
     # Rank the proposal by evidence instead of trusting its order: the model's
     # listing order is not a priority, and trimming to the budget should drop
@@ -644,11 +903,14 @@ def audit_candidate(ctx: AutoCtx, cand: Dict[str, Any]) -> Dict[str, Any]:
                                 ctx.root, max_chars=8000)
     flow_hints = match_source_sink_paths(
         getattr(ctx, "_source_sink_graph", []), cand)
+    experiment_plan = json.dumps(
+        cand.get("experiment_plan") or {}, ensure_ascii=False, indent=2)[:6000]
     user = (
         "候选：%s\n入口：%s\n逻辑：%s\n\n"
         "源码目录：%s\n\n"
         "候选相关源码片段（真实源码证据，文件+行号；以这些为准，不得臆测）：\n%s\n\n"
         "确定性 Source→Sink 路径提示（仅启发式，必须逐行复核）：\n%s\n\n"
+        "确定性实验计划（仅验证清单，不是漏洞结论；必须用真实运行观测逐项证伪/支持）：\n%s\n\n"
         "%s"
         "请静态审计并输出："
         '{"gate_status":是否被安全门控阻断, "gate_kind":如 feature-gate/cache-lookup/missing-bound-check, '
@@ -657,6 +919,7 @@ def audit_candidate(ctx: AutoCtx, cand: Dict[str, Any]) -> Dict[str, Any]:
         % (cand["candidate_id"], cand.get("entry"), cand.get("logic"), srcs,
            src_block or "（未定位到源码片段，请在审计笔记中注明）",
            json.dumps(flow_hints, ensure_ascii=False)[:6000] or "（无启发式路径）",
+           experiment_plan or "（无实验计划）",
            _scope_block(ctx, 2500))
     )
     try:
@@ -678,9 +941,12 @@ def generate_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
     pre = "; ".join(cand.get("preconditions") or ["无"])
     src_block = candidate_block(cand, ctx.cfg.entry_points, ctx.cfg.source_dirs,
                                 ctx.root, max_chars=6000)
+    experiment_plan = json.dumps(
+        cand.get("experiment_plan") or {}, ensure_ascii=False, indent=2)[:6000]
     user = (
         "候选：%s\n攻击面：%s\n入口：%s\n逻辑：%s\n前置条件：%s\n"
         "目标 jar 版本：%s\n\n"
+        "确定性实验计划（仅验证清单，不是漏洞结论；按真实可执行步骤实现）：\n%s\n\n"
         "目标库 API 提示：%s\n\n"
         "候选相关源码片段（真实源码证据，写 PoC 时按真实 API 签名，禁止凭记忆猜 API）：\n%s\n\n"
         "请输出单个 Java 文件（类名 %s，public static void main），最小可编译，"
@@ -701,14 +967,38 @@ def generate_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
         "EFFECT_KIND=<真实副作用类型：command-executed/process-started/command-marker/file-marker>\n"
         "EFFECT=<只有实际调用副作用后才输出的具体证据；Canary.mark 或对象实例化不得填写>\n"
         "CANARY=<仅内存 canary/能力链验证时填写，不能与 RCE 确认等同>\n"
+        "STEP=<已完成的声明步骤标识；按 sequence 顺序逐步输出>\n"
+        "STEP_EVIDENCE=<该步骤的实际证据摘要，不要输出 token/cookie/password>\n"
+        "STATE=<已观察到的本地状态检查点>\n"
+        "CAPABILITY=<从 VULNGATE_CAPABILITIES 中选择且实际观察到的能力原语>\n"
+        "CAPABILITY_EVIDENCE=<capability_id:该原语的安全本地证据，不要输出 token/cookie/password>\n"
+        "TRANSITION=<实际观察到的 from->to，不能只复制 VULNGATE_TRANSITIONS>\n"
+        "TRANSITION_EVIDENCE=<from->to:该 transition 的安全本地证据>\n"
+        "RESIDUAL_ID=<仅从 VULNGATE_RESIDUAL_IDS 中选择且实际探测的 residual id>\n"
+        "RESIDUAL_STATUS=falsified（只有显式 falsifier 已在执行 cell 中成立时输出）\n"
+        "RESIDUAL_FALSIFIER=<从对应 VULNGATE_RESIDUAL_CONTRACT 的 allowed_falsifiers 中选择>\n"
         "PARSED=...\n"
         "禁止真实外联网络（只能尝试 127.0.0.1）。只输出 Java 源码，无 Markdown 围栏。"
         "输出不超过 200 行，只允许 ASCII 字符（禁止全角中文标点），禁止解释性文本。"
         "若候选是 DoS/资源耗尽类（OOM/栈溢出/CPU），矩阵会自动用小堆（-Xmx256m），"
         "请在 PoC 中捕获 Throwable 并输出 ERROR=<异常类名>: <消息首行> 行，"
         "例如 ERROR=OutOfMemoryError: Java heap space 或 ERROR=StackOverflowError。"
+        "若候选声明 sequence/concurrency，请读取 VULNGATE_SEQUENCE、"
+        "VULNGATE_CONCURRENCY、VULNGATE_AVAILABILITY_PROBE；只有真实执行的步骤"
+        "才输出 STEP/STEP_EVIDENCE/STATE，只有实际 worker 饱和与服务不可用才输出"
+        "CONCURRENCY/ SERVICE_UNAVAILABLE。"
+        "若环境提供 VULNGATE_VARIANT_SURFACE、VULNGATE_VARIANT_ID、"
+        "VULNGATE_VARIANT_LANE、VULNGATE_VARIANT_STATE_STEPS，必须把它们当作"
+        "当前 fixture 的实验选择器；positive/negative/environment-gap 不等于结果，"
+        "只有真实完成的 state step 和证据才能输出 STEP/STATE/EFFECT。"
+        "若候选包含 capability_contract，请读取 VULNGATE_CAPABILITY_CONTRACT、"
+        "VULNGATE_CAPABILITIES、VULNGATE_TRANSITIONS；只有实际观察到对应原语、"
+        "transition 或 typed effect 才输出 CAPABILITY/CAPABILITY_EVIDENCE/"
+        "TRANSITION/TRANSITION_EVIDENCE/EFFECT，不能把声明值当作观测值。"
         % (cand["candidate_id"], cand.get("surface"), cand.get("entry"),
-           cand.get("logic"), pre, versions, ctx.cfg.api_hint or "见入口清单",
+           cand.get("logic"), pre, versions,
+           experiment_plan or "（无实验计划）",
+           ctx.cfg.api_hint or "见入口清单",
            src_block or "（无源码片段）", class_name, ctx.cfg.name,
            cand.get("entry") or _fmt_entries(ctx.cfg.entry_points)[:200])
     )
@@ -743,6 +1033,11 @@ def repair_poc(ctx: AutoCtx, cand: Dict[str, Any], src_text: str, compile_error:
         "（如 javax.json / org.json），必须改用目标库 %s 的公共 API；"
         "入口参考：%s。\n"
         "请只输出修正后的完整 Java 文件（类名 %s），保持机器可读输出行约定，"
+        "如候选声明了 sequence/concurrency，保留逐步 STEP/STEP_EVIDENCE/STATE 观测；"
+        "如候选包含 capability_contract，保留实际的 CAPABILITY/CAPABILITY_EVIDENCE/"
+        "TRANSITION/TRANSITION_EVIDENCE 观测，不能照抄声明，"
+        "如候选包含 residual_contracts，只能在实际执行且明确安全反证成立时输出"
+        "RESIDUAL_ID/RESIDUAL_STATUS=falsified/RESIDUAL_FALSIFIER，不能凭声明输出，"
         "只使用公共 API 与 JDK 类，确保可编译。输出不超过 200 行，"
         "只允许 ASCII 字符（禁止全角中文标点），无 Markdown 围栏。"
         % (cand["candidate_id"], compile_error[-3000:],
@@ -809,8 +1104,27 @@ def generate_shell_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
         "  EFFECT=<真实副作用证据；响应状态码或猜测不能代替副作用>\n"
         "  OBJECT_MUTATED=<true|false；仅在本地 fixture/响应可验证对象确实改变时输出>\n"
         "  AUTHZ_RESULT=<allow|deny；根据真实服务端授权结果输出>\n"
+        "  STEP=<已完成的声明步骤标识>\n  STEP_EVIDENCE=<该步骤的实际证据摘要>\n"
+        "  STATE=<已观察到的本地状态检查点>\n"
+        "  CAPABILITY=<实际观察到的声明能力原语>\n"
+        "  CAPABILITY_EVIDENCE=<capability_id:该原语的安全本地证据>\n"
+        "  TRANSITION=<实际观察到的声明 from->to>\n"
+        "  TRANSITION_EVIDENCE=<from->to:该 transition 的安全本地证据>\n"
+        "  RESIDUAL_ID=<从 VULNGATE_RESIDUAL_IDS 中选择且实际探测的 residual id>\n"
+        "  RESIDUAL_STATUS=falsified（只有显式 falsifier 已在执行 cell 中成立时输出）\n"
+        "  RESIDUAL_FALSIFIER=<从对应 VULNGATE_RESIDUAL_CONTRACT 的 allowed_falsifiers 中选择>\n"
         "  GATE_BLOCKED=<未触发的原因>\n  ERROR=<异常>\n"
         "- 权限矩阵上下文由 VULNGATE_AUTHZ_* 环境变量提供；不要在脚本中写入或输出 token/cookie/password；\n"
+        "- 有状态/竞态候选可读取 VULNGATE_SEQUENCE、VULNGATE_CONCURRENCY、"
+        "VULNGATE_AVAILABILITY_PROBE；只有真实执行的步骤才输出 STEP/STEP_EVIDENCE/STATE，"
+        "不能把声明值直接当作观测值；\n"
+        "- 若存在 VULNGATE_VARIANT_SURFACE/VULNGATE_VARIANT_ID/"
+        "VULNGATE_VARIANT_LANE/VULNGATE_VARIANT_STATE_STEPS，按当前 lane 选择"
+        "fixture 状态机；lane、required observation 和 falsifier 都不是观测，"
+        "只能用真实执行证据输出对应的 STEP/STATE/EFFECT；\n"
+        "- 能力链可读取 VULNGATE_CAPABILITY_CONTRACT、VULNGATE_CAPABILITIES、"
+        "VULNGATE_TRANSITIONS；只有真实观察到原语和 transition 才输出对应的"
+        "CAPABILITY/CAPABILITY_EVIDENCE/TRANSITION/TRANSITION_EVIDENCE，不能照抄声明；\n"
         "- 只允许访问 VULNGATE_TARGET_URL 指向的主机（回环 127.0.0.1）；禁止外联；\n"
         "- 禁止解释性输出，只输出脚本本身。"
         % (cand["candidate_id"], cand.get("surface"), cand.get("entry"),
@@ -830,8 +1144,10 @@ def repair_shell_poc(ctx: AutoCtx, cand: Dict[str, Any], script_text: str,
         "攻击逻辑：%s\n"
         "请只输出修正后的完整 bash 脚本：base URL 从 VULNGATE_TARGET_URL 读取，"
         "按候选逻辑真实发送请求并检查响应，保持机器可读观测行 "
-        "（HTTP_CODE= / RESP_MATCH= / EVIDENCE= / OBJECT_MUTATED= / AUTHZ_RESULT= / GATE_BLOCKED= / ERROR=），"
+        "（HTTP_CODE= / RESP_MATCH= / EVIDENCE= / OBJECT_MUTATED= / AUTHZ_RESULT= / STEP= / STEP_EVIDENCE= / STATE= / CAPABILITY= / CAPABILITY_EVIDENCE= / TRANSITION= / TRANSITION_EVIDENCE= / RESIDUAL_ID= / RESIDUAL_STATUS= / RESIDUAL_FALSIFIER= / GATE_BLOCKED= / ERROR=），"
         "权限上下文从 VULNGATE_AUTHZ_* 环境变量读取，禁止写入或输出 token/cookie/password；"
+        "能力原语和 transition 只能输出真实观察，不得照抄 VULNGATE_CAPABILITIES/"
+        "VULNGATE_TRANSITIONS；"
         "只允许访问 127.0.0.1/localhost，无解释性文本。"
         % (cand["candidate_id"], feedback[-3000:],
            cand.get("surface", ""), cand.get("logic", ""))
@@ -863,7 +1179,15 @@ def _verify_web_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
     script_file = src_dir / script_name
     script_file.write_text(script_text, encoding="utf-8")
     authz_cases = normalize_authz_cases(cand.get("authz_cases")) or [{}]
-    cells = [MatrixCell(version=v, safe_mode=False, precondition="none", authz=case)
+    cells = [MatrixCell(version=v, safe_mode=False, precondition="none", authz=case,
+                        sequence=cand.get("sequence", []),
+                        concurrency=cand.get("concurrency", 1),
+                        availability_probe=cand.get("availability_probe", False),
+                        capability_contract=capability_contract_from_candidate(cand),
+                        residual_contracts=(cand.get("experiment_plan") or {}).get(
+                            "residual_contracts", []),
+                        consistency_action=(cand.get("experiment_plan") or {}).get(
+                            "consistency_action", {}))
              for v in sorted(urls) for case in authz_cases]
     spec = ShellPOCSpec(candidate_id=cid, script=script_name, cells=cells,
                         urls=urls, entry=cand.get("entry", ""),
@@ -873,6 +1197,7 @@ def _verify_web_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
         log_path=ctx.root / "state" / ctx.cfg.name
         / ("round-%02d" % round_no) / "approval-log.jsonl")
     runner = ShellMatrixRunner(ctx.root, ctx.cfg.name, round_no, approval=approval)
+    results: Dict[str, List[Dict[str, Any]]] = {}
     try:
         results = runner.run_manifest([spec])
         cells, convergence = converge_s4_cells(
@@ -905,9 +1230,24 @@ def _verify_web_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
         summary = summarize_candidate(cells)
         summary["harness_error"] = "%s: %s" % (type(exc).__name__, exc)
         summary["s4_result_sources"] = convergence["sources"]
+    try:
+        runtime_lab = run_s4_runtime_lab(
+            ctx.root, ctx.cfg.name, round_no, ctx.cfg, [cand], [], [spec], {},
+            baseline_results=results, approval=approval,
+            version_universe=sorted(ctx.cfg.target_urls),
+            source_revision_artifacts=ctx.cfg.resolve_source_revision_artifacts(
+                ctx.root))
+    except Exception as exc:
+        runtime_lab = {
+            "schema_version": "runtime-lab-v1", "scope": "ordinary-s4",
+            "status": "run-failed",
+            "reason": "%s: %s" % (type(exc).__name__, str(exc)[:240]),
+            "fixtures": [], "claim_status": "not-a-finding",
+        }
     conclusion = _derive(summary, cand, cells)
     return {"candidate": cand, "audit": audit, "summary": summary,
-            "conclusion": conclusion, "spec": spec}
+            "conclusion": conclusion, "spec": spec,
+            "runtime_lab": runtime_lab}
 
 
 def poc_consistency(cand: Dict[str, Any], src_text: str) -> List[str]:
@@ -938,6 +1278,9 @@ def build_cells(ctx: AutoCtx, cand: Dict[str, Any]) -> List[MatrixCell]:
     required_runtime = str(cand.get("required_runtime", cand.get("requested_runtime", "")))
     java_bin = str(cand.get("java_bin", ""))
     java_home = str(cand.get("java_home", ""))
+    sequence = cand.get("sequence", [])
+    concurrency = cand.get("concurrency", 1)
+    availability_probe = cand.get("availability_probe", False)
     # DoS/resource-exhaustion candidates need a small heap or the OOM path
     # is never exercised under the matrix default JVM. If the LLM did not
     # declare Xmx, inject a 256m heap when the surface/logic hints at it.
@@ -955,6 +1298,13 @@ def build_cells(ctx: AutoCtx, cand: Dict[str, Any]) -> List[MatrixCell]:
                 for authz in authz_cases:
                     cells.append(MatrixCell(version=v, safe_mode=safe, features=features,
                                         precondition=pre, jvm=jvm, authz=authz,
+                                        sequence=sequence, concurrency=concurrency,
+                                        availability_probe=availability_probe,
+                                        capability_contract=capability_contract_from_candidate(cand),
+                                        residual_contracts=(cand.get("experiment_plan") or {}).get(
+                                            "residual_contracts", []),
+                                        consistency_action=(cand.get("experiment_plan") or {}).get(
+                                            "consistency_action", {}),
                                         required_runtime=required_runtime,
                                         java_bin=java_bin, java_home=java_home))
     return cells
@@ -1030,6 +1380,7 @@ def verify_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
         / ("round-%02d" % round_no) / "approval-log.jsonl")
     runner = JavaMatrixRunner(ctx.root, ctx.cfg.name, round_no, approval=approval)
     cells: List[Dict[str, Any]] = []
+    results: Dict[str, List[Dict[str, Any]]] = {}
     try:
         results = runner.run_manifest([spec], ctx.jars_by_version())
         cells, convergence = converge_s4_cells(
@@ -1083,9 +1434,24 @@ def verify_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
         summary = summarize_candidate(cells)
         summary["harness_error"] = "%s: %s" % (type(exc).__name__, exc)
         summary["s4_result_sources"] = convergence["sources"]
+    try:
+        runtime_lab = run_s4_runtime_lab(
+            ctx.root, ctx.cfg.name, round_no, ctx.cfg, [cand], [spec], [],
+            ctx.jars_by_version(), baseline_results=results, approval=approval,
+            version_universe=sorted(ctx.jars_by_version()),
+            source_revision_artifacts=ctx.cfg.resolve_source_revision_artifacts(
+                ctx.root))
+    except Exception as exc:
+        runtime_lab = {
+            "schema_version": "runtime-lab-v1", "scope": "ordinary-s4",
+            "status": "run-failed",
+            "reason": "%s: %s" % (type(exc).__name__, str(exc)[:240]),
+            "fixtures": [], "claim_status": "not-a-finding",
+        }
     conclusion = _derive(summary, cand, cells)
     return {"candidate": cand, "audit": audit, "summary": summary,
-            "conclusion": conclusion, "spec": spec}
+            "conclusion": conclusion, "spec": spec,
+            "runtime_lab": runtime_lab}
 
 
 def _verify_fuzz_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
@@ -1108,7 +1474,15 @@ def _verify_fuzz_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
     jvm = fz.get("jvm") or cand.get("jvm") or {}
     cells = [MatrixCell(
         version=v, safe_mode=s, features=[], precondition="none",
-        args=["--entry", fz["entry"], "--hex", fz["hex"]], jvm=jvm)
+        args=["--entry", fz["entry"], "--hex", fz["hex"]], jvm=jvm,
+        sequence=cand.get("sequence", []),
+        concurrency=cand.get("concurrency", 1),
+        availability_probe=cand.get("availability_probe", False),
+        capability_contract=capability_contract_from_candidate(cand),
+        residual_contracts=(cand.get("experiment_plan") or {}).get(
+            "residual_contracts", []),
+        consistency_action=(cand.get("experiment_plan") or {}).get(
+            "consistency_action", {}))
         for v in versions for s in (True, False)]
     spec = POCSpec(
         candidate_id=cid, class_name=class_name, src="FuzzProbe.java",
@@ -1291,6 +1665,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
     target_rule_hits = collect_target_rule_hits(
         ctx.cfg.target_type, ctx.cfg.source_dirs, ctx.root)
     chain_hints = composite_chain_hints(ctx._source_sink_graph)
+    chain_candidates = composite_chain_candidates(chain_hints)
     ctx.write_artifact(round_no, "S1", "security-fix-history.json", patch_history)
     ctx.write_artifact(round_no, "S1", "patch-variants.json", [
         {k: fix[k] for k in ("short_commit", "commit", "parent", "subject",
@@ -1303,12 +1678,42 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         "target_type": ctx.cfg.target_type, "hits": target_rule_hits,
     })
     ctx.write_artifact(round_no, "S1", "composite-chain-hints.json", chain_hints)
+    ctx.write_artifact(round_no, "S1", "composite-chain-candidates.json",
+                       chain_candidates)
+    capability_state = _ensure_capability_inventory(ctx)
+    ctx.write_artifact(round_no, "S1", "capability-graph.json",
+                       capability_state.get("graph") or {})
+    ctx.write_artifact(round_no, "S1", "capability-candidates.json",
+                       capability_state.get("candidates") or [])
+    ctx.write_artifact(round_no, "S1", "threat-model.json",
+                       capability_state.get("threat_model") or {})
+    ctx.write_artifact(round_no, "S1", "semantic-guard-evidence.json",
+                       capability_state.get("semantic_guards") or {})
+    ctx.write_artifact(round_no, "S1", "semantic-guard-candidates.json",
+                       capability_state.get("semantic_guard_candidates") or [])
+    ctx.write_artifact(round_no, "S1", "semantic-call-evidence.json",
+                       capability_state.get("semantic_calls") or {})
+    ctx.write_artifact(round_no, "S1", "semantic-call-candidates.json",
+                       capability_state.get("semantic_call_candidates") or [])
+    ctx.write_artifact(round_no, "S1", "semantic-controlflow-evidence.json",
+                       capability_state.get("semantic_controlflow") or {})
+    ctx.write_artifact(round_no, "S1", "semantic-controlflow-candidates.json",
+                       capability_state.get("semantic_controlflow_candidates") or [])
+    ctx.write_artifact(round_no, "S1", "semantic-ast-evidence.json",
+                       capability_state.get("semantic_ast") or {})
+    ctx.write_artifact(round_no, "S1", "semantic-ast-candidates.json",
+                       capability_state.get("semantic_ast_candidates") or [])
+    if capability_state.get("error"):
+        ctx.write_artifact(round_no, "S1", "capability-graph-error.json", {
+            "error": capability_state["error"]})
 
     # ---- S2: candidates (resumable) -----------------------------------
     s2 = store.load_stage("S2")
     if s2 and not force:
         candidates = s2["candidates"]
         print("[round-%02d] S2 resume: %d candidates loaded" % (round_no, len(candidates)))
+        experiment_plans = _attach_experiment_plans(ctx, round_no, candidates)
+        store.save_stage("S2", {"candidates": candidates})
     else:
         fuzz_cands: List[Dict[str, Any]] = []
         if ctx.fuzz_budget > 0:
@@ -1332,7 +1737,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         # with a citable file:line and a named missing control should win over
         # one that has neither.  The scheduler re-ranks everything after this,
         # so position is only a tiebreaker.
-        derived, derived_ids = static_candidates(ctx)
+        derived, derived_ids = static_candidates(ctx, round_no)
         if derived_ids:
             print("[round-%02d] S2: +%d index-derived candidates (spec §11/§12)"
                   % (round_no, len(derived_ids)))
@@ -1354,14 +1759,35 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         if not candidates:
             print("[round-%02d] no candidates; stopping" % round_no)
             return {"next_candidates": []}
+        experiment_plans = _attach_experiment_plans(ctx, round_no, candidates, merged)
         ctx.write_artifact(round_no, "S2", "candidate-matrix.json",
                            {"candidate_count": len(candidates),
                             "schedule_note": schedule_note,
                             "pool_size": len(merged),
                             "pinned": pinned,
-                            "matrix": [{k: c.get(k) for k in
-                                        ("candidate_id", "surface", "entry",
-                                         "input_shape", "logic", "authz_cases")} for c in candidates]})
+                            "experiment_plan_count": len(experiment_plans),
+                            "matrix": [
+                                dict(
+                                    [(k, c.get(k)) for k in (
+                                        "candidate_id", "surface", "entry",
+                                        "input_shape", "logic", "authz_cases",
+                                        "experiment_plan")]
+                                    + [("capability_contract",
+                                       (c.get("experiment_plan") or {}).get(
+                                           "capability_contract") or
+                                       capability_contract_from_candidate(c)),
+                                       ("variant_fixture_plan",
+                                        (c.get("experiment_plan") or {}).get(
+                                            "variant_fixture_plan", {})),
+                                       ("comparison_contract",
+                                        (c.get("experiment_plan") or {}).get(
+                                            "comparison_contract", {})),
+                                       ("consistency_action",
+                                        (c.get("experiment_plan") or {}).get(
+                                            "consistency_action", {}))]
+                                )
+                                for c in candidates
+                            ]})
         store.save_stage("S2", {"candidates": candidates})
 
     # ---- S3: static audit (resumable) ---------------------------------
@@ -1432,6 +1858,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                         "surface": cand.get("surface"),
                         "conclusion": row["conclusion"],
                         "evidence": row.get("summary", {}),
+                        "runtime_lab": row.get("runtime_lab"),
                     })
                 print("  %s -> %s" % (cand["candidate_id"], row["conclusion"]))
         serializable = []
@@ -1447,6 +1874,25 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             }
             for r in rows if (r.get("summary") or {}).get("authz_results")
         ])
+    lab_artifacts = [
+        row.get("runtime_lab") for row in rows + excluded
+        if isinstance(row.get("runtime_lab"), dict)
+    ]
+    ctx.write_artifact(
+        round_no, "S4", "runtime-lab.json",
+        merge_runtime_lab_artifacts(lab_artifacts, scope="autonomous-s4"))
+    s4_summaries = {
+        str(row.get("candidate", {}).get("candidate_id")): row.get("summary", {})
+        for row in rows if isinstance(row, dict)
+        and isinstance(row.get("candidate"), dict)
+    }
+    for item in excluded:
+        cid = str(item.get("candidate_id", ""))
+        if cid:
+            s4_summaries.setdefault(cid, item.get("evidence", {}))
+    ctx.write_artifact(
+        round_no, "S4", "residual-closure.json",
+        build_residual_closure_report(candidates, s4_summaries, round_no))
 
     # ---- S5: Novelty (resumable) --------------------------------------
     s5 = store.load_stage("S5")
@@ -1553,6 +1999,333 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         store.save_stage("S7", {"finding_docs": written})
 
     # ---- S8: ledger (resumable) ---------------------------------------
+    # Build the research-memory delta before the resumable ledger branch.  On
+    # resume this remains idempotent, while an interrupted S8 still leaves the
+    # runtime feedback available to the next scheduling round.
+    runtime_lab = {}
+    runtime_lab_path = (ctx.root / "state" / ctx.cfg.name
+                        / ("round-%02d" % round_no) / "S4" / "runtime-lab.json")
+    if runtime_lab_path.exists():
+        try:
+            loaded_lab = json.loads(runtime_lab_path.read_text(encoding="utf-8"))
+            if isinstance(loaded_lab, dict):
+                runtime_lab = loaded_lab
+        except (OSError, ValueError, TypeError):
+            runtime_lab = {}
+    prior_consistency_actions = load_research_consistency_actions(
+        ctx.root, ctx.cfg.name)
+    research_consistency_rechecks = build_research_consistency_rechecks(
+        runtime_lab, prior_consistency_actions)
+    research_consistency_rechecks_file = write_research_consistency_rechecks(
+        ctx.root, ctx.cfg.name, research_consistency_rechecks)
+    memory_summaries = {
+        str(row.get("candidate", {}).get("candidate_id")): row.get("summary", {})
+        for row in rows if isinstance(row, dict) and isinstance(row.get("candidate"), dict)
+    }
+    memory_conclusions = {
+        str(row.get("candidate", {}).get("candidate_id")): row.get("conclusion", "")
+        for row in rows if isinstance(row, dict) and isinstance(row.get("candidate"), dict)
+    }
+    for item in excluded:
+        cid = str(item.get("candidate_id", ""))
+        if cid:
+            memory_summaries.setdefault(cid, item.get("evidence", {}))
+            memory_conclusions.setdefault(cid, item.get("conclusion", ""))
+    from ..evaluation.replay_calibration import (
+        build_replay_calibration, load_replay_calibration,
+        write_replay_calibration,
+    )
+    from ..evaluation.replay_cohort import (
+        select_effective_replay_calibration,
+    )
+    from ..evaluation.replay_pack import (
+        build_replay_pack, write_replay_pack,
+    )
+    prior_replay_calibration = load_replay_calibration(
+        ctx.root, ctx.cfg.name)
+    replay_cohort = ctx.replay_cohort_calibration()
+    effective_replay_calibration = select_effective_replay_calibration(
+        prior_replay_calibration, replay_cohort)
+    memory_delta = build_round_memory(
+        candidates, memory_summaries, memory_conclusions, runtime_lab, round_no,
+        target_type=ctx.cfg.target_type)
+    memory = merge_research_memory(
+        load_research_memory(ctx.root, ctx.cfg.name), memory_delta)
+    memory_file = write_research_memory(ctx.root, ctx.cfg.name, memory)
+    review_feedback = load_review_feedback(ctx.root, ctx.cfg.name)
+    research_consistency = build_research_consistency(memory)
+    research_consistency_file = write_research_consistency(
+        ctx.root, ctx.cfg.name, research_consistency)
+    research_consistency_actions = build_research_consistency_actions(
+        research_consistency)
+    research_consistency_actions_file = write_research_consistency_actions(
+        ctx.root, ctx.cfg.name, research_consistency_actions)
+    portfolio = build_research_portfolio(
+        memory, review_feedback, ctx.benchmark_feedback(),
+        research_consistency, research_consistency_actions,
+        research_consistency_rechecks)
+    portfolio_file = write_research_portfolio(ctx.root, ctx.cfg.name, portfolio)
+    strategy = load_research_strategy(ctx.root, ctx.cfg.name)
+    if not strategy:
+        s2_strategy_path = (ctx.root / "state" / ctx.cfg.name
+                            / ("round-%02d" % round_no) / "S2"
+                            / "research-strategy.json")
+        try:
+            loaded_strategy = json.loads(
+                s2_strategy_path.read_text(encoding="utf-8"))
+            strategy = loaded_strategy if isinstance(loaded_strategy, dict) else {}
+        except (OSError, ValueError, TypeError):
+            strategy = {}
+    strategy_feedback = {}
+    research_guidance = {}
+    strategy_file = None
+    guidance_file = None
+    if strategy:
+        strategy, strategy_feedback = apply_strategy_observations(
+            strategy, candidates, memory_summaries, round_no)
+        strategy, research_guidance = apply_research_guidance(
+            strategy, portfolio, review_feedback, round_no,
+            replay_calibration=effective_replay_calibration)
+        if strategy:
+            strategy_file = write_research_strategy(
+                ctx.root, ctx.cfg.name, strategy)
+            guidance_file = write_research_guidance(
+                ctx.root, ctx.cfg.name, research_guidance)
+            ctx.write_artifact(round_no, "S8", "research-strategy.json", strategy)
+            ctx.write_artifact(
+                round_no, "S8", "research-strategy-feedback.json",
+                strategy_feedback)
+            ctx.write_artifact(
+                round_no, "S8", "research-guidance.json", research_guidance)
+    # Measure the agenda that drove this round before replacing it with the
+    # next queue.  This is bounded scheduling feedback, not a security verdict.
+    prior_research_agenda = load_research_agenda(ctx.root, ctx.cfg.name)
+    prior_agenda_outcomes = load_research_agenda_outcomes(
+        ctx.root, ctx.cfg.name)
+    prior_research_budget = load_research_budget(ctx.root, ctx.cfg.name)
+    schedule_snapshot = load_schedule_snapshot(
+        ctx.root, ctx.cfg.name, round_no)
+    verification_matrix = {}
+    verification_path = (ctx.root / "state" / ctx.cfg.name
+                         / ("round-%02d" % round_no) / "S4"
+                         / "verification-matrix.json")
+    try:
+        loaded_verification = json.loads(
+            verification_path.read_text(encoding="utf-8"))
+        verification_matrix = (loaded_verification
+                               if isinstance(loaded_verification, dict) else {})
+    except (OSError, ValueError, TypeError):
+        verification_matrix = {}
+    research_agenda_outcomes = build_research_agenda_outcomes(
+        prior_research_agenda, schedule_snapshot, verification_matrix,
+        runtime_lab, strategy_feedback,
+        prior_outcomes=prior_agenda_outcomes,
+        target=ctx.cfg.name, round_no=round_no)
+    research_agenda_outcomes_file = write_research_agenda_outcomes(
+        ctx.root, ctx.cfg.name, research_agenda_outcomes)
+    ctx.write_artifact(round_no, "S8", "research-agenda-outcomes.json",
+                       research_agenda_outcomes)
+    research_budget = build_research_budget(
+        prior_research_agenda, research_agenda_outcomes,
+        prior_budget=prior_research_budget, target=ctx.cfg.name,
+        round_no=round_no,
+        slots=((prior_research_agenda.get("policy") or {}).get(
+            "slots", 0) if prior_research_agenda else 0) or 8)
+    research_budget_file = write_research_budget(
+        ctx.root, ctx.cfg.name, research_budget)
+    ctx.write_artifact(round_no, "S8", "research-budget.json", research_budget)
+    research_agenda = build_research_agenda(
+        strategy, portfolio, target=ctx.cfg.name, round_no=round_no,
+        outcomes=research_agenda_outcomes, budget_policy=research_budget)
+    research_agenda_file = write_research_agenda(
+        ctx.root, ctx.cfg.name, research_agenda)
+    ctx.write_artifact(round_no, "S8", "research-agenda.json", research_agenda)
+    replay_calibration = build_replay_calibration(ctx.root, ctx.cfg.name)
+    replay_calibration_file = write_replay_calibration(
+        ctx.root, ctx.cfg.name, replay_calibration)
+    ctx.write_artifact(round_no, "S8", "research-replay-calibration.json",
+                       replay_calibration)
+    if replay_cohort:
+        ctx.write_artifact(round_no, "S8", "research-replay-cohort.json",
+                           replay_cohort)
+    ctx.write_artifact(round_no, "S8", "research-memory.json", memory_delta)
+    ctx.write_artifact(round_no, "S8", "research-memory-summary.json", memory["summary"])
+    ctx.write_artifact(round_no, "S8", "review-feedback.json", review_feedback)
+    ctx.write_artifact(
+        round_no, "S8", "research-consistency.json", research_consistency)
+    ctx.write_artifact(
+        round_no, "S8", "research-consistency-actions.json",
+        research_consistency_actions)
+    ctx.write_artifact(
+        round_no, "S8", "research-consistency-rechecks.json",
+        research_consistency_rechecks)
+    ctx.write_artifact(round_no, "S8", "research-portfolio.json", portfolio)
+    replay_pack = build_replay_pack(ctx.root, ctx.cfg.name)
+    replay_pack_file = write_replay_pack(
+        ctx.root, ctx.cfg.name, replay_pack)
+    ctx.write_artifact(round_no, "S8", "research-replay-pack.json", replay_pack)
+    research_memory_info = {
+        "artifact": str(memory_file.relative_to(ctx.root.resolve())),
+        "round_entries": len(memory_delta.get("entries", [])),
+        "total_entries": len(memory.get("entries", [])),
+        "states": memory.get("summary", {}).get("states", {}),
+        "claim_status": "not-a-finding",
+    }
+    review_feedback_info = {
+        "artifact": "state/%s/review-feedback.json" % ctx.cfg.name,
+        "count": review_feedback.get("summary", {}).get("feedback_count", 0),
+        "statuses": review_feedback.get("summary", {}).get("statuses", {}),
+        "claim_status": "not-a-finding",
+    }
+    research_portfolio_info = {
+        "artifact": str(portfolio_file.relative_to(ctx.root.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-portfolio.json"
+                          % (ctx.cfg.name, round_no),
+        "mechanism_count": portfolio.get("summary", {}).get("mechanism_count", 0),
+        "unresolved_mechanisms": portfolio.get("summary", {}).get(
+            "unresolved_mechanisms", 0),
+        "next_probe_count": len(portfolio.get("next_probes") or []),
+        "surface_lane_coverage": (portfolio.get("surface_lane_coverage") or {}
+                                  ).get("summary", {}),
+        "claim_status": "not-a-finding",
+    }
+    research_consistency_info = {
+        "artifact": str(research_consistency_file.relative_to(ctx.root.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-consistency.json"
+                          % (ctx.cfg.name, round_no),
+        "status_counts": (research_consistency.get("summary") or {}
+                           ).get("statuses", {}),
+        "conflicted_entries": (research_consistency.get("summary") or {}
+                               ).get("conflicted_entries", 0),
+        "unstable_entries": (research_consistency.get("summary") or {}
+                             ).get("unstable_entries", 0),
+        "claim_status": "not-a-finding",
+    }
+    research_consistency_actions_info = {
+        "artifact": str(research_consistency_actions_file.relative_to(
+            ctx.root.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-consistency-actions.json"
+                          % (ctx.cfg.name, round_no),
+        "action_count": (research_consistency_actions.get("summary") or {}
+                          ).get("action_count", 0),
+        "action_counts": (research_consistency_actions.get("summary") or {}
+                           ).get("action_counts", {}),
+        "claim_status": "not-a-finding",
+    }
+    research_consistency_rechecks_info = {
+        "artifact": str(research_consistency_rechecks_file.relative_to(
+            ctx.root.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-consistency-rechecks.json"
+                          % (ctx.cfg.name, round_no),
+        "status_counts": {
+            key: value for key, value in
+            (research_consistency_rechecks.get("summary") or {}).items()
+            if key in {"observed", "partial", "environment_gap",
+                       "not_executed"}
+        },
+        "claim_status": "not-a-finding",
+    }
+    research_agenda_info = {
+        "artifact": str(research_agenda_file.relative_to(
+            ctx.root.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-agenda.json"
+                          % (ctx.cfg.name, round_no),
+        "selected_count": (research_agenda.get("summary") or {}).get(
+            "selected_count", 0),
+        "deferred_count": (research_agenda.get("summary") or {}).get(
+            "deferred_count", 0),
+        "surface_counts": (research_agenda.get("summary") or {}).get(
+            "surface_counts", {}),
+        "claim_status": "not-a-finding",
+    }
+    research_agenda_outcomes_info = {
+        "artifact": str(research_agenda_outcomes_file.relative_to(
+            ctx.root.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-agenda-outcomes.json"
+                          % (ctx.cfg.name, round_no),
+        "selected_count": (research_agenda_outcomes.get("summary") or {}
+                            ).get("selected_count", 0),
+        "productive_selected_count": (research_agenda_outcomes.get(
+            "summary") or {}).get("productive_selected_count", 0),
+        "selected_yield": (research_agenda_outcomes.get("summary") or {}
+                           ).get("selected_yield"),
+        "outcome_counts": (research_agenda_outcomes.get("summary") or {}
+                            ).get("outcome_counts", {}),
+        "claim_status": "not-a-finding",
+    }
+    research_budget_info = {
+        "artifact": str(research_budget_file.relative_to(
+            ctx.root.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-budget.json"
+                          % (ctx.cfg.name, round_no),
+        "surface_count": (research_budget.get("summary") or {}).get(
+            "surface_count", 0),
+        "recommendation_counts": (research_budget.get("summary") or {}
+                                   ).get("recommendation_counts", {}),
+        "claim_status": "not-a-finding",
+    }
+    research_replay_calibration_info = {
+        "artifact": str(replay_calibration_file.relative_to(ctx.root.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-replay-calibration.json"
+                          % (ctx.cfg.name, round_no),
+        "status": replay_calibration.get("status", "no-data"),
+        "replayed_guidance_items": replay_calibration.get(
+            "metrics", {}).get("replayed_guidance_items", 0),
+        "replacement_hit_rate": replay_calibration.get(
+            "metrics", {}).get("replacement_hit_rate"),
+        "claim_status": "not-a-finding",
+    }
+    research_replay_pack_info = {
+        "artifact": str(replay_pack_file.relative_to(ctx.root.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-replay-pack.json"
+                          % (ctx.cfg.name, round_no),
+        "status": (replay_pack.get("provenance") or {}).get(
+            "status", "not-executed"),
+        "valid_for_cohort": (replay_pack.get("provenance") or {}).get(
+            "valid_for_cohort", False),
+        "pack_digest": replay_pack.get("pack_digest", ""),
+        "claim_status": "not-a-finding",
+    }
+    research_replay_cohort_info = {
+        "claim_status": "not-a-finding",
+    }
+    if replay_cohort:
+        research_replay_cohort_info = {
+            "artifact": "configured:replay_cohort_calibration_path",
+            "round_artifact": "state/%s/round-%02d/S8/research-replay-cohort.json"
+                              % (ctx.cfg.name, round_no),
+            "status": replay_cohort.get("status", "no-data"),
+            "eligible_projects": replay_cohort.get("metrics", {}).get(
+                "eligible_projects", 0),
+            "policy_threshold": replay_cohort.get("policy", {}).get(
+                "replacement_zero_gain_rounds", 1),
+            "claim_status": "not-a-finding",
+        }
+    research_strategy_info = {
+        "claim_status": "not-a-finding",
+    }
+    if strategy_file:
+        research_strategy_info = {
+            "artifact": str(strategy_file.relative_to(ctx.root.resolve())),
+            "round_artifact": "state/%s/round-%02d/S8/research-strategy.json"
+                              % (ctx.cfg.name, round_no),
+            "feedback_artifact": "state/%s/round-%02d/S8/research-strategy-feedback.json"
+                                % (ctx.cfg.name, round_no),
+            "guidance_artifact": (str(guidance_file.relative_to(
+                ctx.root.resolve())) if guidance_file else
+                "state/%s/coverage/research-guidance.json" % ctx.cfg.name),
+            "guidance_round_artifact": "state/%s/round-%02d/S8/research-guidance.json"
+                                      % (ctx.cfg.name, round_no),
+            "observed_items": strategy.get("summary", {}).get(
+                "observed_items", 0),
+            "information_gain": strategy_feedback.get("summary", {}).get(
+                "information_gain", 0),
+            "next_actions": research_guidance.get("summary", {}).get(
+                "action_counts", {}),
+            "replacement_recommendations": research_guidance.get(
+                "summary", {}).get("replacement_recommendations", 0),
+            "claim_status": "not-a-finding",
+        }
     s8 = store.load_stage("S8")
     if s8 and not force:
         print("[round-%02d] S8 resume: ledger already written" % round_no)
@@ -1579,13 +2352,71 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                 "LLM tokens": ctx.llm.usage.total_tokens,
             },
             "next_round": [],
+            "research_memory": research_memory_info,
+            "research_consistency": research_consistency_info,
+            "research_consistency_actions": research_consistency_actions_info,
+            "research_consistency_rechecks": research_consistency_rechecks_info,
+            "research_agenda": research_agenda_info,
+            "research_agenda_outcomes": research_agenda_outcomes_info,
+            "research_budget": research_budget_info,
+            "review_feedback": review_feedback_info,
+            "research_portfolio": research_portfolio_info,
+            "research_replay_calibration": research_replay_calibration_info,
+            "research_replay_pack": research_replay_pack_info,
+            "research_replay_cohort": research_replay_cohort_info,
+            "research_strategy": research_strategy_info,
         }
+        by_candidate_memory = {
+            str(entry.get("candidate_id")): entry
+            for entry in memory_delta.get("entries", [])
+        }
+        for row in ledger_rows:
+            entry = by_candidate_memory.get(str(row.get("candidate_id")))
+            if entry:
+                row["research"] = {
+                    "research_key": entry.get("research_key", ""),
+                    "states": sorted({str(event.get("state")) for event in
+                                       entry.get("events", []) if event.get("state")}),
+                    "claim_status": "not-a-finding",
+                }
         write_round_artifacts(ctx.root, ctx.cfg.name, round_no, ledger_rows, excluded,
                               summary, lang=ctx.cfg.output_lang)
         ctx.write_artifact(round_no, "S8", "llm-usage.json", ctx.llm.usage.to_dict())
-        store.save_stage("S8", {"ledger_rows": len(ledger_rows), "excluded": len(excluded)})
+        store.save_stage("S8", {"ledger_rows": len(ledger_rows), "excluded": len(excluded),
+                                "research_memory": research_memory_info,
+                                "research_consistency": research_consistency_info,
+                                "research_consistency_actions":
+                                research_consistency_actions_info,
+                                "research_consistency_rechecks":
+                                research_consistency_rechecks_info,
+                                "research_agenda": research_agenda_info,
+                                "research_agenda_outcomes":
+                                research_agenda_outcomes_info,
+                                "research_budget": research_budget_info,
+                                "review_feedback": review_feedback_info,
+                                "research_portfolio": research_portfolio_info,
+                                "research_replay_calibration":
+                                research_replay_calibration_info,
+                                "research_replay_pack":
+                                research_replay_pack_info,
+                                "research_replay_cohort":
+                                research_replay_cohort_info,
+                                "research_strategy": research_strategy_info})
     print("[round-%02d] done: 确认=%d 排除=%d" % (round_no, len(rows), len(excluded)))
-    return {"next_candidates": _propose_next(ctx, candidates, rows)}
+    return {"next_candidates": _propose_next(ctx, candidates, rows),
+            "research_memory": research_memory_info,
+            "research_consistency": research_consistency_info,
+            "research_consistency_actions": research_consistency_actions_info,
+            "research_consistency_rechecks": research_consistency_rechecks_info,
+            "research_agenda": research_agenda_info,
+            "research_agenda_outcomes": research_agenda_outcomes_info,
+            "research_budget": research_budget_info,
+            "review_feedback": review_feedback_info,
+            "research_portfolio": research_portfolio_info,
+            "research_replay_calibration": research_replay_calibration_info,
+            "research_replay_pack": research_replay_pack_info,
+            "research_replay_cohort": research_replay_cohort_info,
+            "research_strategy": research_strategy_info}
 
 
 def _repro_text(row: Dict[str, Any]) -> str:
@@ -1637,6 +2468,17 @@ def _evidence_lines(row: Dict[str, Any]) -> List[str]:
         lines.append("%s SafeMode=%s %s -> AVAILABILITY_PROOF=concurrency:%s service_unavailable:%s" % (
             a.get("version"), a.get("safe"), a.get("precondition"),
             a.get("concurrency"), a.get("service_unavailable")))
+    for x in s.get("experiment_evidence", [])[:4]:
+        lines.append("%s SafeMode=%s %s -> EXPERIMENT sequence=%s sequence_status=%s "
+                     "declared_concurrency=%s probe=%s STEP=%s STATE=%s STEP_EVIDENCE=%s" % (
+                         x.get("version"), x.get("safe"), x.get("precondition"),
+                         ",".join(str(step) for step in x.get("declared_sequence", [])) or "-",
+                         x.get("sequence_status", "unknown"),
+                         x.get("declared_concurrency", 1),
+                         x.get("declared_availability_probe", False),
+                         "|".join(str(step) for step in x.get("step_trace", [])[:8]) or "-",
+                         "|".join(str(state) for state in x.get("state_trace", [])[:8]) or "-",
+                         "|".join(str(ev) for ev in x.get("step_evidence", [])[:4]) or "-"))
     for a in s.get("authz_results", [])[:8]:
         az = a.get("authz", {})
         lines.append("%s SafeMode=%s %s -> AUTHZ_CASE=%s principal=%s role=%s tenant=%s object=%s assertion=%s boundary_violation=%s" % (
@@ -1644,6 +2486,12 @@ def _evidence_lines(row: Dict[str, Any]) -> List[str]:
             az.get("case_id", "?"), az.get("principal", "?"), az.get("role", "?"),
             az.get("tenant_id", "?"), az.get("object_id", "?"),
             a.get("status", "?"), a.get("boundary_violation", False)))
+    for residual in s.get("residual_falsifiers", [])[:8]:
+        lines.append("RESIDUAL=%s status=%s falsifier=%s execution=%s effect=%s" % (
+            residual.get("residual_id", "?"), residual.get("status", ""),
+            residual.get("falsifier_code", ""),
+            residual.get("execution_state", ""),
+            residual.get("effect_observed", False)))
     for issue in s.get("validation_issues", []):
         lines.append("VALIDATION_ISSUE=" + str(issue))
     if s.get("cells_ran") is not None:

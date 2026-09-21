@@ -798,7 +798,7 @@ def load_control_candidates(store: Any) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def static_candidates(store: Any) -> List[Dict[str, Any]]:
-    """Every index-derived candidate: control map (§11) then differential (§12).
+    """Every index-derived candidate: controls, differential, paths, guards.
 
     Both are already persisted by :func:`agent.analysis.inventory.build_inventory`,
     so this is a read -- it never re-derives, and it never consults an LLM.
@@ -815,6 +815,31 @@ def static_candidates(store: Any) -> List[Dict[str, Any]]:
     # control vocabulary), so the dependency may only be resolved at call time.
     from . import differential as differential_analysis
     candidates.extend(differential_analysis.load_differential_candidates(store))
+    # Capability paths are deliberately read-only here.  Inventory owns graph
+    # construction; S2 only merges the persisted, explicitly non-finding leads.
+    from . import capability_graph as capability_analysis
+    candidates.extend(capability_analysis.load_capability_candidates(store))
+    # Semantic path leads are also persisted by inventory.  Keep this import
+    # late so the semantic module can use the control vocabulary without a
+    # module-import cycle.
+    from . import semantic_paths as semantic_path_analysis
+    candidates.extend(semantic_path_analysis.load_semantic_candidates(store))
+    # Guard posture/binding leads are the next bounded semantic layer.  Keep
+    # them read-only here; inventory owns their deterministic construction.
+    from . import semantic_guards as semantic_guard_analysis
+    candidates.extend(semantic_guard_analysis.load_semantic_guard_candidates(store))
+    # One-hop call-site binding turns some cross-symbol gaps into citable
+    # parameter/return tracing tasks without claiming complete data flow.
+    from . import semantic_calls as semantic_call_analysis
+    candidates.extend(semantic_call_analysis.load_semantic_call_candidates(store))
+    # Structural branch relations refine guard posture without claiming a CFG.
+    from . import semantic_controlflow as semantic_controlflow_analysis
+    candidates.extend(
+        semantic_controlflow_analysis.load_semantic_controlflow_candidates(store))
+    # Python AST witnesses add syntax-aware scope/branch review leads without
+    # replacing the language-agnostic structural layer.
+    from . import semantic_ast as semantic_ast_analysis
+    candidates.extend(semantic_ast_analysis.load_semantic_ast_candidates(store))
     return candidates
 
 

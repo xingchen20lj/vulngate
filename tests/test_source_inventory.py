@@ -330,6 +330,10 @@ class CoverageStoreTests(InventoryFixture):
             summary = store.read("inventory-summary")
             self.assertIn("counts", summary)
             self.assertIn("excluded_dirs", summary)
+            capability = store.read("capability-graph")
+            self.assertEqual(capability.get("schema_version"),
+                             "capability-graph-v1")
+            self.assertIsInstance(store.read_records("capability-candidates"), list)
             self.assertEqual(store.read("does-not-exist", default=[]), [])
         finally:
             self._tmp2.cleanup()

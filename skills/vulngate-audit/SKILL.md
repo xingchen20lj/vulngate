@@ -159,6 +159,7 @@ Run stages in order unless a hard gate or explicit scope rule ends a candidate.
 - **Advisory/fix-diff reverse analysis:** when a recent advisory exists, obtain the affected/patched range and inspect the fix diff. Treat the old path as a high-priority candidate, but do not treat the existence of a patch as runtime proof.
 - **Security-fix history:** even without an advisory, inspect recent security-oriented commits. Persist `S1/security-fix-history.json` and `S1/patch-variants.json`; generate `surface=fix-completeness` candidates for credible fixes and sibling paths.
 - **Source→Sink evidence graph:** `S1/source-sink-graph.json` is a heuristic locator using `Source→Transform→Validation→Authorization→Sink`. Paths such as `heuristic-nearby` must carry `requires_manual_dataflow=true`. They are not semantic/interprocedural proof.
+- **Composite-chain candidates:** paths containing both an authorization boundary and a dangerous sink are also materialized as deterministic `chain-*` candidates in `S1/composite-chain-candidates.json` and merged into S2. They must retain `heuristic-nearby` / `requires_manual_dataflow=true`; their purpose is to force S3/S4 validation of subject binding, transformed objects and final effects, never to bypass G1/G4.
 - Generate `project-profile.json`, `target-rules.json`, and `composite-chain-hints.json` when applicable. These prioritize research and improve candidate coverage; they are not conclusions.
 - **Host-native coverage bootstrap:** `source-map` is a bounded digest, not the coverage index. In Mode A, explicitly build the full index once in S1 (and rebuild after changing source or scope):
 
@@ -166,7 +167,7 @@ Run stages in order unless a hard gate or explicit scope rule ends a candidate.
   python3 "$PLUGIN_ROOT/scripts/agent_cli.py" coverage <target> --workspace <audit-dir> --root <source-root> --rebuild --json
   ```
 
-  Keep `<audit-dir>` outside the plugin cache. In S2, merge all candidates from `control-candidates.json` and `differential-candidates.json` into the host's candidate pool before calling `schedule`; use `selected_ids` for this round and preserve the full pool for later rounds. After writing the S8 ledger, run `coverage` again with the same workspace to refresh review status. The config-driven pipeline performs S1 indexing and S2 merging automatically.
+  Keep `<audit-dir>` outside the plugin cache. In S2, merge all candidates from `control-candidates.json`, `differential-candidates.json`, `capability-candidates.json`, `semantic-path-candidates.json`, `semantic-guard-candidates.json`, `semantic-call-candidates.json`, `semantic-controlflow-candidates.json`, and `semantic-ast-candidates.json` into the host's candidate pool before calling `schedule`; use `selected_ids` for this round and preserve the full pool for later rounds. After writing the S8 ledger, run `coverage` again with the same workspace to refresh review status. The config-driven pipeline performs S1 indexing and S2 merging automatically.
 - **Coverage ledger:** S1 also builds the target-scoped `state/<target>/coverage/` index (source universe, entries, sinks, security controls) and writes the coverage summary. Every production source file is either `indexed` or carries an explicit `skip_reason`; excluded directories are recorded with a file count instead of being dropped silently. Query it at any time:
 
   ```bash
@@ -174,7 +175,7 @@ Run stages in order unless a hard gate or explicit scope rule ends a candidate.
   ```
 
   The audit's stop condition is `HIGH-risk uncovered == 0`, not "no new candidates". A zero denominator renders `n/a`, never `100%`.
-- **Cross-procedural layer:** the same index also carries `symbol-index.json`, `call-graph.json`, `flow-index.json`, `sink-reachability.json`, `control-map.json`, `sibling-groups.json` and `differential-index.json`. Sinks are analysed in both directions — forward from every external entry, and backward from every sink — so a path only the sink scan can see is either a confirmed flow or a recorded `coverage_gap`. Flow paths are `heuristic-callgraph`: they are leads, never proofs, and nothing in this layer may set `runtime-verified`. `FlowRecord.direction` states the path *shape*:
+- **Cross-procedural layer:** the same index also carries `symbol-index.json`, `call-graph.json`, `flow-index.json`, `sink-reachability.json`, `control-map.json`, `sibling-groups.json`, `differential-index.json`, the bounded `capability-graph.json` / `capability-candidates.json`, `semantic-path-evidence.json` / `semantic-path-candidates.json`, `semantic-guard-evidence.json` / `semantic-guard-candidates.json`, bounded `semantic-call-evidence.json` / `semantic-call-candidates.json`, bounded `semantic-controlflow-evidence.json` / `semantic-controlflow-candidates.json`, and bounded Python `semantic-ast-evidence.json` / `semantic-ast-candidates.json`. Sinks are analysed in both directions — forward from every external entry, and backward from every sink — so a path only the sink scan can see is either a confirmed flow or a recorded `coverage_gap`. Flow paths are `heuristic-callgraph`: they are leads, never proofs, and nothing in this layer may set `runtime-verified`. `FlowRecord.direction` states the path *shape*:
   - `cross-procedural` — at least one call edge (the useful case);
   - `intra-symbol` — entry and sink in the same method; this is the archetypal "handler does the dangerous thing" finding and keeps full priority;
   - `module-scope` — entry and sink both at module level in one file. Reported, but ranked below real call chains, because a file is not a handler.
@@ -187,6 +188,55 @@ Run stages in order unless a hard gate or explicit scope rule ends a candidate.
   python3 scripts/agent_cli.py controls <target> --show-candidates
   python3 scripts/agent_cli.py differential <target> --show-candidates \
     --fix-history state/<target>/round-01/S1/security-fix-history.json
+  ```
+- **Capability-primitive search:** `capability-graph.json` maps observed entry/flow/sink signals to bounded `read` / `write` / `exec` / `ssrf` / credential and evaluation primitives. `capability-candidates.json` composes only explicitly listed equations, records `observed_capabilities` versus `missing_capabilities`, emits a minimal verification sequence, and carries a bounded S4 `capability_contract`. A complete-looking chain is still `claim_status=not-a-finding`, `requires_manual_dataflow=true`, and `runtime_required=true`; missing primitives are pending research goals, never negative evidence or an RCE claim.
+
+- **Semantic path evidence:** `semantic-path-evidence-v1` checks whether controls on a static path occur before the sink and in the same bounded lexical scope, then performs a same-symbol parameter/alias walk. It distinguishes `direct`, `propagated`, `not-traced`, and `cross-symbol-unresolved` data-flow states plus `before-sink`, `after-sink`, `same-line`, and `cross-symbol-unverified` control alignment. It does not model branch dominance, types, virtual dispatch, DI, reflection, callbacks, or sanitizer semantics; it never copies source prose, never proves safety, and always remains `claim_status=not-a-finding` / `heuristic-nearby`.
+
+  ```bash
+  python3 scripts/agent_cli.py semantic-paths <target> \
+    --workspace <audit-dir> --show-candidates --json
+  ```
+
+- **Semantic guard evidence:** `semantic-guard-evidence-v1` adds two bounded
+  review signals on top of semantic paths: branch posture
+  (`terminating-guard-likely`, `nested-branch-likely`, `non-branch-check`, or
+  unresolved) and subject/object binding (`overlap`, `mismatch`, or
+  unresolved). It does not prove branch dominance, path feasibility, object or
+  tenant identity, or authorization correctness; it never copies source prose.
+  Rows and `guard-*` candidates remain `claim_status=not-a-finding`,
+  `heuristic-nearby`, and `requires_manual_dataflow=true`.
+
+  ```bash
+  python3 scripts/agent_cli.py semantic-guards <target> \
+    --workspace <audit-dir> --show-candidates --json
+  ```
+
+- **Semantic call binding evidence:** `semantic-call-evidence-v1` adds a bounded one-hop bridge over otherwise unresolved cross-symbol paths. It records callsite argument/parameter binding, limited tainted-parameter propagation, return-shape hints, and whether the eventual sink argument is statically bound. It does not model complete CFGs, types or aliases, virtual dispatch, DI, reflection, callbacks, async behavior, containers, or sanitizer semantics; `bound` is a research signal, not a data-flow proof. Rows and `call-*` candidates remain `claim_status=not-a-finding`, `heuristic-nearby`, and `requires_manual_dataflow=true`.
+
+  ```bash
+  python3 scripts/agent_cli.py semantic-calls <target> \
+    --workspace <audit-dir> --show-candidates --json
+  ```
+
+- **Semantic control-flow evidence:** `semantic-controlflow-evidence-v1` adds a bounded structural layer over guard rows. It groups brace/indent branch intervals and records whether the sink is likely inside the guarded branch, after a terminating rejection branch, or on an `else`/`except` alternate path. `dominates-likely` is a trace-selection signal, not a complete CFG or dominance proof; loops, short-circuit conditions, exceptions, fallthrough, macros and path feasibility remain unresolved. Rows and `cfg-*` candidates remain `claim_status=not-a-finding`, `heuristic-nearby`, and `requires_manual_dataflow=true`.
+
+  ```bash
+  python3 scripts/agent_cli.py semantic-controlflow <target> \
+    --workspace <audit-dir> --show-candidates --json
+  ```
+
+- **Python AST evidence:** `semantic-ast-evidence-v1` parses each bounded Python file once and records syntax-tree scope, branch membership, negative-test shape, direct terminal statements, `else`/exception alternate paths, and parse status. It is a syntax witness, not a complete CFG, dominance/SSA, type/dispatch or runtime proof; unsupported languages and parse failures remain explicit gaps. Rows and `ast-*` candidates remain `claim_status=not-a-finding`, `heuristic-nearby`, and `requires_manual_dataflow=true`, with no source text or AST dump stored.
+
+  ```bash
+  python3 scripts/agent_cli.py semantic-ast <target> \
+    --workspace <audit-dir> --show-candidates --json
+  ```
+
+- **Attacker-path threat model:** `threat-model.json` is a bounded deterministic join of entries, trust boundaries, flows, sinks, static control posture, unresolved reachability and matching capability hypotheses. It records attacker-role labels, preconditions and research questions so S2/S3 can reason about a whole path instead of an isolated sink. It is mirrored to `S1/threat-model.json`, loaded into the scheduler prompt/plan, and is inspectable with `python3 scripts/agent_cli.py threat-model <target> --workspace <audit-dir> --json`. Route exposure, real data flow, control ordering, capability transitions and typed effects remain pending until S3/S4 evidence; every row is `claim_status=not-a-finding`.
+
+  ```bash
+  python3 scripts/agent_cli.py capability <target> --show-candidates
   ```
 - Gate **G0**: reject dead/unsupported code paths.
 - Gate **G1**: require reachability from untrusted input. If unreachable, retain source evidence for the exclusion.
@@ -220,6 +270,21 @@ Precondition tiers:
 
 Do not write final conclusions in S2.
 
+#### Falsifiable experiment plans
+
+S2 also writes `S2/experiment-plans.json`, covering the complete candidate
+pool and marking which candidates were scheduled in this round. The
+deterministic planner attaches a bounded research checklist for the candidate's
+observable signals: baseline reachability, authorization boundaries, state
+sequences, concurrency/availability, fix variants, and typed effects when
+applicable. Each plan contains required observations and explicit falsifiers.
+The artifact is a research plan with `claim_status=not-a-finding`; it is never
+runtime evidence or a final conclusion. S3 may use it to choose the next
+probe, while G4/G5 still require the corresponding persisted observations.
+When an explicit `research-benchmark-feedback-v1` artifact is supplied, the
+planner adds bounded benchmark observations and falsifiers to the checklist;
+it never changes candidate status, impact, CVSS, or G4/G5.
+
 #### S2 candidate scheduling (coverage-driven, spec §13/§14/§15)
 
 S2 no longer hands the model "the few most dangerous snippets" and takes
@@ -234,6 +299,12 @@ python3 scripts/agent_cli.py schedule <target> \
 
 # include the structured prompt block S2 feeds the model
 python3 scripts/agent_cli.py schedule <target> --config targets/<t>.json --prompt
+
+# feed a prior benchmark result into the next round's bounded research priority
+python3 scripts/agent_cli.py schedule <target> \
+  --candidates state/<target>/round-01/S2/candidate-matrix.json \
+  --benchmark-result state/research-benchmark-feedback.json \
+  --slots 8 --round 2 --json
 
 # the same schedule, summarised next to the coverage report
 python3 scripts/agent_cli.py coverage <target> --schedule
@@ -263,9 +334,12 @@ What this buys across rounds:
 - the residual sweep (spec §14) recomputes the gaps, so each round's input is
   the *new* gap list rather than the same top-N.
 
-Two index-derived candidate families are **prepended** to the pool before
-scoring: the control map's `ctl-*` candidates (spec §11) and the differential's
-`dif-*` candidates (spec §12), both already persisted by S1. They are
+Eight index-derived candidate families are **prepended** to the pool before
+scoring: the control map's `ctl-*` candidates (spec §11), the differential's
+`dif-*` candidates (spec §12), the capability graph's `cap-*` research
+paths, semantic path `sem-*` leads, semantic guard `guard-*` leads, semantic
+call `call-*` leads, semantic control-flow `cfg-*` leads, and Python AST
+`ast-*` leads, all already persisted by S1. They are
 deliberately **not capped** — their ids are regenerated identically every round,
 so a truncated prefix would starve every later finding forever; oversize pools
 are absorbed by the quota. Ties go to the candidate with a citable `file:line`
@@ -329,6 +403,406 @@ Web/application candidates may also add:
 identity × role × tenant × object ownership
 ```
 
+Stateful and race-oriented candidates may additionally declare a bounded
+experiment contract per cell:
+
+```text
+sequence (step identifiers, max 16) × concurrency (1..64) × availability_probe
+```
+
+The runner exposes these declarations as `VULNGATE_SEQUENCE`,
+`VULNGATE_CONCURRENCY`, and `VULNGATE_AVAILABILITY_PROBE`, and persists them
+with the cell. PoCs may emit repeated `STEP=`, `STEP_EVIDENCE=`, and `STATE=`
+lines; the runner preserves ordered traces. A declared concurrency or probe is
+metadata, not runtime proof: `A:H` still requires observed
+`CONCURRENCY>=2` plus `SERVICE_UNAVAILABLE=true` (or an equivalent accepted
+observation).
+
+Capability-chain candidates may additionally carry a bounded
+`capability_contract` per cell. The runner exposes its read-only declaration as
+`VULNGATE_CAPABILITY_CONTRACT`, `VULNGATE_CAPABILITIES`,
+`VULNGATE_OBSERVED_CAPABILITIES`, `VULNGATE_MISSING_CAPABILITIES`, and
+`VULNGATE_TRANSITIONS`. PoCs may emit repeated `CAPABILITY=` /
+`CAPABILITY_EVIDENCE=` and `TRANSITION=` / `TRANSITION_EVIDENCE=` lines, but
+only for primitives and transitions actually observed; copying a declaration
+is not evidence. S4 classifies the declared capability checklist as
+`no-trace`, `partial`, or `complete`, records missing primitive/transition
+evidence, and keeps `EFFECT_KIND`/`EFFECT` as a separate typed-effect check.
+Even `complete` is cell-level research evidence with `claim_status=not-a-finding`,
+not a vulnerability conclusion.
+
+#### Runtime research lab and fixed fuzz fixtures
+
+When directed fuzzing is enabled, persist the generated corpus as
+`FUZZ/fuzz-corpus.json`. Each fixture has a stable id and content digest; a
+minimized reproducer retains its relationship to the original fixture. The
+bounded lab replays selected reproducers in the existing isolated Java matrix
+and writes `FUZZ/runtime-lab.json`. Repeated replay is classified as
+`stable`, `unstable`, `run-failed`, `precondition-unavailable`, or
+`gate-blocked`; version × SafeMode comparison separately records bucket
+changes, signature-only variation, and inconclusive cells. These artifacts are
+research evidence with `claim_status=not-a-finding`, not an automatic G4/G5
+promotion. The lab must preserve a precondition or harness gap rather than
+turning it into a negative result.
+
+The same adapter applies to ordinary Java and shell S4 PoCs. Group cells by a
+bounded execution template, derive a stable fixture id from the candidate,
+PoC and execution context, and persist only redacted metadata plus argument
+digests (never raw arguments or process output). Reuse the isolated matrix
+runner for bounded replay and version × SafeMode comparison, and write the
+aggregate to `S4/runtime-lab.json`. Link the per-candidate status from the S4
+verification summary, but keep every replay/differential result at
+`claim_status=not-a-finding`; a missing baseline, service, runtime or harness
+must remain an explicit gap.
+
+#### Surface-variant lane witnesses
+
+S4 must derive `surface-variant-evidence-v1` only from actual replay and
+differential runner rows. The fixture/plan context is not an observation. Keep
+only the allowlisted signals `execution`, `entry-behavior`, `authorization`,
+`negative-baseline`, `capability-trace`, `state-sequence`, `typed-effect`,
+`safe-equivalent`, `environment-gap`, `evidence-field`, and `runtime-error`,
+plus bounded cell counts, approved state-step identifiers, and sequence
+statuses. Classify each lane as `observed`, `partial`, `environment-gap`, or
+`not-executed`; only a complete actual STEP trace satisfies `state-sequence`.
+Typed effects and safe-equivalent behavior remain separate observations. S8
+may persist the bounded witness and turn missing signals into next-probe hints,
+and S2 may reuse the same taxonomy for strategy feedback. The witness is always
+`claim_status=not-a-finding`; never copy raw output, effect details, payloads,
+commands, or credentials, and never use it to alter candidate status, CVSS,
+G4, or G5.
+
+#### Explicit source-revision artifact arms
+
+When a comparison contract contains exact `before`/`after` source refs, an
+operator may opt in to historical runtime execution by adding this bounded
+target configuration:
+
+```json
+{
+  "source_revision_artifacts": {
+    "enabled": true,
+    "arms": [
+      {"role": "before", "ref": "<commit-sha>", "jars": ["build/before.jar"]},
+      {"role": "after", "ref": "<commit-sha>", "jars": ["build/after.jar"]}
+    ]
+  }
+}
+```
+
+This is an artifact adapter, not a build or checkout facility. The
+deterministic layer accepts only bounded workspace-local non-empty JAR/WAR/ZIP
+files whose refs match the comparison contract, validates their type, size,
+containment and SHA-256 digest, and reuses the isolated Java matrix runner on
+the same fixture/lane. It never executes `git checkout`, a build command, a
+remote download, or a deployment. Shell candidates, missing/invalid artifacts,
+and ref mismatches remain `precondition-unavailable` or `inconclusive`; they
+are never negative evidence. Only actual runner rows can produce an observed
+source-arm comparison, and every source-arm artifact remains
+`claim_status=not-a-finding` with no effect on G4/G5, CVSS, or candidate
+conclusions. S8 may retain only bounded role/ref/status/reason, relative paths,
+and digests for the next research round.
+
+#### Bounded service lifecycle and context snapshot
+
+Stateful web/middleware experiments may add a target-level
+`runtime_lab.service` mapping:
+
+```json
+{
+  "runtime_lab": {
+    "service": {
+      "start_command": ["python3", "-m", "http.server", "8080", "--bind", "127.0.0.1"],
+      "healthcheck_url": "http://127.0.0.1:8080/",
+      "startup_timeout": 20,
+      "shutdown_timeout": 8
+    }
+  }
+}
+```
+
+Commands are argv-only, must remain inside the workspace, and cannot use shell
+`-c`, remote/cloud tools, or non-loopback targets. An explicit loopback URL or
+an inspected local health command is required before a service can start. A
+healthy existing instance is reused; only a process group started by this run
+is terminated. Persist PID/port lifecycle and stop status in `S4/processes.json`.
+Never put tokens, cookies, passwords, or raw command values in the research
+artifact. `S4/runtime-lab.json` carries a `runtime-context-v1` snapshot with
+URL/configuration digests and bounded service metadata. It also carries stable
+credential-free `authz_fixture_id` values for principal/role/tenant/object
+cases. A missing or failed healthcheck is `precondition-unavailable` (or
+`policy-denied`), not a negative finding; all service metadata remains
+`claim_status=not-a-finding`.
+
+#### Cross-round research memory
+
+At S8, merge a bounded research-only delta into
+`state/<target>/research-memory.json` and write the round delta to
+`state/<target>/round-NN/S8/research-memory.json`. Derive a stable mechanism
+key from the candidate's entry, input shape, mechanism, source location,
+target classes, source-to-sink digest and capability-contract digest; do not
+use a changing candidate id as the only identity. Never copy raw arguments,
+fuzz payloads, stdout/stderr or secrets into this memory.
+
+Use the following state meanings:
+
+- `stable-reproducer`: the bounded replay is stable and matches the recorded
+  baseline. This is a research observation, not a confirmed vulnerability.
+- `actionable-difference`: a version or SafeMode bucket difference was
+  observed; schedule a focused minimal reproduction and path review.
+- `environment-gap`: a runtime, harness, gate or precondition prevented a
+  comparable observation. It is never negative evidence.
+- `unstable-replay` / `inconclusive`: keep the uncertainty and propose a
+  bounded stabilizing probe.
+
+The next S2 schedule reads the target memory. Stable observations may damp an
+exact repeat, actionable differences may receive a small follow-up boost, and
+environment gaps keep their candidate eligible with a remediation hint. Never
+delete a candidate solely because memory exists, and never let memory satisfy
+G4 or G5. Every memory entry and scheduler memory evidence must remain
+`claim_status=not-a-finding`; merges must be idempotent across S8 resume.
+
+Human review is a bounded input to the same loop. Record it by stable research
+key, or by candidate id when S8 has exactly one matching key:
+
+```bash
+python3 scripts/agent_cli.py review <target> --workspace <audit-dir> \
+  --candidate-id <candidate-id> --status accepted --reason-code confirmed-mechanism \
+  --note "mechanism needs typed effect" \
+  --evidence-ref state/<target>/round-01/S4/runtime-lab.json \
+  --next-probe "add minimal typed-effect observation" --round <N> --json
+```
+
+Supported statuses are `accepted`, `rejected`, `needs-evidence`, and
+`scope-corrected`; supported reason codes are `false-positive`,
+`confirmed-mechanism`, `missing-typed-effect`, `environment-gap`,
+`scope-correction`, `duplicate`, and `needs-source-review`. Feedback is saved
+in `state/<target>/review-feedback.json`, merged into research memory on load
+and S8, and exposed to S2 only as a scheduling hint. Notes and references are
+bounded and redacted; do not put raw payloads, commands, process output or
+secrets in them. A rejection lowers repeat priority, `needs-evidence` raises
+the next probe, and `accepted`/`scope-corrected` preserve the need for
+independent G4/G5 evidence. No review status is a vulnerability verdict.
+
+S8 also writes a bounded project portfolio to
+`state/<target>/research-portfolio.json` and the round snapshot
+`state/<target>/round-NN/S8/research-portfolio.json`. The
+`research-portfolio-v1` artifact aggregates only explicit research metadata
+(`research_surface`, `target_type`, `attack_class`, `variant`, and
+`precondition_class`), state counts, review status counts, benchmark trend
+summary, and deterministic `next_probes`. The next S2 prompt may use it to
+identify cross-surface or variant gaps. It must remain
+`claim_status=not-a-finding` and must not contain reviewer notes, raw
+arguments, payloads, commands, stdout/stderr, credentials, CVSS, or G4/G5
+evidence; a portfolio gap is a research priority, never proof of absence.
+
+S8 also derives `surface-variant-coverage-v1` inside the project portfolio from
+the persisted lane witnesses. Group by explicit research surface, variant, and
+lane; retain bounded historical status/signal counts plus the latest status per
+research key, including state-sequence, typed-effect, safe-equivalent,
+sequence-status, cell-count, and environment-gap metadata. Only a latest
+actual `observed` lane is closed. Partial, `not-executed`, and
+`environment-gap` lanes must produce bounded next probes linked by the exact
+research key, so a stable primary replay cannot hide an unverified lane. This
+view is scheduling metadata only, remains `claim_status=not-a-finding`, and
+cannot alter candidate status, CVSS, G4, or G5.
+
+S8 also writes a provenance-carrying `research-replay-pack-v1`. It contains
+only allowlisted workspace-local artifact names, schema versions, sizes,
+SHA-256 fingerprints, and bounded per-round lane/comparison summaries; it
+never copies source text, payloads, commands, stdout/stderr, credentials, or
+finding conclusions. The standalone command is:
+
+```bash
+python3 scripts/agent_cli.py replay-pack <target> \
+  --workspace <audit-dir> --json
+```
+
+The pack distinguishes complete, partial, environment-gap, not-executed, and
+invalid provenance, and checks that its embedded calibration matches the
+round-history digest. A later `verify_replay_pack` call can re-hash the same
+workspace. Only complete, self-consistent packs are eligible for cohort
+policy; all pack state remains `claim_status=not-a-finding`.
+
+When several independent targets have produced bounded replay packs, an
+operator may explicitly create `research-replay-cohort-v1`:
+
+```bash
+python3 scripts/agent_cli.py replay-cohort-calibrate \
+  --pack /path/to/project-a/research-replay-pack.json \
+  --pack /path/to/project-b/research-replay-pack.json \
+  --pack /path/to/project-c/research-replay-pack.json \
+  --out state/research-replay-cohort.json --json
+```
+
+The cohort recomputes policy from opaque project rows, tracks distinct-project
+and per-surface sufficiency, and requires at least three eligible projects
+before it can influence scheduling. It may select the existing one- or
+two-round zero-information replacement threshold only when the project-level
+low-yield signal meets the bounded majority rule; otherwise it emits a
+`collect-more-projects` recommendation and keeps the default. A target may
+explicitly configure `replay_cohort_calibration_path`; sufficient target-local
+calibration always wins, and the cohort is never discovered implicitly. Incomplete
+or digest-inconsistent packs are rejected; the legacy `--artifact` form remains
+available for compatibility and is tracked separately from pack provenance. S8
+may snapshot the normalized cohort and use it only as a research-guidance
+fallback. Cohort state is `claim_status=not-a-finding`, contains no input
+paths, raw replay data, payloads, commands, output, credentials, or finding
+evidence, and cannot alter candidate status, CVSS, G4, or G5.
+
+S8 also derives `research-consistency-v1` from bounded, normalized
+`research-memory` events. Use `python3 scripts/agent_cli.py research-consistency <target> --workspace <dir> [--rebuild] [--json]`
+to inspect or rebuild it. For the same research key it compares only
+effect-presence, reproduction, comparison, runtime-state, and context-digest
+classes, then classifies the history as `consistent`, `conflicted`,
+`unstable`, `insufficient`, or `environment-gap`. Conflicts produce bounded
+follow-up actions such as `repeat-with-controlled-context`, `isolate-state`,
+`collect-independent-observation`, or `repair-environment`; the portfolio and
+strategy consume these actions only for scheduling. Environment gaps never
+count as no-effect observations, and the target/round artifacts remain
+`claim_status=not-a-finding` without changing candidate status, CVSS, G4, or G5.
+
+S8 materializes `research-consistency-action-v1` for every non-consistent
+history. Use `python3 scripts/agent_cli.py research-consistency-actions <target> --workspace <dir> [--rebuild] [--json]`
+to inspect or rebuild the bounded recheck artifact. Each action contains only
+allowlisted isolation axes, positive/negative or environment-gap lanes, a
+bounded repeat shape, required observation codes, and falsifier codes. S2
+matches it by stable `research_key` and emits a `consistency-recheck` plan;
+S4 carries the normalized contract through MatrixCell metadata,
+`VULNGATE_CONSISTENCY_ACTION`, runtime-lab fixtures, and replay/differential
+cells. Missing independent replay, fixture/context mismatch, unreset state,
+or signature drift keeps the item pending. Action, portfolio, strategy, and
+replay-pack artifacts remain `claim_status=not-a-finding` and cannot change
+candidate status, CVSS, G4, or G5. Do not persist source prose, payloads,
+commands, stdout/stderr, credentials, or finding conclusions in the contract.
+
+S8 also verifies executed closure with `research-consistency-recheck-v1`. S4
+materializes the action's positive/negative or environment-gap lane and passes
+only the bounded `VULNGATE_CONSISTENCY_LANE` selector to the PoC. Lane fixtures
+must retain a common base context digest while using distinct lane identities.
+Before normalization, S4 may extract only allowlisted witnesses: execution or
+environment status, independent replay count, typed-effect or safe-equivalent,
+explicit state reset, comparison-arm status, and fixture/context identity.
+The closure artifact must not contain raw stdout/stderr, commands, payloads,
+credentials, or source prose.
+
+The `research-consistency-rechecks` artifact and CLI distinguish
+`observed`, `partial`, `environment-gap`, and `not-executed`. Only complete
+expected lanes, repeat count, fixture/context lock, comparison status, and
+required observations stop duplicate scheduling; otherwise portfolio keeps a
+bounded follow-up probe. Use:
+
+```bash
+python3 scripts/agent_cli.py research-consistency-rechecks <target> \
+  --workspace <audit-dir> [--round N] [--rebuild] [--json]
+```
+
+This closure remains `claim_status=not-a-finding` and cannot confirm a
+finding, turn an environment gap into negative evidence, or change candidate
+status, CVSS, G4, or G5.
+
+S8 also derives `research-agenda-v1`, a bounded active queue from normalized
+strategy and portfolio recheck metadata. Each item contains only an allowlisted
+action, missing/required observations, falsifiers, prerequisites, expected
+information gain, estimated cost, priority score, and `selected`/`deferred`/
+`hold` status. Selection first spreads finite slots across explicit research
+surfaces and attack classes, then uses remaining slots for higher information
+gain. Environment repair, residual closure, review follow-up, and evidence debt
+remain scheduling signals only. Inspect or rebuild it with:
+
+```bash
+python3 scripts/agent_cli.py research-agenda <target> \
+  --workspace <audit-dir> [--rebuild] [--slots N] [--max-per-surface N] [--json]
+```
+
+The next scheduler round accepts only exact `research_key` or `candidate_id`
+matches and applies a small bounded boost; the match is retained in schedule
+evidence. Agenda and scheduler metadata remain `claim_status=not-a-finding` and
+cannot confirm a finding or change candidate status, CVSS, G4, or G5. Do not
+persist source prose, payloads, commands, stdout/stderr, credentials, or
+finding conclusions in the agenda.
+
+S8 also derives `research-agenda-outcome-v1` before replacing the previous
+agenda. It joins the prior `selected`/`deferred`/`hold` queue to the actual
+scheduler snapshot, S4 verification matrix/runtime lab, and S8 strategy
+feedback using exact `agenda_id`, `strategy_id`, `research_key`, or
+`candidate_id` keys. The bounded outcome codes are `new-information`,
+`falsifier-observed`, `no-new-information`, `environment-gap`,
+`not-executed`, and `not-selected`; only information gain, allowlisted
+observation signals, execution state, cell/fixture counts, reason codes, and
+consecutive no-gain counts are retained. Target and round artifacts are
+`research-agenda-outcomes.json`, and the next agenda/scheduler prompt may use
+the latest outcome to prioritize environment recovery or replace low-yield
+repeats. Missing schedules and environment failures are never negative
+security evidence. The artifact remains `claim_status=not-a-finding` and
+cannot change candidate status, CVSS, G4, or G5. Inspect or rebuild it with:
+
+```bash
+python3 scripts/agent_cli.py research-agenda-outcomes <target> \
+  --workspace <audit-dir> [--round N] [--rebuild] [--json]
+```
+
+S8 also derives `research-budget-v1`, an outcome-cost adaptive policy for the
+finite agenda. It joins the previous agenda with normalized execution outcomes
+and aggregates explicit research-surface rows by selected count, information
+gain, estimated cost, environment gaps, and no-information repeats. The fixed
+recommendations are `recover-environment`, `exploit-high-yield`,
+`explore-undercovered`, `continue-balanced`, and `cooldown-low-yield`.
+Environment gaps receive bounded recovery priority; repeated no-information
+work is cooled down without deleting the hypothesis; productive surfaces get a
+small exploitation nudge; and surfaces without observations retain an
+exploration opportunity. The next agenda consumes only allowlisted surface
+priority deltas and cap hints. Target and round artifacts are
+`research-budget.json`, and `agent_cli.py research-budget` can inspect or
+rebuild them. The policy remains `claim_status=not-a-finding` and cannot
+change candidate status, CVSS, G4, or G5; insufficient history keeps the
+default exploration behavior.
+
+```bash
+python3 scripts/agent_cli.py research-budget <target> \
+  --workspace <audit-dir> [--round N] [--rebuild] [--slots N] [--json]
+```
+
+S3 residuals are carried across the same boundary as pending research debt.
+Memory stores only controlled kind/reason codes, bounded source locations, a
+probe digest, and whether a bounded probe plan exists. The portfolio emits one
+`state=pending-residual` probe per residual and marks its variant unresolved,
+even when the latest primary replay is stable. It must never copy the raw
+residual explanation or probe text; S4 still needs an explicit falsifier to
+close the residual, and every row remains `claim_status=not-a-finding`.
+
+S2 also writes a bounded `research-strategy-v1` at
+`state/<target>/coverage/research-strategy.json` and mirrors the round view to
+`S2/research-strategy.json`. It joins attacker-path hypotheses, unmapped
+coverage, residual probes, environment gaps, memory states and benchmark
+context into typed strategy items with fixed required observations and
+falsifiers. The scheduler may apply only a small nudge for an explicit flow,
+entry/sink, candidate, or research-key match. The strategy is a research
+agenda, never source/runtime proof, a vulnerability verdict, CVSS, or a G4/G5
+substitute. Inspect it with:
+
+```bash
+python3 scripts/agent_cli.py research-strategy <target> \
+  --workspace <audit-dir> --json
+```
+
+Inspect the bounded view without opening the full memory file:
+
+```bash
+python3 scripts/agent_cli.py portfolio <target> --workspace <audit-dir> --json
+```
+
+Use `--rebuild` only when the target memory or review feedback was changed
+outside S8; an optional `--benchmark-feedback <json>` supplies the same
+explicit, normalized benchmark input used by the next schedule.
+
+The scheduler may apply at most a small bounded nudge to a candidate only when
+its stable research key matches a pending probe, or when at least two explicit
+metadata dimensions match and a declared variant also matches. Free-form
+surface prose is never enough. The match is recorded as scheduling evidence
+with `claim_status=not-a-finding`; it cannot select a finding, change CVSS, or
+satisfy G4/G5.
+
 Keep every cell, including harness failures and negative observations.
 
 #### Typed execution states
@@ -371,6 +845,9 @@ VULNGATE_PRECONDITION
 VULNGATE_FEATURES
 VULNGATE_TARGET_URL
 VULNGATE_AUTHZ_*
+VULNGATE_SEQUENCE
+VULNGATE_CONCURRENCY
+VULNGATE_AVAILABILITY_PROBE
 ```
 
 Use:
@@ -502,6 +979,65 @@ Rules:
 - Unlabelled fix-family candidates containing UAF/overflow/bypass/race/issue/CVE signals are still subject to the fix-completeness evidence rule.
 - Preserve exclusions and negative evidence; do not delete them because a candidate failed.
 - Run a round-end cleanup check for audit-started processes and listeners. Record cleanup in the round summary.
+
+### Deterministic research benchmark
+
+Use the benchmark after changing candidate generation, scheduling, evidence
+contracts or conclusion/severity rules. The gold manifest and run record are
+separate from the target's finding ledger:
+
+```bash
+python3 scripts/agent_cli.py benchmark --manifest <gold.json> \
+  --run <run.json> --out <benchmark-result.json> \
+  --feedback-out <research-benchmark-feedback.json> --json
+```
+
+For longitudinal regression checks, pass a previous bounded result with
+`--baseline <previous-benchmark-result.json>`. The command emits the bounded
+`research-benchmark-trend-v1` comparison and feeds only allowlisted regression
+signals into the feedback path.
+
+The manifest declares each case's `truth` (`vulnerable`, `negative`, or
+`environment-gap`), expected claim status, required evidence fields and, when
+applicable, expected severity. A run supplies only bounded case status,
+evidence-field markers, CVSS data and stable research-key events; raw PoC
+payloads, commands and process output are not benchmark evidence. The result
+keeps `claim_status=not-a-finding` and reports:
+
+- observation coverage and exact claim-resolution accuracy;
+- confirmed precision/recall plus unsafe confirmation rate for negative cases;
+- environment-gap fidelity, so an unavailable runtime cannot look like a clean
+  negative result;
+- repeat and unjustified-repeat rates from repeated research keys, with
+  `new_evidence=true` explicitly distinguishing a justified follow-up;
+- required/present evidence completeness; and
+- CVSS absolute error, within-one-point rate and severity overstatement.
+
+For cross-surface regression, use the bounded synthetic fixture
+`benchmarks/research-benchmark-surfaces-v1.json` with its sample run. It covers
+web, protocol, cloud, mobile and native cases, preserving each case's
+`surface`, `target_type`, `attack_class`, `variant` and `precondition_class`.
+The result exposes `research_profile` and `metrics.coverage_by_surface`, so a
+weak research surface is visible even when the global score looks healthy.
+The fixture deliberately includes vulnerable, negative and environment-gap
+cases; a missing runtime or analysis tool remains pending and is never treated
+as a negative result.
+
+When a surface metric is weak, the derived feedback may also contain bounded
+`surface_guidance`. The scheduler applies its small `priority_delta` only to a
+candidate with an exact `research_surface` or a supported explicit
+`target_type`; free-form surface prose is not substring-matched. The planner
+adds the matching surface's allowlisted observations and falsifiers to the
+baseline plan. This is prioritization metadata only: it cannot confirm or
+exclude a candidate, synthesize runtime evidence, change CVSS, or satisfy G4/G5.
+
+Do not use a benchmark score to promote a real finding or to bypass G4/G5. Use
+low negative-result fidelity, high unjustified-repeat rate, missing evidence,
+or severity overstatement as a reason to revise the planner, scheduler or
+conclusion rules, then rerun the same manifest. The derived
+`research-benchmark-feedback-v1` contains only bounded metric snapshots,
+fixed alert codes, capped scheduler-factor deltas and planner observations;
+without explicit feedback input, the default schedule is unchanged.
 
 ## 7. Hard gates summary
 
@@ -722,6 +1258,7 @@ reports/<target>/round-NN/...
 - 有近期通告时先做 advisory/fix-diff 反查；旧路径成为高优先候选，但“有补丁”不是运行时证据。
 - 无通告也检查近期安全修复 commit，落盘 `S1/security-fix-history.json`、`S1/patch-variants.json`，对可信修复与兄弟路径生成 `surface=fix-completeness` 候选。
 - `S1/source-sink-graph.json` 只是一张 `Source→Transform→Validation→Authorization→Sink` 启发式定位图；`heuristic-nearby` 必须带 `requires_manual_dataflow=true`，不能冒充语义/跨过程数据流证明。
+- **复合攻击链候选：** 同时包含授权边界和危险 Sink 的路径会额外确定性生成 `chain-*` 候选，写入 `S1/composite-chain-candidates.json` 并合并进 S2。它们必须保留 `heuristic-nearby` / `requires_manual_dataflow=true`；用途是强制 S3/S4 验证 subject binding、变换后的对象和最终效果，不能绕过 G1/G4。
 - 按需生成 `project-profile.json`、`target-rules.json`、`composite-chain-hints.json`；这些只用于优先级与覆盖率，不是漏洞结论。
 - **宿主原生模式的覆盖索引初始化：** `source-map` 只是有上限的摘要，不会构建覆盖索引。Mode A 在 S1 显式执行一次完整索引；源码或范围变更后重新构建：
 
@@ -729,7 +1266,7 @@ reports/<target>/round-NN/...
   python3 "$PLUGIN_ROOT/scripts/agent_cli.py" coverage <target> --workspace <audit-dir> --root <source-root> --rebuild --json
   ```
 
-  `<audit-dir>` 必须在插件缓存之外。S2 先把 `control-candidates.json`、`differential-candidates.json` 的完整候选与宿主候选合并，再调用 `schedule`；本轮按 `selected_ids` 执行，完整池保留到后续轮次。S8 账本落盘后使用同一 workspace 再运行 `coverage` 刷新审计状态。配置驱动的管线会自动完成 S1 索引和 S2 合并。
+  `<audit-dir>` 必须在插件缓存之外。S2 先把 `control-candidates.json`、`differential-candidates.json`、`capability-candidates.json`、`semantic-path-candidates.json`、`semantic-guard-candidates.json`、`semantic-call-candidates.json`、`semantic-controlflow-candidates.json` 和 `semantic-ast-candidates.json` 的完整候选与宿主候选合并，再调用 `schedule`；本轮按 `selected_ids` 执行，完整池保留到后续轮次。S8 账本落盘后使用同一 workspace 再运行 `coverage` 刷新审计状态。配置驱动的管线会自动完成 S1 索引和 S2 合并。
 - **覆盖率账本：** S1 同时构建目标级 `state/<target>/coverage/` 索引（源码全集、入口、sink、安全控制），并写出覆盖率摘要。每个生产源码文件要么 `indexed`，要么带明确 `skip_reason`；被排除的目录会记录文件数，而不是被静默丢弃。随时可查：
 
   ```bash
@@ -737,7 +1274,7 @@ reports/<target>/round-NN/...
   ```
 
   审计的停止条件是 `高风险未审计 == 0`，不是“没有新候选”。分母为 0 时渲染 `n/a`，绝不显示 `100%`。
-- **跨过程层：** 同一份索引还包含 `symbol-index.json`、`call-graph.json`、`flow-index.json`、`sink-reachability.json`、`control-map.json`、`sibling-groups.json`、`differential-index.json`。sink 做双向分析——从每个外部入口正向、从每个 sink 反向——只有 sink 扫描能看见的路径会成为有效 flow 或记录在案的 `coverage_gap`。flow 路径置信度是 `heuristic-callgraph`：它是线索，不是证明，本层任何结论都不得置为 `runtime-verified`。`FlowRecord.direction` 表示路径**形态**：
+- **跨过程层：** 同一份索引还包含 `symbol-index.json`、`call-graph.json`、`flow-index.json`、`sink-reachability.json`、`control-map.json`、`sibling-groups.json`、`differential-index.json`、有界的 `capability-graph.json` / `capability-candidates.json`，以及 `semantic-path-evidence.json` / `semantic-path-candidates.json`、`semantic-guard-evidence.json` / `semantic-guard-candidates.json`、`semantic-call-evidence.json` / `semantic-call-candidates.json`、`semantic-controlflow-evidence.json` / `semantic-controlflow-candidates.json`、Python 专用的 `semantic-ast-evidence.json` / `semantic-ast-candidates.json`。sink 做双向分析——从每个外部入口正向、从每个 sink 反向——只有 sink 扫描能看见的路径会成为有效 flow 或记录在案的 `coverage_gap`。flow 路径置信度是 `heuristic-callgraph`：它是线索，不是证明，本层任何结论都不得置为 `runtime-verified`。`FlowRecord.direction` 表示路径**形态**：
   - `cross-procedural`：至少含一条调用边（有价值的一类）；
   - `intra-symbol`：入口与 sink 在同一个方法内——这正是「handler 直接做危险操作」的典型 finding，保留完整优先级；
   - `module-scope`：入口与 sink 都在同一文件的模块作用域。仍会记录，但排在真实调用链之后，因为文件不是 handler。
@@ -750,6 +1287,48 @@ reports/<target>/round-NN/...
   python3 scripts/agent_cli.py controls <target> --show-candidates
   python3 scripts/agent_cli.py differential <target> --show-candidates \
     --fix-history state/<target>/round-01/S1/security-fix-history.json
+  ```
+- **能力原语搜索：** `capability-graph.json` 将入口/flow/sink 的静态信号映射成有界的 `read` / `write` / `exec` / `ssrf` / 凭据 / 求值原语。`capability-candidates.json` 只组合显式方程，分别记录 `observed_capabilities` 与 `missing_capabilities`，给出最小验证序列，并携带有界的 S4 `capability_contract`。即使链看起来闭合，仍必须保持 `claim_status=not-a-finding`、`requires_manual_dataflow=true`、`runtime_required=true`；缺失原语是待研究目标，不是负证据，更不是 RCE 结论。
+
+- **语义路径证据：** `semantic-path-evidence-v1` 检查静态路径上的控制是否在 sink 之前且处于有限的同一语义块，并对同符号参数/简单别名做有界追踪。它区分 `direct`、`propagated`、`not-traced`、`cross-symbol-unresolved` 数据流状态，以及 `before-sink`、`after-sink`、`same-line`、`cross-symbol-unverified` 控制关系；不建模 branch dominance、类型、virtual dispatch、DI、reflection、callback 或 sanitizer 语义，不复制源码原文，也不证明安全。所有记录保持 `claim_status=not-a-finding` / `heuristic-nearby`。
+
+  ```bash
+  python3 scripts/agent_cli.py semantic-paths <target> \
+    --workspace <audit-dir> --show-candidates --json
+  ```
+
+- **语义守卫证据：** `semantic-guard-evidence-v1` 在语义路径之上增加两个有限复核信号：分支姿态（`terminating-guard-likely`、`nested-branch-likely`、`non-branch-check` 或 unresolved）以及 subject/object 绑定（`overlap`、`mismatch` 或 unresolved）。它不证明 branch dominance、路径可行性、对象/租户身份或授权正确性，不复制源码原文；行和 `guard-*` 候选始终保持 `claim_status=not-a-finding`、`heuristic-nearby` 与 `requires_manual_dataflow=true`。
+
+  ```bash
+  python3 scripts/agent_cli.py semantic-guards <target> \
+    --workspace <audit-dir> --show-candidates --json
+  ```
+
+- **语义调用绑定证据：** `semantic-call-evidence-v1` 为仍未解析的跨符号路径增加一跳有界桥接，记录调用点实参/形参绑定、有限污染参数传播、返回形状提示，以及最终 sink 实参是否与这条静态绑定链对齐。它不建模完整 CFG、类型或别名、virtual dispatch、DI、reflection、callback、async、容器或 sanitizer 语义；`bound` 只是研究信号，不是数据流证明。记录和 `call-*` 候选始终保持 `claim_status=not-a-finding`、`heuristic-nearby` 与 `requires_manual_dataflow=true`。
+
+  ```bash
+  python3 scripts/agent_cli.py semantic-calls <target> \
+    --workspace <audit-dir> --show-candidates --json
+  ```
+
+- **语义控制流证据：** `semantic-controlflow-evidence-v1` 在守卫行之上增加有界结构关系层，按 brace/indent 分支区间记录 sink 是否看起来位于受保护分支、终止拒绝分支之后，或位于 `else`/`except` 备用路径。`dominates-likely` 只是安排人工追踪的信号，不是完整 CFG 或 dominance 证明；循环、短路、异常、fallthrough、宏和路径可行性仍未解析。记录和 `cfg-*` 候选始终保持 `claim_status=not-a-finding`、`heuristic-nearby` 与 `requires_manual_dataflow=true`。
+
+  ```bash
+  python3 scripts/agent_cli.py semantic-controlflow <target> \
+    --workspace <audit-dir> --show-candidates --json
+  ```
+
+- **Python AST 证据：** `semantic-ast-evidence-v1` 对每个有界 Python 文件只解析一次，记录语法树作用域、分支归属、负向条件形状、直接终止语句、`else`/异常备用路径和解析状态。它只是语法结构见证，不是完整 CFG、dominance/SSA、类型/dispatch 或运行时证明；不支持语言和解析失败会作为明确缺口保留。记录和 `ast-*` 候选保持 `claim_status=not-a-finding`、`heuristic-nearby` 与 `requires_manual_dataflow=true`，不保存源码原文或 AST dump。
+
+  ```bash
+  python3 scripts/agent_cli.py semantic-ast <target> \
+    --workspace <audit-dir> --show-candidates --json
+  ```
+
+- **攻击路径威胁模型：** `threat-model.json` 是由 entry、信任边界、flow、sink、静态控制姿态、未解析可达性和匹配能力链假设组成的有界确定性关联视图。它记录 attacker-role 标签、前置条件和研究问题，使 S2/S3 可以围绕完整路径推理，而不是只看孤立 sink；同时镜像到 `S1/threat-model.json`，进入调度 prompt/plan，并可用 `python3 scripts/agent_cli.py threat-model <target> --workspace <audit-dir> --json` 查看。路由暴露、真实数据流、控制顺序、能力 transition 和 typed effect 仍须由 S3/S4 证据确认；每条记录都必须是 `claim_status=not-a-finding`。
+
+  ```bash
+  python3 scripts/agent_cli.py capability <target> --show-candidates
   ```
 - **G0：** 排除死代码/无支撑路径。
 - **G1：** 必须存在不可信输入可达性；不可达时保留源码证据用于排除。
@@ -777,6 +1356,17 @@ S1 产生的每个 fix-completeness 候选必须进入 `S2/candidate-matrix.json
 
 S2 不写最终结论。
 
+#### 可证伪实验计划
+
+S2 还会写出 `S2/experiment-plans.json`，覆盖完整候选池并标记哪些候选在本轮
+被调度。确定性规划器根据候选的可观察信号，生成有界的研究清单：入口基线、
+授权边界、有状态步骤、并发/可用性、修复变体，以及适用时的 typed effect。
+每个计划都带有必需观测和明确证伪条件。该产物的
+`claim_status=not-a-finding`，只是研究计划，不是运行时证据或最终结论；S3 可以
+用它选择下一步探针，但 G4/G5 仍只接受相应的已落盘观测。若显式提供
+`research-benchmark-feedback-v1`，计划只会追加有界观测/证伪提示，不会改变候选状态、影响、
+CVSS 或 G4/G5。
+
 #### S2 候选调度（覆盖驱动，spec §13/§14/§15）
 
 S2 不再把「项目里几个最危险的 snippets」丢给模型、再按提案顺序照单全收。
@@ -790,6 +1380,12 @@ python3 scripts/agent_cli.py schedule <target> \
 
 # 连 spec §15 的结构化 prompt 块一起打印
 python3 scripts/agent_cli.py schedule <target> --config targets/<t>.json --prompt
+
+# 将上一轮 benchmark 反馈接入下一轮有限的研究优先级
+python3 scripts/agent_cli.py schedule <target> \
+  --candidates state/<target>/round-01/S2/candidate-matrix.json \
+  --benchmark-result state/research-benchmark-feedback.json \
+  --slots 8 --round 2 --json
 
 # 在覆盖报告旁边带上最近一轮的调度摘要
 python3 scripts/agent_cli.py coverage <target> --schedule
@@ -813,8 +1409,9 @@ python3 scripts/agent_cli.py coverage <target> --schedule
 - 延后的候选保留分数与理由，下一轮针对已变化的覆盖重新调度；
 - 残留扫描（spec §14）重算缺口，因此每轮的输入是**新的**缺口列表，而不是固定的 top-N。
 
-两类索引派生的候选会在打分前被**前置**进候选池：控制图的 `ctl-*`（spec §11）
-与差分的 `dif-*`（spec §12），两者都已由 S1 持久化。它们刻意**不设上限**——
+八类索引派生的候选会在打分前被**前置**进候选池：控制图的 `ctl-*`（spec §11）、
+差分的 `dif-*`（spec §12）、能力图的 `cap-*` 研究链、语义路径的 `sem-*` 线索、语义守卫的
+`guard-*` 线索、语义调用的 `call-*` 线索、语义控制流的 `cfg-*` 线索和 Python AST 的 `ast-*` 线索，它们都已由 S1 持久化。它们刻意**不设上限**——
 其 id 每轮确定性重建，截断前缀会让后面所有发现永远饿死；超大池由配额机制吸收。
 平分时优先取带有可引用 `file:line` 与具名缺失控制的候选。
 在目标配置里设 `static_candidates: false` 可只调度模型自己提出的候选。
@@ -874,6 +1471,282 @@ Web/应用类还可增加：
 身份 × 角色 × 租户 × 对象归属
 ```
 
+有状态/竞态类候选还可为每个 cell 声明有界实验契约：
+
+```text
+sequence（步骤标识，最多 16 个）× concurrency（1..64）× availability_probe
+```
+
+运行器会把它们以 `VULNGATE_SEQUENCE`、`VULNGATE_CONCURRENCY`、
+`VULNGATE_AVAILABILITY_PROBE` 传给 PoC，并和 cell 一起落盘。PoC 可以重复
+输出 `STEP=`、`STEP_EVIDENCE=`、`STATE=`，运行器会保留有序 trace。声明的
+并发度或探针只是元数据，不是运行时证明；`A:H` 仍必须有实际观测到的
+`CONCURRENCY>=2` 与 `SERVICE_UNAVAILABLE=true`（或等价已接受观测）。
+
+能力链候选还会把有界 `capability_contract` 传入每个 cell。运行器通过
+`VULNGATE_CAPABILITY_CONTRACT`、`VULNGATE_CAPABILITIES`、
+`VULNGATE_OBSERVED_CAPABILITIES`、`VULNGATE_MISSING_CAPABILITIES` 和
+`VULNGATE_TRANSITIONS` 提供只读观察清单。PoC 可以重复输出
+`CAPABILITY=` / `CAPABILITY_EVIDENCE=` 与 `TRANSITION=` /
+`TRANSITION_EVIDENCE=`，但只能记录实际观察，不能照抄声明。S4 会把清单
+分为 `no-trace`、`partial`、`complete`，分别保留缺失原语/transition 证据，
+并把 `EFFECT_KIND` / `EFFECT` 作为独立的 typed effect 条件；即使状态为
+`complete`，仍然只是 `claim_status=not-a-finding` 的 cell 级研究证据。
+
+#### 运行时研究实验室与固定 fuzz fixture
+
+启用定向 fuzz 时，必须把生成语料写入 `FUZZ/fuzz-corpus.json`。每个 fixture
+都有稳定的 id 和内容 digest；缩减 reproducer 必须保留它与原始 fixture 的关系。
+有界 runtime lab 复用现有隔离 Java 矩阵并写入 `FUZZ/runtime-lab.json`：重复重放
+分类为 `stable`、`unstable`、`run-failed`、`precondition-unavailable` 或
+`gate-blocked`；版本 × SafeMode 对照单独记录 bucket 变化、仅签名漂移和不可比较的
+cell。所有产物都是 `claim_status=not-a-finding` 的研究证据，不得自动升级 G4/G5；
+前置条件或 harness 缺口必须保留为缺口，不能转成负面结论。
+
+同一适配器也适用于普通 Java 和 Shell S4 PoC：按候选、PoC 和执行上下文将 cell
+分组为有界 execution template，生成稳定 fixture id；artifact 只能保存脱敏元数据和
+参数 digest，不能复制原始参数或进程输出。复用隔离矩阵 runner 做有限重放与版本 ×
+SafeMode 对照，聚合结果写入 `S4/runtime-lab.json`，并从 S4 verification summary
+关联到候选。所有重放/差分结果仍必须是 `claim_status=not-a-finding`；缺少基线、服务、
+runtime 或 harness 时必须保留为显式缺口。
+
+#### Surface lane witness
+
+S4 必须只从真实 replay/differential runner row 生成
+`surface-variant-evidence-v1`；fixture/plan context 本身不是观测。只保留
+`execution`、`entry-behavior`、`authorization`、`negative-baseline`、
+`capability-trace`、`state-sequence`、`typed-effect`、`safe-equivalent`、
+`environment-gap`、`evidence-field`、`runtime-error` 这些白名单信号，以及有界
+cell 计数、批准的状态步骤身份和 sequence status。每条 lane 必须区分
+`observed`、`partial`、`environment-gap`、`not-executed`；只有真实完整的 STEP trace
+才能满足 `state-sequence`，typed effect 与 safe-equivalent 仍是分开的观测。S8 可以保存这份
+有界 witness 并把缺失信号转成 next-probe，S2 可以复用同一分类做策略反馈。witness 始终是
+`claim_status=not-a-finding`；不得复制原始输出、effect 细节、payload、命令或凭据，也不得改变
+candidate status、CVSS、G4 或 G5。
+
+#### 显式 source-revision 构建产物 arm
+
+当 comparison contract 含有精确的 `before`/`after` source ref 时，操作者可以通过下面的有界配置显式提供历史运行时产物：
+
+```json
+{
+  "source_revision_artifacts": {
+    "enabled": true,
+    "arms": [
+      {"role": "before", "ref": "<commit-sha>", "jars": ["build/before.jar"]},
+      {"role": "after", "ref": "<commit-sha>", "jars": ["build/after.jar"]}
+    ]
+  }
+}
+```
+
+这只是 artifact adapter，不是构建或 checkout 设施。确定性层只接受 workspace 内、非空且类型受限的
+JAR/WAR/ZIP，验证 ref、路径边界、大小、类型和 SHA-256 digest 后，复用同一 fixture/lane 的隔离 Java runner。
+它不会执行 `git checkout`、构建命令、远程下载或部署。Shell 候选、缺失/损坏产物和 ref 不匹配保持
+`precondition-unavailable` 或 `inconclusive`，绝不能变成负向证据。只有 runner 的真实行才能产生 observed
+source-arm comparison；所有 source-arm artifact 都保持 `claim_status=not-a-finding`，不影响 G4/G5、CVSS 或候选结论。
+S8 只可保留有界的 role/ref/status/reason、相对路径和 digest 供下一轮研究。
+
+#### 有界服务生命周期与上下文快照
+
+有状态 Web/中间件实验可以在目标级配置中声明 `runtime_lab.service`：
+
+```json
+{
+  "runtime_lab": {
+    "service": {
+      "start_command": ["python3", "-m", "http.server", "8080", "--bind", "127.0.0.1"],
+      "healthcheck_url": "http://127.0.0.1:8080/",
+      "startup_timeout": 20,
+      "shutdown_timeout": 8
+    }
+  }
+}
+```
+
+命令只能是 argv 数组，工作目录必须在 workspace 内，禁止 shell `-c`、远程/云工具和非回环
+目标；启动前必须有显式回环 URL 或经过检查的本地 health command。已健康实例可以复用，
+只有本轮自己启动的完整进程组会被回收；PID/Port 生命周期和停止状态写入
+`S4/processes.json`。禁止把 Token、Cookie、Password 或原始命令写进研究产物。
+`S4/runtime-lab.json` 的 `runtime-context-v1` 快照只保留 URL/configuration digest、有界服务
+元数据，以及用于主体/角色/租户/对象对照的无凭据 `authz_fixture_id`。健康检查失败必须记录为
+`precondition-unavailable`（或 `policy-denied`），不能当作负面漏洞结论；所有服务元数据仍是
+`claim_status=not-a-finding`。
+
+#### 跨轮研究记忆
+
+S8 结束时，把有界的研究增量幂等合并到
+`state/<target>/research-memory.json`，并把本轮增量写入
+`state/<target>/round-NN/S8/research-memory.json`。研究键应由候选的入口、输入形状、
+机制、代码位置、目标类、Source→Sink digest 和 capability-contract digest 构成；不能只用
+会变化的 candidate id。跨轮记忆禁止复制原始参数、fuzz payload、stdout/stderr 或 secret。
+
+状态语义必须保持分离：
+
+- `stable-reproducer`：有界重放稳定且与已记录基线一致，只是研究观察，不是确认漏洞；
+- `actionable-difference`：版本或 SafeMode 出现 bucket 差异，应安排最小复现和路径复核；
+- `environment-gap`：runtime、harness、gate 或前置条件导致无法比较，绝不是负证据；
+- `unstable-replay` / `inconclusive`：保留不确定性，生成有界稳定化探针。
+
+下一轮 S2 调度会读取目标级记忆：稳定观察可以降低完全重复的优先级，可行动差异可以获得
+小幅 follow-up 提升，环境缺口保持候选可选并带修复提示。记忆不能单独删除候选，也不能满足
+G4/G5；所有记忆和调度证据保持 `claim_status=not-a-finding`，S8 恢复必须幂等。
+
+人工复核也是有界的研究输入。优先使用稳定 research key；如果 S8 中 candidate id 只对应一个
+research key，也可以直接按 candidate id 记录：
+
+```bash
+python3 scripts/agent_cli.py review <target> --workspace <audit-dir> \
+  --candidate-id <candidate-id> --status accepted --reason-code confirmed-mechanism \
+  --note "机制成立但仍需 typed effect" \
+  --evidence-ref state/<target>/round-01/S4/runtime-lab.json \
+  --next-probe "补最小 typed effect 观测" --round <N> --json
+```
+
+支持的 status 是 `accepted`、`rejected`、`needs-evidence`、`scope-corrected`；reason code 是
+`false-positive`、`confirmed-mechanism`、`missing-typed-effect`、`environment-gap`、
+`scope-correction`、`duplicate`、`needs-source-review`。反馈写入
+`state/<target>/review-feedback.json`，在读取记忆和 S8 时合并，并只作为 S2 调度提示。备注和
+引用会有界、脱敏；不得写入原始 payload、命令、进程输出或 secret。`rejected` 只降低重复优先级，
+`needs-evidence` 提高下一步探针优先级，`accepted`/`scope-corrected` 仍必须独立补齐 G4/G5 证据。
+任何复核 status 都不是漏洞结论。
+
+S8 还会写出目标级 `state/<target>/research-portfolio.json` 与轮次快照
+`state/<target>/round-NN/S8/research-portfolio.json`。`research-portfolio-v1` 只按显式的
+`research_surface`、`target_type`、`attack_class`、`variant` 和 `precondition_class` 汇总机制、状态、
+复核和 benchmark 趋势，并生成确定性的 `next_probes`。下一轮 S2 可以利用它定位跨研究面/变体缺口，
+但组合视图仍必须保持 `claim_status=not-a-finding`；不得写入 reviewer note、原始参数、payload、命令、
+stdout/stderr、凭据、CVSS 或 G4/G5 证据，缺口也绝不是不存在的证明。
+
+S3 residual 会作为同一边界下的待偿研究债务跨轮保存。记忆层只保留受控的
+kind/reason code、有界源码位置、probe 摘要哈希和是否存在有界 probe plan；组合视图为每条
+residual 生成一个 `state=pending-residual` 的 next probe，并把对应变体标为 unresolved，即使主
+replay 已经稳定。不能复制 residual 原文或 probe 文本；S4 仍必须用明确 falsifier 关闭 residual，
+每条记录继续保持 `claim_status=not-a-finding`。
+
+S8 还会在 project portfolio 内从已持久化的 lane witness 生成
+`surface-variant-coverage-v1`。按明确的研究面、变体和 lane 聚合，保留有界的历史状态/信号计数，以及每个
+research key 的最新状态，包括 state-sequence、typed-effect、safe-equivalent、sequence status、cell 计数和
+environment-gap 元数据。只有最新真实状态为 `observed` 的 lane 才能闭合；partial、`not-executed` 和
+`environment-gap` 必须按精确 research key 生成有界 next probe，不能让稳定的主 replay 掩盖未验证 lane。这个视图
+只用于调度，始终是 `claim_status=not-a-finding`，不能改变 candidate status、CVSS、G4 或 G5。
+
+S8 还会生成带来源指纹的 `research-replay-pack-v1`。它只保留 allowlist 内的 workspace-local artifact 名称、schema
+version、大小、SHA-256 指纹和有界的每轮 lane/comparison 摘要，不会复制源码、payload、命令、stdout/stderr、凭据或漏洞结论。
+也可以单独运行：
+
+```bash
+python3 scripts/agent_cli.py replay-pack <target> \
+  --workspace <audit-dir> --json
+```
+
+pack 会区分 complete、partial、environment-gap、not-executed 和 invalid provenance，并校验内嵌 calibration 与轮次历史
+digest 一致；之后可用 `verify_replay_pack` 对原 workspace 重新哈希。只有来源完整且自洽的 pack 才能进入 cohort，所有
+pack 状态继续保持 `claim_status=not-a-finding`。
+
+当多个独立目标已有有界 replay pack 时，操作者可以显式生成
+`research-replay-cohort-v1`：
+
+```bash
+python3 scripts/agent_cli.py replay-cohort-calibrate \
+  --pack /path/to/project-a/research-replay-pack.json \
+  --pack /path/to/project-b/research-replay-pack.json \
+  --pack /path/to/project-c/research-replay-pack.json \
+  --out state/research-replay-cohort.json --json
+```
+
+cohort 会从不透明的 project row 重新计算策略，同时检查不同项目数与按研究面的样本充分性；只有至少三个 eligible 项目时才允许影响调度。只有项目级低收益 replacement signal 满足有界多数条件时，才可选择已有的一轮或两轮 zero-information threshold；否则生成 `collect-more-projects` 并保留默认值。目标可以显式配置 `replay_cohort_calibration_path`；目标本地校准充分时始终优先，cohort 不会被隐式发现。来源不完整或 digest 不一致的 pack 会被拒绝；旧的 `--artifact` 入口仍保留兼容，但会与 pack provenance 分开统计。S8 只可保存归一化快照并将其用作 research-guidance fallback。cohort 仍是 `claim_status=not-a-finding`，不得携带输入路径、原始回放、payload、命令、输出、凭据或漏洞证据，也不能改变 candidate status、CVSS、G4 或 G5。
+
+S8 还会从有界、归一化的 `research-memory` 事件生成
+`research-consistency-v1`。可用 `python3 scripts/agent_cli.py research-consistency <target> --workspace <dir> [--rebuild] [--json]` 查看或重建。对同一 research key，它只比较 effect 是否出现、是否可复现、comparison、运行状态和 context digest，区分 `consistent`、`conflicted`、`unstable`、`insufficient` 与 `environment-gap`。冲突会生成 `repeat-with-controlled-context`、`isolate-state`、`collect-independent-observation` 或 `repair-environment` 等有界动作，portfolio 和 strategy 只用它调度下一轮；环境缺口不会被算作无 effect，target/round artifact 继续保持 `claim_status=not-a-finding`，不能改变 candidate status、CVSS、G4 或 G5。
+
+S8 还会为每个非一致历史生成 `research-consistency-action-v1`。可用
+`python3 scripts/agent_cli.py research-consistency-actions <target> --workspace <dir> [--rebuild] [--json]`
+查看或重建。每个 action 只包含 allowlist 隔离轴、正/负向或环境缺口 lane、有界重复形状、required observation code 和 falsifier code。S2 按稳定 `research_key` 匹配并生成 `consistency-recheck` 计划；S4 将归一化契约传入 MatrixCell、`VULNGATE_CONSISTENCY_ACTION`、runtime-lab fixture 和 replay/differential cell。缺少独立重放、fixture/context 不一致、状态未重置或签名漂移时，研究项继续 pending。action、portfolio、strategy 和 replay pack 都保持 `claim_status=not-a-finding`，不能改变 candidate status、CVSS、G4 或 G5；契约不得保存源码原文、payload、命令、stdout/stderr、凭据或漏洞结论。
+
+S8 还会验证复核是否真正闭合，产出 `research-consistency-recheck-v1`。S4 按 action 的
+`matrix_shape` 展开 positive/negative 或 environment-gap lane，并只向 PoC 暴露有界的
+`VULNGATE_CONSISTENCY_LANE`；lane fixture 使用不同 identity，但必须保留相同的基础
+context digest。runner row 归一化前只能提取执行/环境状态、独立 replay 次数、typed-effect
+或 safe-equivalent、显式 state reset、comparison arm 和 fixture/context identity；closure
+artifact 不得保存 raw stdout/stderr、命令、payload、凭据或源码原文。
+
+`research-consistency-rechecks` artifact 与 CLI 严格区分 `observed`、`partial`、
+`environment-gap` 和 `not-executed`。只有预期 lane、重复次数、fixture/context 锁、comparison
+和 required observations 全部有实际 witness 时才停止重复调度；否则 portfolio 继续给出有界
+follow-up probe。可用：
+
+```bash
+python3 scripts/agent_cli.py research-consistency-rechecks <target> \
+  --workspace <audit-dir> [--round N] [--rebuild] [--json]
+```
+
+该 closure 仍保持 `claim_status=not-a-finding`，不能确认漏洞、把环境缺口变成负证据，或改变
+candidate status、CVSS、G4、G5。
+
+S8 还会把策略与 portfolio 归一化成有界的 `research-agenda-v1` 主动研究议程。
+议程使用固定槽位、surface × attack-class 多样性、证据债务、预期信息增益与估计成本，明确区分
+`selected`、`deferred` 与 `hold`，并写入 `state/<target>/coverage/research-agenda.json` 以及
+round artifact。调度器只对精确匹配且被选中的议程项施加一个很小的优先级提示，并在 prompt 中展示
+议程证据债务；它不改变 candidate status、CVSS、G4、G5，也不把 `claim_status=not-a-finding`
+升级为漏洞结论。可用 `python3 scripts/agent_cli.py research-agenda <target> --workspace <path>`
+查看或重建议程。
+
+S8 还会在覆盖上一轮议程前生成 `research-agenda-outcome-v1` 执行反馈。它按
+`agenda_id`、`strategy_id`、`research_key` 或 `candidate_id` 精确关联上一轮的
+`selected/deferred/hold`、实际 scheduler snapshot、S4 verification matrix/runtime lab 与 S8
+strategy feedback，只输出 `new-information`、`falsifier-observed`、`no-new-information`、
+`environment-gap`、`not-executed` 和 `not-selected` 等有界 outcome。产物只保留信息增益、白名单
+观测信号、执行状态、cell/fixture 计数、reason codes 和连续无增益计数，写入 target/round
+`research-agenda-outcomes.json`，下一轮 agenda 与 scheduler prompt 可用它优先修复环境或替换低收益
+重复实验。缺少 schedule 或环境失败不能成为负向安全证据；outcome 仍保持
+`claim_status=not-a-finding`，不能改变 candidate status、CVSS、G4 或 G5。可用：
+
+```bash
+python3 scripts/agent_cli.py research-agenda-outcomes <target> \
+  --workspace <audit-dir> [--round N] [--rebuild] [--json]
+```
+
+S8 还会生成 `research-budget-v1` 结果—成本自适应策略。它把上一轮 agenda 与归一化 outcome
+按显式 research surface 汇总 selected 数、信息增益、估计成本、环境缺口和无信息重复，并只产生
+`recover-environment`、`exploit-high-yield`、`explore-undercovered`、`continue-balanced` 和
+`cooldown-low-yield` 等固定策略码。环境缺口得到有界恢复优先级，连续无增益任务只降温不删除，已有
+产出的研究面得到小幅利用权重，尚未观测的研究面保留探索机会；下一轮 agenda 只消费 allowlist 的
+surface priority delta 与 cap hint。target/round 产物为 `research-budget.json`，可用下面命令检查或重建：
+
+```bash
+python3 scripts/agent_cli.py research-budget <target> \
+  --workspace <audit-dir> [--round N] [--rebuild] [--slots N] [--json]
+```
+
+budget、agenda hint 和 scheduler evidence 继续保持 `claim_status=not-a-finding`，不能确认漏洞、改变
+candidate status、CVSS、G4 或 G5；历史不足时保持默认探索策略。
+
+S2 还会写出有界的 `research-strategy-v1`：目标级为
+`state/<target>/coverage/research-strategy.json`，轮次快照为 `S2/research-strategy.json`。它将
+攻击路径假设、未映射 coverage、residual probe、环境缺口、跨轮状态和 benchmark 上下文汇聚为带
+固定 required observations/falsifiers 的策略项。调度器只有在 flow、entry/sink、candidate 或
+research key 明确匹配时才给很小的排序提示；策略只是研究议程，不是源码/运行时证明、漏洞结论、
+CVSS 或 G4/G5 替代品。可用下面命令查看：
+
+```bash
+python3 scripts/agent_cli.py research-strategy <target> \
+  --workspace <audit-dir> --json
+```
+
+查看有界组合视图：
+
+```bash
+python3 scripts/agent_cli.py portfolio <target> --workspace <audit-dir> --json
+```
+
+只有在 S8 之外修改了研究记忆或复核反馈时才使用 `--rebuild`；如需同时注入显式评测反馈，可传入
+`--benchmark-feedback <json>`。
+
+调度器只有在 research key 精确匹配，或至少两个显式维度且变体也匹配时，才会给待验证探针一个很小的
+有界排序提示；自由文本 surface 不足以触发。匹配会作为 `claim_status=not-a-finding` 的调度证据落盘，
+不能确认漏洞、修改 CVSS 或满足 G4/G5。
+
 所有 cell 都保留，包括 harness error 和负向观测。
 
 #### 执行状态必须分型
@@ -914,6 +1787,9 @@ VULNGATE_PRECONDITION
 VULNGATE_FEATURES
 VULNGATE_TARGET_URL
 VULNGATE_AUTHZ_*
+VULNGATE_SEQUENCE
+VULNGATE_CONCURRENCY
+VULNGATE_AVAILABILITY_PROBE
 ```
 
 运行：
@@ -1030,6 +1906,29 @@ python3 scripts/agent_cli.py ledger --workspace <path> --target <name> --round <
 - 即使没标 `fix-completeness`，只要 surface 含 UAF/overflow/bypass/race/issue/CVE 等修复族信号，仍受该硬规则约束。
 - 负向证据和排除项必须保留，不能因为候选失败就删除。
 - 轮次结束检查并清理本轮启动的进程/监听，并在汇总中记录。
+
+### 确定性研究评测基准
+
+修改候选生成、调度、证据契约或结论/严重性规则后运行评测。gold manifest 与实际运行记录
+独立于目标漏洞账本：
+
+```bash
+python3 scripts/agent_cli.py benchmark --manifest <gold.json> \
+  --run <run.json> --out <benchmark-result.json> \
+  --feedback-out <research-benchmark-feedback.json> --json
+```
+
+manifest 为每个 case 声明 `truth`（`vulnerable`、`negative`、`environment-gap`）、期望 status、
+必需证据字段以及可选的期望严重性。run 只提交有界的 case status、证据字段标记、CVSS 和稳定
+research-key 事件；原始 PoC payload、命令和进程输出不能作为 benchmark 证据。结果保持
+`claim_status=not-a-finding`，并报告：观测覆盖率/结论解析准确率、确认 precision/recall、负向
+结果误确认率、环境缺口保真度、研究键重复率与无新证据重复率、证据完整度，以及 CVSS 误差/一
+分以内比例/严重性夸大率。
+
+评测分数不能升级真实漏洞或绕过 G4/G5。负向保真度低、无新证据重复率高、证据缺失或严重性
+夸大时，应修改计划器、调度器或结论规则，并用同一份 manifest 重跑。生成的
+`research-benchmark-feedback-v1` 只包含有界指标快照、固定告警码、调度因子微调和实验提示；
+没有显式提供反馈时，默认调度行为不变。
 
 ## 7. 硬闸门摘要
 

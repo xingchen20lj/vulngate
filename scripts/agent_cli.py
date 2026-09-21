@@ -16,9 +16,46 @@ Usage:
   agent_cli.py cvss --vector <CVSS:3.1/...> [--tier <tier>] [--implicit-default-on]
   agent_cli.py ledger --workspace <dir> --target <name> --round <N> --entries <json>
   agent_cli.py deps --target <dir> [--out <report.md>] [--offline] [--cache <dir>]
+  agent_cli.py benchmark --manifest <gold.json> [--run <run.json>] [--out <result.json>]
+                           [--feedback-out <feedback.json>] [--json]
+  agent_cli.py replay-calibrate <target> --workspace <dir> [--out <result.json>] [--json]
+  agent_cli.py replay-pack <target> --workspace <dir> [--round <N> ...]
+                           [--out <result.json>] [--json]
+  agent_cli.py replay-cohort-calibrate --artifact <calibration.json> \
+                           [--artifact <calibration.json> ...] \
+                           [--pack <replay-pack.json> ...] \
+                           [--project-id <label> ...] [--out <result.json>] [--json]
+  agent_cli.py review <target> --workspace <dir> (--research-key <rk>|--candidate-id <id>)
+                           --status <accepted|rejected|needs-evidence|scope-corrected>
+                           [--reason-code <code>] [--note <text>] [--evidence-ref <ref>]
+                           [--next-probe <hint>] [--round <N>] [--json]
+  agent_cli.py portfolio <target> --workspace <dir> [--rebuild]
+                              [--benchmark-feedback <json>] [--json]
+  agent_cli.py research-consistency <target> --workspace <dir> [--rebuild] [--json]
+  agent_cli.py research-consistency-actions <target> --workspace <dir> [--rebuild] [--json]
+  agent_cli.py research-consistency-rechecks <target> --workspace <dir> [--rebuild] [--json]
+  agent_cli.py research-agenda <target> --workspace <dir> [--rebuild] [--json]
+  agent_cli.py research-agenda-outcomes <target> --workspace <dir> [--round N]
+                           [--rebuild] [--json]
+  agent_cli.py research-strategy <target> --workspace <dir> [--rebuild]
+                               [--benchmark-feedback <json>] [--json]
   agent_cli.py coverage <target> [--workspace <dir>] [--rebuild] [--show-uncovered]
                            [--json] [--risk high|medium|low] [--category authz]
                            [--module <prefix>] [--lang zh|en]
+  agent_cli.py capability <target> [--workspace <dir>] [--rebuild]
+                             [--show-candidates] [--json]
+  agent_cli.py semantic-paths <target> [--workspace <dir>] [--rebuild]
+                               [--show-candidates] [--json]
+  agent_cli.py semantic-guards <target> [--workspace <dir>] [--rebuild]
+                                [--show-candidates] [--json]
+  agent_cli.py semantic-calls <target> [--workspace <dir>] [--rebuild]
+                                [--show-candidates] [--json]
+  agent_cli.py semantic-controlflow <target> [--workspace <dir>] [--rebuild]
+                                [--show-candidates] [--json]
+  agent_cli.py semantic-ast <target> [--workspace <dir>] [--rebuild]
+                          [--show-candidates] [--json]
+  agent_cli.py threat-model <target> [--workspace <dir>] [--rebuild]
+                                [--json]
   agent_cli.py spawn-probe --workspace <dir> --target <name> --round <N>
                            --status ok|degraded [--reply <agent-reply>]
   agent_cli.py staging-exec --authorized-staging --host <ECS> --user <user> ...
@@ -137,6 +174,12 @@ def _matrix_cell(c: Dict[str, Any]) -> MatrixCell:
         jvm=dict(c.get("jvm", {})),
         timeout=c.get("timeout"),
         authz=dict(c.get("authz", {})),
+        sequence=list(c.get("sequence", [])) if isinstance(c.get("sequence", []), list)
+        else c.get("sequence", []),
+        concurrency=c.get("concurrency", 1),
+        availability_probe=c.get("availability_probe", False),
+        capability_contract=c.get("capability_contract", {}),
+        consistency_action=c.get("consistency_action", {}),
         required_runtime=str(c.get("required_runtime", c.get("requested_runtime", ""))),
         java_bin=str(c.get("java_bin", "")),
         java_home=str(c.get("java_home", "")),
@@ -515,6 +558,751 @@ def cmd_deps(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_benchmark(args: argparse.Namespace) -> int:
+    """Score a deterministic research run against a gold benchmark manifest."""
+    from agent.evaluation.benchmark import (evaluate_benchmark,
+                                             compare_benchmark_results,
+                                             derive_benchmark_feedback,
+                                             load_benchmark_json,
+                                             normalize_manifest,
+                                             render_benchmark_text,
+                                             validate_manifest)
+
+    try:
+        manifest = load_benchmark_json(Path(args.manifest))
+        errors = validate_manifest(manifest)
+        if errors:
+            _out({"error": "invalid benchmark manifest", "errors": errors[:20],
+                  "manifest": str(Path(args.manifest).resolve())})
+            return 2
+        if not normalize_manifest(manifest).get("cases"):
+            _out({"error": "benchmark manifest has no valid cases",
+                  "manifest": str(Path(args.manifest).resolve())})
+            return 2
+        runs = []
+        for filename in args.run or []:
+            loaded = load_benchmark_json(Path(filename))
+            if isinstance(loaded.get("runs"), list) and "observations" not in loaded:
+                runs.extend(loaded["runs"])
+            else:
+                runs.append(loaded)
+        result = evaluate_benchmark(manifest, runs if runs else None)
+        if args.baseline:
+            baseline = load_benchmark_json(Path(args.baseline))
+            trend = compare_benchmark_results(result, baseline)
+            if trend:
+                result["trend"] = trend
+        feedback = derive_benchmark_feedback(result)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        _out({"error": "%s: %s" % (type(exc).__name__, exc)})
+        return 2
+
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False),
+                            encoding="utf-8")
+    if args.feedback_out:
+        feedback_path = Path(args.feedback_out)
+        feedback_path.parent.mkdir(parents=True, exist_ok=True)
+        feedback_path.write_text(json.dumps(feedback, indent=2, ensure_ascii=False),
+                                 encoding="utf-8")
+    if args.json:
+        payload = dict(result)
+        payload["feedback"] = feedback
+        if args.out:
+            payload["written_to"] = str(Path(args.out).resolve())
+        if args.feedback_out:
+            payload["feedback_written_to"] = str(Path(args.feedback_out).resolve())
+        _out(payload)
+    else:
+        print(render_benchmark_text(result))
+        if args.out:
+            print("  written_to: %s" % Path(args.out).resolve())
+        if args.feedback_out:
+            print("  feedback_written_to: %s" % Path(args.feedback_out).resolve())
+    return 0
+
+
+def cmd_replay_calibrate(args: argparse.Namespace) -> int:
+    """Calibrate guidance from bounded real-project round replays."""
+    from agent.evaluation.replay_calibration import (
+        build_replay_calibration, write_replay_calibration,
+    )
+
+    workspace = Path(args.workspace).resolve()
+    calibration = build_replay_calibration(workspace, args.target)
+    target_path = write_replay_calibration(
+        workspace, args.target, calibration)
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "artifact": str(target_path.relative_to(workspace)),
+        "calibration": calibration,
+        "claim_status": "not-a-finding",
+    }
+    if args.out:
+        out_path = Path(args.out)
+        if not out_path.is_absolute():
+            out_path = workspace / out_path
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(calibration, indent=2,
+                                       ensure_ascii=False), encoding="utf-8")
+        payload["written_to"] = str(out_path.resolve())
+    if args.json:
+        _out(payload)
+    else:
+        metrics = calibration.get("metrics", {})
+        print("replay calibration: %s" % payload["artifact"])
+        print("  status=%s rounds=%s replayed=%s replacement_hit_rate=%s claim_status=%s"
+              % (calibration.get("status", "no-data"),
+                 metrics.get("round_count", 0),
+                 metrics.get("replayed_guidance_items", 0),
+                 metrics.get("replacement_hit_rate"),
+                 calibration.get("claim_status", "not-a-finding")))
+        if args.out:
+            print("  written_to: %s" % payload["written_to"])
+    return 0
+
+
+def cmd_replay_pack(args: argparse.Namespace) -> int:
+    """Build a provenance-carrying pack from local replay artifacts."""
+    from agent.evaluation.replay_pack import (
+        build_replay_pack, write_replay_pack,
+    )
+
+    workspace = Path(args.workspace).resolve()
+    pack = build_replay_pack(workspace, args.target, args.round or None)
+    if not pack:
+        _out({"error": "replay pack could not be built",
+              "target": args.target, "workspace": str(workspace)})
+        return 2
+    target_path = write_replay_pack(workspace, args.target, pack)
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "artifact": str(target_path.relative_to(workspace)),
+        "pack": pack,
+        "claim_status": "not-a-finding",
+    }
+    if args.out:
+        out_path = Path(args.out)
+        if not out_path.is_absolute():
+            out_path = workspace / out_path
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(pack, indent=2, ensure_ascii=False),
+                            encoding="utf-8")
+        payload["written_to"] = str(out_path.resolve())
+    if args.json:
+        _out(payload)
+    else:
+        provenance = pack.get("provenance", {})
+        print("replay pack: %s" % payload["artifact"])
+        print("  status=%s rounds=%s artifacts=%s valid_for_cohort=%s "
+              "claim_status=%s" % (
+                  provenance.get("status", "not-executed"),
+                  provenance.get("round_count", 0),
+                  provenance.get("round_artifact_count", 0),
+                  provenance.get("valid_for_cohort", False),
+                  pack.get("claim_status", "not-a-finding")))
+        if args.out:
+            print("  written_to: %s" % payload["written_to"])
+    return 0
+
+
+def cmd_replay_cohort_calibrate(args: argparse.Namespace) -> int:
+    """Aggregate bounded replay calibration from independent projects."""
+    from agent.evaluation.replay_cohort import calibrate_replay_cohort
+    from agent.evaluation.replay_pack import load_replay_pack_file
+
+    artifact_paths = [Path(value).resolve() for value in args.artifact or []]
+    pack_paths = [Path(value).resolve() for value in args.pack or []]
+    project_ids = [str(value).strip() for value in args.project_id or []]
+    input_count = len(artifact_paths) + len(pack_paths)
+    if project_ids and len(project_ids) != input_count:
+        _out({"error": "--project-id must be repeated once per --artifact/--pack",
+              "inputs": input_count,
+              "project_ids": len(project_ids)})
+        return 2
+    inputs = []
+    invalid = []
+    for index, path in enumerate(artifact_paths):
+        try:
+            if not path.is_file() or path.stat().st_size > 8 * 1024 * 1024:
+                invalid.append(str(path))
+                continue
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            invalid.append(str(path))
+            continue
+        if isinstance(raw, dict) and isinstance(raw.get("calibration"), dict):
+            raw = raw["calibration"]
+        inputs.append({
+            "calibration": raw,
+            "project_id": project_ids[index] if project_ids else "",
+        })
+    for offset, path in enumerate(pack_paths):
+        pack = load_replay_pack_file(path)
+        provenance = pack.get("provenance") if pack else {}
+        if not pack or not provenance.get("valid_for_cohort"):
+            invalid.append(str(path))
+            continue
+        index = len(artifact_paths) + offset
+        inputs.append({
+            "pack": pack,
+            "project_id": project_ids[index] if project_ids else "",
+        })
+    if invalid:
+        _out({"error": "invalid or provenance-incomplete replay input",
+              "paths": invalid[:8]})
+        return 2
+    if not inputs:
+        _out({"error": "at least one --artifact or --pack is required"})
+        return 2
+    cohort = calibrate_replay_cohort(inputs)
+    payload = {
+        "cohort": cohort,
+        "artifact_count": len(inputs),
+        "input_kind_counts": cohort.get("metrics", {}).get(
+            "input_kind_counts", {}),
+        "claim_status": "not-a-finding",
+    }
+    if args.out:
+        out_path = Path(args.out).resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(cohort, indent=2, ensure_ascii=False),
+                            encoding="utf-8")
+        payload["written_to"] = str(out_path)
+    if args.json:
+        _out(payload)
+    else:
+        metrics = cohort.get("metrics", {})
+        print("replay cohort calibration: status=%s projects=%s eligible=%s "
+              "replayed=%s threshold=%s claim_status=%s" % (
+                  cohort.get("status", "no-data"),
+                  metrics.get("project_count", 0),
+                  metrics.get("eligible_projects", 0),
+                  metrics.get("eligible_replayed_guidance_items", 0),
+                  (cohort.get("policy") or {}).get(
+                      "replacement_zero_gain_rounds", 1),
+                  cohort.get("claim_status", "not-a-finding")))
+        if args.out:
+            print("  written_to: %s" % payload["written_to"])
+    return 0
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    """Record bounded human review feedback for one research mechanism."""
+    from agent.memory.research import (REVIEW_REASON_CODES, REVIEW_STATUSES,
+                                       load_research_memory,
+                                       record_review_feedback,
+                                       review_feedback_path)
+
+    workspace = Path(args.workspace).resolve()
+    memory = load_research_memory(workspace, args.target)
+    research_key = str(args.research_key or "").strip()
+    candidate_id = str(args.candidate_id or "").strip()
+    if not research_key and candidate_id:
+        matches = [entry for entry in memory.get("entries", [])
+                   if str(entry.get("candidate_id") or "") == candidate_id]
+        keys = sorted({str(entry.get("research_key")) for entry in matches
+                       if entry.get("research_key")})
+        if len(keys) != 1:
+            _out({"error": "candidate id does not resolve to one research key",
+                  "candidate_id": candidate_id, "matches": keys,
+                  "hint": "pass --research-key explicitly when the candidate was renamed"})
+            return 2
+        research_key = keys[0]
+    if not research_key:
+        _out({"error": "--research-key or --candidate-id is required"})
+        return 2
+    if args.status not in REVIEW_STATUSES or args.reason_code not in REVIEW_REASON_CODES:
+        _out({"error": "unsupported review status or reason code",
+              "statuses": sorted(REVIEW_STATUSES),
+              "reason_codes": sorted(REVIEW_REASON_CODES)})
+        return 2
+    round_no = int(args.round or 0)
+    if round_no <= 0:
+        try:
+            round_no = max(1, int(memory.get("round", 0) or 0) + 1)
+        except (TypeError, ValueError):
+            round_no = 1
+    try:
+        feedback = record_review_feedback(
+            workspace, args.target, research_key, args.status,
+            reason_code=args.reason_code, candidate_id=candidate_id,
+            reviewer_note=args.note, evidence_refs=args.evidence_ref,
+            next_probe_hints=args.next_probe, round_no=round_no)
+    except ValueError as exc:
+        _out({"error": str(exc)})
+        return 2
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "feedback": feedback,
+        "feedback_file": str(review_feedback_path(workspace, args.target)
+                               .relative_to(workspace)),
+        "claim_status": "not-a-finding",
+    }
+    if args.json:
+        _out(payload)
+    else:
+        print("review feedback recorded: %s %s (%s) -> %s" % (
+            feedback["status"], feedback["research_key"],
+            feedback["reason_code"], payload["feedback_file"]))
+    return 0
+
+
+def cmd_portfolio(args: argparse.Namespace) -> int:
+    """Show the bounded project research portfolio (or rebuild it explicitly)."""
+    from agent.memory.portfolio import (build_research_portfolio,
+                                        load_research_portfolio,
+                                        portfolio_path,
+                                        write_research_portfolio)
+    from agent.memory.research import (load_review_feedback,
+                                       load_research_memory)
+
+    workspace = Path(args.workspace).resolve()
+    portfolio = load_research_portfolio(workspace, args.target)
+    if args.rebuild:
+        benchmark_feedback: Dict[str, Any] = {}
+        if args.benchmark_feedback:
+            try:
+                feedback_path = Path(args.benchmark_feedback)
+                if not feedback_path.is_absolute():
+                    feedback_path = workspace / feedback_path
+                benchmark_feedback = json.loads(
+                    feedback_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                _out({"error": "%s: %s" % (type(exc).__name__, exc)})
+                return 2
+        portfolio = build_research_portfolio(
+            load_research_memory(workspace, args.target),
+            load_review_feedback(workspace, args.target),
+            benchmark_feedback)
+        write_research_portfolio(workspace, args.target, portfolio)
+    if not portfolio:
+        _out({"error": "research portfolio not found",
+              "hint": "run an S8 round or pass --rebuild",
+              "artifact": str(portfolio_path(workspace, args.target))})
+        return 2
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "artifact": str(portfolio_path(workspace, args.target).relative_to(workspace)),
+        "portfolio": portfolio,
+    }
+    if args.json:
+        _out(payload)
+    else:
+        summary = portfolio.get("summary", {})
+        print("portfolio: %s" % payload["artifact"])
+        print("  mechanisms=%s unresolved=%s next_probes=%d claim_status=%s" % (
+            summary.get("mechanism_count", 0),
+            summary.get("unresolved_mechanisms", 0),
+            len(portfolio.get("next_probes") or []),
+            portfolio.get("claim_status", "not-a-finding")))
+        lane_coverage = portfolio.get("surface_lane_coverage") or {}
+        lane_summary = lane_coverage.get("summary") or {}
+        print("  lanes=%s observed=%s partial=%s environment_gap=%s "
+              "not_executed=%s" % (
+                  lane_summary.get("lane_count", 0),
+                  lane_summary.get("observed_lanes", 0),
+                  lane_summary.get("partial_lanes", 0),
+                  lane_summary.get("environment_gap_lanes", 0),
+                  lane_summary.get("not_executed_lanes", 0)))
+        for lane in lane_coverage.get("lanes") or []:
+            if not isinstance(lane, dict) or lane.get("status") == "observed":
+                continue
+            print("  lane: %s/%s/%s [%s] missing=%s" % (
+                lane.get("surface"), lane.get("variant_id"),
+                lane.get("lane"), lane.get("status"),
+                ",".join(lane.get("missing_observations") or []) or "-"))
+        for probe in portfolio.get("next_probes") or []:
+            print("  next: %s [%s] %s" % (
+                probe.get("candidate_id") or probe.get("research_key"),
+                probe.get("state"),
+                "; ".join(probe.get("next_probe_hints") or []) or "-"))
+    return 0
+
+
+def cmd_research_consistency(args: argparse.Namespace) -> int:
+    """Show or rebuild bounded cross-round evidence consistency metadata."""
+    from agent.evaluation.research_consistency import (
+        build_research_consistency,
+        consistency_path,
+        load_research_consistency,
+        write_research_consistency,
+    )
+    from agent.memory.research import load_research_memory
+
+    workspace = Path(args.workspace).resolve()
+    consistency = load_research_consistency(workspace, args.target)
+    if args.rebuild or not consistency:
+        consistency = build_research_consistency(
+            load_research_memory(workspace, args.target))
+        write_research_consistency(workspace, args.target, consistency)
+    if not consistency:
+        _out({"error": "research consistency artifact not found",
+              "hint": "run an S8 round or pass --rebuild",
+              "artifact": str(consistency_path(workspace, args.target))})
+        return 2
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "artifact": str(consistency_path(
+            workspace, args.target).relative_to(workspace)),
+        "consistency": consistency,
+    }
+    if args.json:
+        _out(payload)
+    else:
+        summary = consistency.get("summary", {})
+        print("research consistency: %s" % payload["artifact"])
+        print("  entries=%s conflicted=%s unstable=%s environment_gap=%s "
+              "insufficient=%s claim_status=%s" % (
+                  summary.get("entry_count", 0),
+                  summary.get("conflicted_entries", 0),
+                  summary.get("unstable_entries", 0),
+                  summary.get("environment_gap_entries", 0),
+                  summary.get("insufficient_entries", 0),
+                  consistency.get("claim_status", "not-a-finding")))
+        for row in consistency.get("entries") or []:
+            if not isinstance(row, dict) or row.get("status") == "consistent":
+                continue
+            print("  next: %s [%s] action=%s codes=%s" % (
+                row.get("candidate_id") or row.get("research_key"),
+                row.get("status"), row.get("next_action"),
+                ",".join(row.get("conflict_codes") or []) or "-"))
+    return 0
+
+
+def cmd_research_consistency_actions(args: argparse.Namespace) -> int:
+    """Show or rebuild bounded controlled recheck contracts."""
+    from agent.evaluation.research_consistency import (
+        build_research_consistency,
+        load_research_consistency,
+        write_research_consistency,
+    )
+    from agent.evaluation.research_consistency_actions import (
+        build_research_consistency_actions,
+        consistency_actions_path,
+        load_research_consistency_actions,
+        write_research_consistency_actions,
+    )
+    from agent.memory.research import load_research_memory
+
+    workspace = Path(args.workspace).resolve()
+    consistency = load_research_consistency(workspace, args.target)
+    if args.rebuild or not consistency:
+        consistency = build_research_consistency(
+            load_research_memory(workspace, args.target))
+        write_research_consistency(workspace, args.target, consistency)
+    actions = load_research_consistency_actions(workspace, args.target)
+    if args.rebuild or not actions:
+        actions = build_research_consistency_actions(consistency)
+        write_research_consistency_actions(workspace, args.target, actions)
+    if not actions:
+        _out({"error": "research consistency actions artifact not found",
+              "hint": "run an S8 round or pass --rebuild",
+              "artifact": str(consistency_actions_path(
+                  workspace, args.target))})
+        return 2
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "artifact": str(consistency_actions_path(
+            workspace, args.target).relative_to(workspace)),
+        "actions": actions,
+    }
+    if args.json:
+        _out(payload)
+    else:
+        summary = actions.get("summary", {})
+        print("research consistency actions: %s" % payload["artifact"])
+        print("  actions=%s conflicted=%s unstable=%s environment_gap=%s "
+              "insufficient=%s claim_status=%s" % (
+                  summary.get("action_count", 0),
+                  summary.get("conflicted_entries", 0),
+                  summary.get("unstable_entries", 0),
+                  summary.get("environment_gap_entries", 0),
+                  summary.get("insufficient_entries", 0),
+                  actions.get("claim_status", "not-a-finding")))
+        for row in actions.get("entries") or []:
+            if not isinstance(row, dict):
+                continue
+            print("  action: %s [%s] next=%s axes=%s" % (
+                row.get("candidate_id") or row.get("research_key"),
+                row.get("status"), row.get("next_action"),
+                ",".join(row.get("isolation_axes") or []) or "-"))
+    return 0
+
+
+def cmd_research_consistency_rechecks(args: argparse.Namespace) -> int:
+    """Show or rebuild bounded S4 execution closure for consistency actions."""
+    from agent.evaluation.research_consistency_actions import (
+        load_research_consistency_actions,
+    )
+    from agent.evaluation.research_consistency_rechecks import (
+        build_research_consistency_rechecks,
+        load_research_consistency_rechecks,
+        rechecks_path,
+        write_research_consistency_rechecks,
+    )
+    from agent.tools.s4_runtime_lab import LAB_SCHEMA_VERSION
+
+    workspace = Path(args.workspace).resolve()
+    rechecks = load_research_consistency_rechecks(workspace, args.target)
+    if args.rebuild or not rechecks:
+        runtime_path = (workspace / "state" / args.target /
+                        ("round-%02d" % args.round) / "S4" /
+                        "runtime-lab.json") if args.round else None
+        runtime = {}
+        if runtime_path is not None:
+            try:
+                runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ValueError, TypeError):
+                runtime = {}
+        else:
+            # Rebuild from the newest bounded runtime-lab artifact only.  The
+            # command never scans matrix-runs or reads raw process output.
+            rounds = sorted((workspace / "state" / args.target).glob(
+                "round-*/S4/runtime-lab.json"))
+            if rounds:
+                try:
+                    runtime = json.loads(rounds[-1].read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, ValueError, TypeError):
+                    runtime = {}
+        if not isinstance(runtime, dict):
+            runtime = {"schema_version": LAB_SCHEMA_VERSION,
+                       "status": "not-executed", "fixtures": []}
+        rechecks = build_research_consistency_rechecks(
+            runtime, load_research_consistency_actions(workspace, args.target))
+        write_research_consistency_rechecks(workspace, args.target, rechecks)
+    if not rechecks:
+        _out({"error": "research consistency rechecks artifact not found",
+              "hint": "run an S8 round or pass --rebuild",
+              "artifact": str(rechecks_path(
+                  workspace, args.target))})
+        return 2
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "artifact": str(rechecks_path(
+            workspace, args.target).relative_to(workspace)),
+        "rechecks": rechecks,
+    }
+    if args.json:
+        _out(payload)
+    else:
+        summary = rechecks.get("summary", {})
+        print("research consistency rechecks: %s" % payload["artifact"])
+        print("  entries=%s observed=%s partial=%s environment_gap=%s "
+              "not_executed=%s claim_status=%s" % (
+                  summary.get("entry_count", 0), summary.get("observed", 0),
+                  summary.get("partial", 0), summary.get("environment_gap", 0),
+                  summary.get("not_executed", 0),
+                  rechecks.get("claim_status", "not-a-finding")))
+        for row in rechecks.get("entries") or []:
+            if not isinstance(row, dict):
+                continue
+            print("  recheck: %s [%s] lanes=%s missing=%s" % (
+                row.get("candidate_id") or row.get("research_key"),
+                row.get("status"),
+                ",".join(row.get("observed_lanes") or []) or "-",
+                ",".join(row.get("missing_observations") or []) or "-"))
+    return 0
+
+
+def cmd_research_agenda(args: argparse.Namespace) -> int:
+    """Show or rebuild the bounded active research agenda."""
+    from agent.analysis.research_agenda import (
+        agenda_path,
+        build_research_agenda,
+        load_research_agenda,
+        write_research_agenda,
+    )
+    from agent.analysis.research_strategy import load_research_strategy
+    from agent.memory.portfolio import load_research_portfolio
+
+    workspace = Path(args.workspace).resolve()
+    agenda = load_research_agenda(workspace, args.target)
+    if args.rebuild or not agenda:
+        strategy = load_research_strategy(workspace, args.target)
+        portfolio = load_research_portfolio(workspace, args.target)
+        round_no = args.round or int((strategy or {}).get("round", 0) or 0)
+        agenda = build_research_agenda(
+            strategy, portfolio, target=args.target, round_no=round_no,
+            slots=args.slots, max_per_surface=args.max_per_surface)
+        write_research_agenda(workspace, args.target, agenda)
+    if not agenda:
+        _out({"error": "research agenda artifact not found",
+              "hint": "run an S8 round or pass --rebuild",
+              "artifact": str(agenda_path(workspace, args.target))})
+        return 2
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "artifact": str(agenda_path(
+            workspace, args.target).relative_to(workspace)),
+        "agenda": agenda,
+    }
+    if args.json:
+        _out(payload)
+    else:
+        summary = agenda.get("summary", {})
+        print("research agenda: %s" % payload["artifact"])
+        print("  entries=%s selected=%s deferred=%s hold=%s cost=%s gain=%s "
+              "claim_status=%s" % (
+                  summary.get("entry_count", 0),
+                  summary.get("selected_count", 0),
+                  summary.get("deferred_count", 0),
+                  summary.get("hold_count", 0),
+                  summary.get("selected_cost", 0),
+                  summary.get("selected_expected_information_gain", 0),
+                  agenda.get("claim_status", "not-a-finding")))
+        for row in agenda.get("items") or []:
+            if not isinstance(row, dict) or row.get("selection_status") != "selected":
+                continue
+            print("  selected: %s [%s] action=%s surface=%s score=%s gain=%s"
+                  % (row.get("candidate_id") or row.get("research_key"),
+                     row.get("agenda_id"), row.get("action"),
+                     row.get("surface") or "unknown",
+                     row.get("priority_score", 0),
+                     row.get("expected_information_gain", 0)))
+    return 0
+
+
+def cmd_research_agenda_outcomes(args: argparse.Namespace) -> int:
+    """Show or rebuild bounded execution feedback for an active agenda."""
+    from agent.analysis.research_agenda import load_research_agenda
+    from agent.analysis.research_agenda_outcomes import (
+        build_research_agenda_outcomes,
+        load_research_agenda_outcomes,
+        load_round_artifact,
+        load_schedule_snapshot,
+        outcomes_path,
+        write_research_agenda_outcomes,
+    )
+
+    workspace = Path(args.workspace).resolve()
+    outcomes = load_research_agenda_outcomes(workspace, args.target)
+    if args.rebuild or not outcomes:
+        agenda = load_research_agenda(workspace, args.target)
+        round_no = args.round or int(
+            (agenda or {}).get("round", 0) or
+            (outcomes or {}).get("round", 0) or 0)
+        schedule = load_schedule_snapshot(workspace, args.target, round_no)
+        verification = load_round_artifact(
+            workspace, args.target, round_no, "S4", "verification-matrix.json")
+        runtime_lab = load_round_artifact(
+            workspace, args.target, round_no, "S4", "runtime-lab.json")
+        feedback = load_round_artifact(
+            workspace, args.target, round_no, "S8",
+            "research-strategy-feedback.json")
+        outcomes = build_research_agenda_outcomes(
+            agenda, schedule, verification, runtime_lab, feedback,
+            prior_outcomes=outcomes, target=args.target, round_no=round_no)
+        write_research_agenda_outcomes(workspace, args.target, outcomes)
+    if not outcomes:
+        _out({"error": "research agenda outcomes artifact not found",
+              "hint": "run an S8 round or pass --rebuild",
+              "artifact": str(outcomes_path(workspace, args.target))})
+        return 2
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "artifact": str(outcomes_path(
+            workspace, args.target).relative_to(workspace)),
+        "outcomes": outcomes,
+    }
+    if args.json:
+        _out(payload)
+    else:
+        summary = outcomes.get("summary", {})
+        print("research agenda outcomes: %s" % payload["artifact"])
+        print("  round=%s entries=%s selected=%s scheduled=%s executed=%s "
+              "productive=%s yield=%s claim_status=%s" % (
+                  outcomes.get("round", 0), summary.get("entry_count", 0),
+                  summary.get("selected_count", 0),
+                  summary.get("scheduled_count", 0),
+                  summary.get("executed_count", 0),
+                  summary.get("productive_selected_count", 0),
+                  summary.get("selected_yield"),
+                  outcomes.get("claim_status", "not-a-finding")))
+        for row in outcomes.get("entries") or []:
+            if not isinstance(row, dict) or row.get("selection_status") != "selected":
+                continue
+            print("  outcome: %s [%s] gain=%s scheduled=%s executed=%s" % (
+                row.get("candidate_id") or row.get("research_key"),
+                row.get("outcome_code"), row.get("information_gain", 0),
+                row.get("scheduled", False), row.get("executed", False)))
+    return 0
+
+
+def cmd_research_budget(args: argparse.Namespace) -> int:
+    """Show or rebuild the bounded outcome-to-budget policy."""
+    from agent.analysis.research_agenda import load_research_agenda
+    from agent.analysis.research_agenda_outcomes import (
+        load_research_agenda_outcomes,
+    )
+    from agent.analysis.research_budget import (
+        budget_path,
+        build_research_budget,
+        load_research_budget,
+        write_research_budget,
+    )
+
+    workspace = Path(args.workspace).resolve()
+    budget = load_research_budget(workspace, args.target)
+    if args.rebuild or not budget:
+        agenda = load_research_agenda(workspace, args.target)
+        outcomes = load_research_agenda_outcomes(workspace, args.target)
+        prior = budget
+        round_no = args.round or int(
+            (outcomes or {}).get("round", 0) or
+            (agenda or {}).get("round", 0) or
+            (budget or {}).get("round", 0) or 0)
+        budget = build_research_budget(
+            agenda, outcomes, prior_budget=prior, target=args.target,
+            round_no=round_no, slots=args.slots)
+        write_research_budget(workspace, args.target, budget)
+    if not budget:
+        _out({"error": "research budget artifact not found",
+              "hint": "run an S8 round or pass --rebuild",
+              "artifact": str(budget_path(workspace, args.target))})
+        return 2
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "artifact": str(budget_path(
+            workspace, args.target).relative_to(workspace)),
+        "budget": budget,
+    }
+    if args.json:
+        _out(payload)
+    else:
+        summary = budget.get("summary", {})
+        print("research budget: %s" % payload["artifact"])
+        print("  surfaces=%s observed=%s selected=%s productive=%s gain=%s "
+              "cost=%s claim_status=%s" % (
+                  summary.get("surface_count", 0),
+                  summary.get("observed_surface_count", 0),
+                  summary.get("selected_count", 0),
+                  summary.get("productive_count", 0),
+                  summary.get("information_gain", 0),
+                  summary.get("estimated_cost", 0),
+                  budget.get("claim_status", "not-a-finding")))
+        for row in budget.get("surfaces") or []:
+            if not isinstance(row, dict):
+                continue
+            print("  surface: %s [%s] delta=%s cap=%s yield=%s" % (
+                row.get("surface"), row.get("recommendation"),
+                row.get("priority_delta", 0), row.get("cap_hint", 0),
+                row.get("yield_per_cost", 0)))
+    return 0
+
+
 def cmd_coverage(args: argparse.Namespace) -> int:
     """Security audit coverage report (spec §16).
 
@@ -534,7 +1322,10 @@ def cmd_coverage(args: argparse.Namespace) -> int:
 
     need_build = args.rebuild or any(
         not store.path(name).exists()
-        for name in ("source-inventory", "symbol-index", "flow-index"))
+        for name in ("source-inventory", "symbol-index", "flow-index",
+                     "semantic-path-evidence", "semantic-guard-evidence",
+                     "semantic-call-evidence", "semantic-controlflow-evidence",
+                     "semantic-ast-evidence"))
     if need_build:
         root = Path(args.root).resolve() if args.root else (
             workspace / "targets" / target)
@@ -567,6 +1358,15 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     print(cov.render_coverage_text(summary, args.lang, gap_limit=1))
     callgraph_summary = store.read("call-graph-summary") or {}
     flow_summary = store.read("flow-summary") or {}
+    semantic_summary = (store.read("semantic-path-evidence") or {}).get("summary") or {}
+    semantic_guard_summary = (store.read("semantic-guard-evidence") or {}).get(
+        "summary") or {}
+    semantic_call_summary = (store.read("semantic-call-evidence") or {}).get(
+        "summary") or {}
+    semantic_controlflow_summary = (store.read(
+        "semantic-controlflow-evidence") or {}).get("summary") or {}
+    semantic_ast_summary = (store.read(
+        "semantic-ast-evidence") or {}).get("summary") or {}
     if callgraph_summary or flow_summary:
         print("\n%s" % ("跨过程分析" if args.lang == "zh" else "Cross-procedural analysis"))
         print("─" * 46)
@@ -588,6 +1388,65 @@ def cmd_coverage(args: argparse.Namespace) -> int:
             if flow_summary.get("truncated"):
                 print("  !! flow index truncated: %s flows dropped (--max-flows)"
                       % flow_summary.get("dropped_flows", 0))
+    if semantic_summary:
+        print("\n%s" % ("语义路径证据" if args.lang == "zh"
+                        else "Semantic path evidence"))
+        print("─" * 46)
+        print("  flows %s  same-symbol %s  candidates %s"
+              % (semantic_summary.get("flows", 0),
+                 semantic_summary.get("same_symbol_flows", 0),
+                 semantic_summary.get("candidates", 0)))
+        print("  taint %s  verdicts %s"
+              % (semantic_summary.get("taint_status") or {},
+                 semantic_summary.get("semantic_verdicts") or {}))
+    if semantic_guard_summary:
+        print("\n%s" % ("语义守卫证据" if args.lang == "zh"
+                        else "Semantic guard evidence"))
+        print("─" * 46)
+        print("  flows %s  branch gaps %s  subject gaps %s  candidates %s"
+              % (semantic_guard_summary.get("flows", 0),
+                 semantic_guard_summary.get("flows_with_branch_gaps", 0),
+                 semantic_guard_summary.get("flows_with_subject_binding_gaps", 0),
+                 semantic_guard_summary.get("candidates", 0)))
+        print("  postures %s  binding %s"
+              % (semantic_guard_summary.get("branch_postures") or {},
+                 semantic_guard_summary.get("subject_binding") or {}))
+    if semantic_call_summary:
+        print("\n%s" % ("语义调用证据" if args.lang == "zh"
+                        else "Semantic call evidence"))
+        print("─" * 46)
+        print("  flows %s  cross-symbol %s  steps %s  candidates %s"
+              % (semantic_call_summary.get("flows", 0),
+                 semantic_call_summary.get("cross_symbol_flows", 0),
+                 semantic_call_summary.get("call_steps", 0),
+                 semantic_call_summary.get("candidates", 0)))
+        print("  callsites %s  sink binding %s"
+              % (semantic_call_summary.get("callsite_status") or {},
+                 semantic_call_summary.get("sink_binding") or {}))
+    if semantic_controlflow_summary:
+        print("\n%s" % ("语义控制流证据" if args.lang == "zh"
+                        else "Semantic control-flow evidence"))
+        print("─" * 46)
+        print("  flows %s  controls %s  alternate %s  dominance-likely %s  candidates %s"
+              % (semantic_controlflow_summary.get("flows", 0),
+                 semantic_controlflow_summary.get("controls", 0),
+                 semantic_controlflow_summary.get("flows_with_alternate_paths", 0),
+                 semantic_controlflow_summary.get("flows_with_dominance_likely", 0),
+                 semantic_controlflow_summary.get("candidates", 0)))
+        print("  relations %s"
+              % (semantic_controlflow_summary.get("relations") or {}))
+    if semantic_ast_summary:
+        print("\n%s" % ("Python AST 结构证据" if args.lang == "zh"
+                        else "Python AST structural evidence"))
+        print("─" * 46)
+        print("  flows %s  controls %s  parsed files %s/%s  candidates %s"
+              % (semantic_ast_summary.get("flows", 0),
+                 semantic_ast_summary.get("controls", 0),
+                 semantic_ast_summary.get("parsed_files", 0),
+                 semantic_ast_summary.get("files", 0),
+                 semantic_ast_summary.get("candidates", 0)))
+        print("  relations %s"
+              % (semantic_ast_summary.get("relations") or {}))
     if args.schedule:
         from agent.analysis import scheduler as sched
         plan_payload = sched.load_schedule(store)
@@ -688,6 +1547,8 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     """
     from agent.analysis import scheduler as sched
     from agent.analysis.inventory import CoverageStore
+    from agent.evaluation.benchmark import (benchmark_feedback_from_input,
+                                             load_benchmark_json)
 
     workspace = Path(args.workspace).resolve()
     store = CoverageStore(workspace, args.target)
@@ -702,9 +1563,22 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     if args.limit_pool:
         pool = pool[:args.limit_pool]
 
+    benchmark_feedback = {}
+    if args.benchmark_result:
+        try:
+            benchmark_input = load_benchmark_json(Path(args.benchmark_result))
+            benchmark_feedback = benchmark_feedback_from_input(benchmark_input)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            _out({"error": "benchmark result is not valid JSON: %s" % exc})
+            return 2
+        if not benchmark_feedback:
+            _out({"error": "benchmark result has no supported metrics/feedback",
+                  "path": str(Path(args.benchmark_result).resolve())})
+            return 2
+
     selected, plan, note = sched.round_selection(
         workspace, args.target, pool, slots, round_no=args.round,
-        refresh=not args.no_refresh)
+        refresh=not args.no_refresh, benchmark_feedback=benchmark_feedback)
     if plan is None:
         _out({"error": note, "target": args.target,
               "hint": "run S1 or `agent_cli coverage --rebuild` first"})
@@ -731,7 +1605,8 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     if note:
         print(("!! %s" if args.lang == "zh" else "!! %s") % note)
     if args.prompt:
-        context = sched.ScheduleContext.from_store(store)
+        context = sched.ScheduleContext.from_store(
+            store, benchmark_feedback=benchmark_feedback)
         print("")
         print(sched.prompt_coverage_block(context, plan=plan))
     return 0
@@ -860,6 +1735,431 @@ def cmd_controls(args: argparse.Namespace) -> int:
                                       if args.show_candidates else None))
     if rebuilt is not None:
         print("\n[index rebuilt from %s]" % rebuilt["root"])
+    return 0
+
+
+def cmd_capability(args: argparse.Namespace) -> int:
+    """Capability primitives and bounded attack-path hypotheses.
+
+    The graph is deterministic and static.  It reports observed/missing
+    primitives and the next verification sequence; it never promotes a
+    composed path to a vulnerability finding or a runtime impact claim.
+    """
+    from agent.analysis import capability_graph as capability
+
+    try:
+        workspace, store, rebuilt, _ = _ensure_coverage_analysis(
+            args, (capability.CAPABILITY_GRAPH_INDEX,))
+    except FileNotFoundError as exc:
+        _out({"error": "target source root not found", "root": str(exc),
+              "hint": "pass --root <src root> (with --rebuild) or run S1 first"})
+        return 2
+
+    graph = capability.load_capability_graph(store)
+    candidates = capability.load_capability_candidates(store)
+    if args.limit_candidates:
+        candidates = candidates[:args.limit_candidates]
+    summary = graph.get("summary") or {}
+    payload: Dict[str, Any] = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "summary": summary,
+        "candidates": candidates,
+    }
+    if rebuilt is not None:
+        payload["rebuilt"] = rebuilt
+    if args.json:
+        payload["nodes"] = (graph.get("nodes") or [])[:max(0, args.limit)]
+        payload["edges"] = (graph.get("edges") or [])[:max(0, args.limit)]
+        _out(payload)
+        return 0
+
+    label = "能力原语图" if args.lang == "zh" else "Capability primitive graph"
+    print("\n%s" % label)
+    print("─" * 46)
+    print("  nodes %s  edges %s  flows %s  paths %s" % (
+        summary.get("nodes", 0), summary.get("edges", 0),
+        summary.get("flows_considered", 0), summary.get("paths", 0)))
+    print("  observed %s" % (summary.get("observed_capabilities") or {}))
+    print("  complete %s  partial %s  truncated %s" % (
+        summary.get("complete_hypotheses", 0),
+        summary.get("partial_hypotheses", 0),
+        summary.get("truncated", False)))
+    if args.show_candidates:
+        title = "待验证攻击链（不是漏洞结论）" if args.lang == "zh" \
+            else "Verification candidates (not findings)"
+        print("\n%s" % title)
+        for candidate in candidates[:max(0, args.limit)]:
+            missing = ",".join(candidate.get("missing_capabilities") or []) or "none"
+            print("  %-16s %-42s missing=%s" % (
+                candidate.get("candidate_id", ""),
+                candidate.get("chain_equation", ""), missing))
+    if rebuilt is not None:
+        print("\n[index rebuilt from %s]" % rebuilt["root"])
+    return 0
+
+
+def cmd_semantic_paths(args: argparse.Namespace) -> int:
+    """Show source-local path order and bounded same-symbol data-flow leads."""
+    from agent.analysis import semantic_paths as semantic
+
+    try:
+        workspace, store, rebuilt, _ = _ensure_coverage_analysis(
+            args, (semantic.SEMANTIC_PATH_INDEX,))
+    except FileNotFoundError as exc:
+        _out({"error": "target source root not found", "root": str(exc),
+              "hint": "pass --root <src root> (with --rebuild) or run S1 first"})
+        return 2
+
+    evidence = semantic.load_semantic_evidence(store)
+    candidates = semantic.load_semantic_candidates(store)
+    if args.limit_candidates:
+        candidates = candidates[:args.limit_candidates]
+    payload: Dict[str, Any] = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "summary": evidence.get("summary") or {},
+        "candidates": candidates,
+        "claim_status": evidence.get("claim_status", "not-a-finding"),
+        "limitations": evidence.get("limitations") or [],
+    }
+    if rebuilt is not None:
+        payload["rebuilt"] = rebuilt
+    if args.json:
+        payload["flows"] = (evidence.get("flows") or [])[:max(0, args.limit)]
+        _out(payload)
+        return 0
+
+    print(semantic.render_semantic_paths_text(evidence, args.lang, limit=args.limit))
+    if args.show_candidates and not args.json:
+        print("\n%s" % ("待验证线索详情" if args.lang == "zh"
+                        else "Verification lead details"))
+        print("─" * 52)
+        for candidate in candidates[:max(0, args.limit)]:
+            print("  %-22s %s" % (candidate.get("candidate_id", ""),
+                                  candidate.get("hypothesis", "")))
+    if rebuilt is not None:
+        print("\n[index rebuilt from %s]" % rebuilt["root"])
+    return 0
+
+
+def cmd_semantic_guards(args: argparse.Namespace) -> int:
+    """Show bounded branch-posture and subject-binding evidence.
+
+    These rows help an expert choose the next trace, but do not prove branch
+    dominance, object identity, an authorization bypass, or any finding.
+    """
+    from agent.analysis import semantic_guards as semantic_guard
+
+    try:
+        workspace, store, rebuilt, _ = _ensure_coverage_analysis(
+            args, (semantic_guard.SEMANTIC_GUARD_INDEX,))
+    except FileNotFoundError as exc:
+        _out({"error": "target source root not found", "root": str(exc),
+              "hint": "pass --root <src root> (with --rebuild) or run S1 first"})
+        return 2
+
+    evidence = semantic_guard.load_semantic_guards(store)
+    candidates = semantic_guard.load_semantic_guard_candidates(store)
+    if args.limit_candidates:
+        candidates = candidates[:args.limit_candidates]
+    payload: Dict[str, Any] = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "summary": evidence.get("summary") or {},
+        "candidates": candidates,
+        "claim_status": evidence.get("claim_status", "not-a-finding"),
+        "limitations": evidence.get("limitations") or [],
+    }
+    if rebuilt is not None:
+        payload["rebuilt"] = rebuilt
+    if args.json:
+        payload["flows"] = (evidence.get("flows") or [])[:max(0, args.limit)]
+        _out(payload)
+        return 0
+
+    print(semantic_guard.render_semantic_guards_text(
+        evidence, args.lang, limit=args.limit))
+    if args.show_candidates:
+        print("\n%s" % ("待验证线索详情" if args.lang == "zh"
+                        else "Verification lead details"))
+        print("─" * 52)
+        for candidate in candidates[:max(0, args.limit)]:
+            print("  %-22s %s" % (candidate.get("candidate_id", ""),
+                                  candidate.get("hypothesis", "")))
+    if rebuilt is not None:
+        print("\n[index rebuilt from %s]" % rebuilt["root"])
+    return 0
+
+
+def cmd_semantic_calls(args: argparse.Namespace) -> int:
+    """Show bounded one-hop interprocedural argument/return evidence."""
+    from agent.analysis import semantic_calls as semantic_call
+
+    try:
+        workspace, store, rebuilt, _ = _ensure_coverage_analysis(
+            args, (semantic_call.SEMANTIC_CALL_INDEX,))
+    except FileNotFoundError as exc:
+        _out({"error": "target source root not found", "root": str(exc),
+              "hint": "pass --root <src root> (with --rebuild) or run S1 first"})
+        return 2
+
+    evidence = semantic_call.load_semantic_call_evidence(store)
+    candidates = semantic_call.load_semantic_call_candidates(store)
+    if args.limit_candidates:
+        candidates = candidates[:args.limit_candidates]
+    payload: Dict[str, Any] = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "summary": evidence.get("summary") or {},
+        "candidates": candidates,
+        "claim_status": evidence.get("claim_status", "not-a-finding"),
+        "limitations": evidence.get("limitations") or [],
+    }
+    if rebuilt is not None:
+        payload["rebuilt"] = rebuilt
+    if args.json:
+        payload["flows"] = (evidence.get("flows") or [])[:max(0, args.limit)]
+        _out(payload)
+        return 0
+
+    print(semantic_call.render_semantic_calls_text(
+        evidence, args.lang, limit=args.limit))
+    if args.show_candidates:
+        print("\n%s" % ("待验证线索详情" if args.lang == "zh"
+                        else "Verification lead details"))
+        print("─" * 52)
+        for candidate in candidates[:max(0, args.limit)]:
+            print("  %-22s %s" % (candidate.get("candidate_id", ""),
+                                  candidate.get("hypothesis", "")))
+    if rebuilt is not None:
+        print("\n[index rebuilt from %s]" % rebuilt["root"])
+    return 0
+
+
+def cmd_semantic_controlflow(args: argparse.Namespace) -> int:
+    """Show bounded branch-dominance and alternate-path evidence."""
+    from agent.analysis import semantic_controlflow as semantic_cf
+
+    try:
+        workspace, store, rebuilt, _ = _ensure_coverage_analysis(
+            args, (semantic_cf.SEMANTIC_CONTROLFLOW_INDEX,))
+    except FileNotFoundError as exc:
+        _out({"error": "target source root not found", "root": str(exc),
+              "hint": "pass --root <src root> (with --rebuild) or run S1 first"})
+        return 2
+
+    evidence = semantic_cf.load_semantic_controlflow(store)
+    candidates = semantic_cf.load_semantic_controlflow_candidates(store)
+    if args.limit_candidates:
+        candidates = candidates[:args.limit_candidates]
+    payload: Dict[str, Any] = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "summary": evidence.get("summary") or {},
+        "candidates": candidates,
+        "claim_status": evidence.get("claim_status", "not-a-finding"),
+        "limitations": evidence.get("limitations") or [],
+    }
+    if rebuilt is not None:
+        payload["rebuilt"] = rebuilt
+    if args.json:
+        payload["flows"] = (evidence.get("flows") or [])[:max(0, args.limit)]
+        _out(payload)
+        return 0
+
+    print(semantic_cf.render_semantic_controlflow_text(
+        evidence, args.lang, limit=args.limit))
+    if args.show_candidates:
+        print("\n%s" % ("待验证线索详情" if args.lang == "zh"
+                        else "Verification lead details"))
+        print("─" * 52)
+        for candidate in candidates[:max(0, args.limit)]:
+            print("  %-22s %s" % (candidate.get("candidate_id", ""),
+                                  candidate.get("hypothesis", "")))
+    if rebuilt is not None:
+        print("\n[index rebuilt from %s]" % rebuilt["root"])
+    return 0
+
+
+def cmd_semantic_ast(args: argparse.Namespace) -> int:
+    """Show bounded Python-AST branch and scope evidence."""
+    from agent.analysis import semantic_ast as semantic_ast_analysis
+
+    try:
+        workspace, store, rebuilt, _ = _ensure_coverage_analysis(
+            args, (semantic_ast_analysis.SEMANTIC_AST_INDEX,))
+    except FileNotFoundError as exc:
+        _out({"error": "target source root not found", "root": str(exc),
+              "hint": "pass --root <src root> (with --rebuild) or run S1 first"})
+        return 2
+
+    evidence = semantic_ast_analysis.load_semantic_ast(store)
+    candidates = semantic_ast_analysis.load_semantic_ast_candidates(store)
+    if args.limit_candidates:
+        candidates = candidates[:args.limit_candidates]
+    payload: Dict[str, Any] = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "summary": evidence.get("summary") or {},
+        "candidates": candidates,
+        "claim_status": evidence.get("claim_status", "not-a-finding"),
+        "limitations": evidence.get("limitations") or [],
+    }
+    if rebuilt is not None:
+        payload["rebuilt"] = rebuilt
+    if args.json:
+        payload["flows"] = (evidence.get("flows") or [])[:max(0, args.limit)]
+        _out(payload)
+        return 0
+
+    print(semantic_ast_analysis.render_semantic_ast_text(
+        evidence, args.lang, limit=args.limit))
+    if args.show_candidates:
+        print("\n%s" % ("待验证线索详情" if args.lang == "zh"
+                        else "Verification lead details"))
+        print("─" * 52)
+        for candidate in candidates[:max(0, args.limit)]:
+            print("  %-22s %s" % (candidate.get("candidate_id", ""),
+                                  candidate.get("hypothesis", "")))
+    if rebuilt is not None:
+        print("\n[index rebuilt from %s]" % rebuilt["root"])
+    return 0
+
+
+def cmd_threat_model(args: argparse.Namespace) -> int:
+    """Show the bounded attacker-path threat model; paths are not findings."""
+    from agent.analysis import threat_model as threat_model_analysis
+
+    try:
+        workspace, store, rebuilt, _ = _ensure_coverage_analysis(
+            args, (threat_model_analysis.THREAT_MODEL_INDEX,))
+    except FileNotFoundError as exc:
+        _out({"error": "target source root not found", "root": str(exc),
+              "hint": "pass --root <src root> (with --rebuild) or run S1 first"})
+        return 2
+
+    model = threat_model_analysis.load_threat_model(workspace, args.target)
+    if not model:
+        _out({"error": "threat model not found",
+              "hint": "run S1 or `agent_cli.py threat-model --rebuild`"})
+        return 2
+    paths = list(model.get("attack_paths") or [])
+    if args.limit:
+        paths = paths[:max(0, args.limit)]
+    payload: Dict[str, Any] = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "schema_version": model.get("schema_version", ""),
+        "summary": model.get("summary") or {},
+        "boundaries": (model.get("boundaries") or [])[:max(0, args.limit)],
+        "attack_paths": paths,
+        "unresolved": model.get("unresolved") or {},
+        "claim_status": model.get("claim_status", "not-a-finding"),
+    }
+    if rebuilt is not None:
+        payload["rebuilt"] = rebuilt
+    if args.json:
+        _out(payload)
+        return 0
+
+    label = "攻击路径威胁模型" if args.lang == "zh" \
+        else "Attacker-path threat model"
+    print("\n%s" % label)
+    print("─" * 46)
+    summary = payload["summary"]
+    print("  boundaries %s  paths %s  high-priority %s" % (
+        summary.get("boundaries", 0), summary.get("attack_paths", 0),
+        summary.get("high_priority_paths", 0)))
+    print("  control postures %s" %
+          (summary.get("attack_paths_by_control_posture") or {}))
+    print("  unresolved entries %s  sinks %s" % (
+        summary.get("unmapped_entries", 0), summary.get("unmapped_sinks", 0)))
+    for path in paths:
+        print("  [P%s] %s %s -> %s posture=%s state=%s" % (
+            path.get("research_priority", 0), path.get("path_id", ""),
+            path.get("entry_id", ""), path.get("sink_id", ""),
+            path.get("control_posture", "unmapped"),
+            path.get("research_state", "")))
+    print("  claim_status=%s" % payload["claim_status"])
+    if rebuilt is not None:
+        print("\n[index rebuilt from %s]" % rebuilt["root"])
+    return 0
+
+
+def cmd_research_strategy(args: argparse.Namespace) -> int:
+    """Show or rebuild the bounded cross-artifact research strategy."""
+    from agent.analysis import research_strategy as strategy_analysis
+    from agent.analysis import threat_model as threat_model_analysis
+    from agent.memory.portfolio import load_research_portfolio
+    from agent.memory.research import load_research_memory
+
+    workspace = Path(args.workspace).resolve()
+    if args.rebuild:
+        try:
+            workspace, _store, _rebuilt, _note = _ensure_coverage_analysis(
+                args, (threat_model_analysis.THREAT_MODEL_INDEX,))
+        except FileNotFoundError as exc:
+            _out({"error": "target source root not found", "root": str(exc),
+                  "hint": "pass --root <src root> or run S1 first"})
+            return 2
+    model = threat_model_analysis.load_threat_model(workspace, args.target)
+    portfolio = load_research_portfolio(workspace, args.target)
+    memory = load_research_memory(workspace, args.target)
+    benchmark_feedback: Dict[str, Any] = {}
+    if args.benchmark_feedback:
+        try:
+            feedback_path = Path(args.benchmark_feedback)
+            if not feedback_path.is_absolute():
+                feedback_path = workspace / feedback_path
+            benchmark_feedback = json.loads(
+                feedback_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            _out({"error": "%s: %s" % (type(exc).__name__, exc)})
+            return 2
+    strategy = strategy_analysis.load_research_strategy(workspace, args.target)
+    if args.rebuild or not strategy:
+        if not model and not portfolio and not memory.get("entries"):
+            _out({"error": "research strategy inputs not found",
+                  "hint": "run S1/S8 or pass --rebuild"})
+            return 2
+        strategy = strategy_analysis.build_research_strategy(
+            threat_model=model, research_portfolio=portfolio,
+            research_memory=memory.get("entries") or [],
+            benchmark_feedback=benchmark_feedback,
+            target=args.target,
+            target_type=args.target_type or model.get("target_type", ""),
+            round_no=memory.get("round", 0),
+        )
+        strategy_analysis.write_research_strategy(
+            workspace, args.target, strategy)
+    if not strategy:
+        _out({"error": "research strategy not found",
+              "artifact": str(strategy_analysis.strategy_path(
+                  workspace, args.target))})
+        return 2
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "artifact": str(strategy_analysis.strategy_path(
+            workspace, args.target).relative_to(workspace)),
+        "strategy": strategy,
+    }
+    if args.json:
+        _out(payload)
+        return 0
+    summary = strategy.get("summary", {})
+    print("research strategy: %s" % payload["artifact"])
+    print("  items=%s paths=%s residuals=%s environments=%s claim_status=%s" % (
+        summary.get("item_count", 0), summary.get("path_count", 0),
+        summary.get("pending_residuals", 0),
+        summary.get("environment_recovery", 0),
+        strategy.get("claim_status", "not-a-finding")))
+    for item in (strategy.get("items") or [])[:max(0, args.limit)]:
+        print("  [P%s] %s kind=%s state=%s objective=%s" % (
+            item.get("priority", 0), item.get("strategy_id", ""),
+            item.get("kind", ""), item.get("state", ""),
+            item.get("objective", "")))
     return 0
 
 
@@ -1062,6 +2362,230 @@ def build_parser() -> argparse.ArgumentParser:
     dp.add_argument("--cache", default=None)
     dp.set_defaults(fn=cmd_deps)
 
+    bm = sub.add_parser(
+        "benchmark",
+        help="score research behaviour against a deterministic gold manifest",
+    )
+    bm.add_argument("--manifest", required=True,
+                    help="benchmark JSON with cases and optional embedded runs")
+    bm.add_argument("--run", action="append", default=[],
+                    help="run JSON; repeat for independent runs")
+    bm.add_argument("--out", default=None,
+                    help="write the bounded result JSON to this path")
+    bm.add_argument("--feedback-out", default=None,
+                     help="write deterministic scheduler/planner feedback JSON")
+    bm.add_argument("--baseline", default=None,
+                    help="previous bounded benchmark result for trend comparison")
+    bm.add_argument("--json", action="store_true",
+                    help="machine-readable output")
+    bm.set_defaults(fn=cmd_benchmark)
+
+    rc = sub.add_parser(
+        "replay-calibrate",
+        help="calibrate research guidance from bounded real-project round replays",
+    )
+    rc.add_argument("target", help="target name (state/<target>/...)")
+    rc.add_argument("--workspace", required=True,
+                    help="workspace root containing state/<target>/")
+    rc.add_argument("--out", default=None,
+                    help="optional extra copy of the calibration artifact")
+    rc.add_argument("--json", action="store_true",
+                    help="machine-readable output")
+    rc.set_defaults(fn=cmd_replay_calibrate)
+
+    rp = sub.add_parser(
+        "replay-pack",
+        help="build a provenance-carrying bounded replay pack",
+    )
+    rp.add_argument("target", help="target name (state/<target>/...)")
+    rp.add_argument("--workspace", required=True,
+                    help="workspace root containing state/<target>/")
+    rp.add_argument("--round", type=int, action="append", default=[],
+                    help="optional round number; repeat to build a filtered pack")
+    rp.add_argument("--out", default=None,
+                    help="optional extra copy of the replay pack")
+    rp.add_argument("--json", action="store_true",
+                    help="machine-readable output")
+    rp.set_defaults(fn=cmd_replay_pack)
+
+    rcc = sub.add_parser(
+        "replay-cohort-calibrate",
+        help="aggregate bounded replay calibration across independent projects",
+    )
+    rcc.add_argument("--artifact", action="append", default=[],
+                     help="legacy per-target research-replay-calibration-v1 JSON; repeatable")
+    rcc.add_argument("--pack", action="append", default=[],
+                     help="provenance-carrying research-replay-pack-v1 JSON; repeatable")
+    rcc.add_argument("--project-id", action="append", default=[],
+                     help="optional opaque label, repeated once per artifact")
+    rcc.add_argument("--out", default=None,
+                     help="write the cohort artifact to this path")
+    rcc.add_argument("--json", action="store_true",
+                     help="machine-readable output")
+    rcc.set_defaults(fn=cmd_replay_cohort_calibrate)
+
+    rv = sub.add_parser(
+        "review",
+        help="record bounded human review feedback for a research mechanism",
+    )
+    rv.add_argument("target", help="target name (state/<target>/...)")
+    rv.add_argument("--workspace", required=True,
+                    help="workspace root containing state/<target>/")
+    identity = rv.add_mutually_exclusive_group(required=True)
+    identity.add_argument("--research-key", default=None,
+                          help="stable rk-... mechanism key")
+    identity.add_argument("--candidate-id", default=None,
+                          help="candidate id resolved through research memory")
+    rv.add_argument("--status", required=True,
+                    choices=["accepted", "rejected", "needs-evidence", "scope-corrected"])
+    rv.add_argument("--reason-code", default="needs-source-review",
+                    choices=["false-positive", "confirmed-mechanism",
+                             "missing-typed-effect", "environment-gap",
+                             "scope-correction", "duplicate",
+                             "needs-source-review"])
+    rv.add_argument("--note", default="", help="bounded reviewer note")
+    rv.add_argument("--evidence-ref", action="append", default=[],
+                    help="artifact/code reference; repeatable")
+    rv.add_argument("--next-probe", action="append", default=[],
+                    help="bounded next-probe hint; repeatable")
+    rv.add_argument("--round", type=int, default=0,
+                    help="review round (default: latest memory round + 1)")
+    rv.add_argument("--json", action="store_true",
+                    help="machine-readable output")
+    rv.set_defaults(fn=cmd_review)
+
+    po = sub.add_parser(
+        "portfolio",
+        help="show the bounded project research portfolio and next probes",
+    )
+    po.add_argument("target", help="target name (state/<target>/...)")
+    po.add_argument("--workspace", required=True,
+                    help="workspace root containing state/<target>/")
+    po.add_argument("--rebuild", action="store_true",
+                    help="rebuild from current research memory/review feedback")
+    po.add_argument("--benchmark-feedback", default=None,
+                    help="optional bounded benchmark result/feedback JSON for --rebuild")
+    po.add_argument("--json", action="store_true",
+                    help="machine-readable output")
+    po.set_defaults(fn=cmd_portfolio)
+
+    rc = sub.add_parser(
+        "research-consistency",
+        help="show or rebuild bounded cross-round evidence consistency metadata",
+    )
+    rc.add_argument("target", help="target name (state/<target>/...)")
+    rc.add_argument("--workspace", required=True,
+                    help="workspace root containing state/<target>/")
+    rc.add_argument("--rebuild", action="store_true",
+                    help="rebuild from current research memory")
+    rc.add_argument("--json", action="store_true",
+                    help="machine-readable output")
+    rc.set_defaults(fn=cmd_research_consistency)
+
+    rca = sub.add_parser(
+        "research-consistency-actions",
+        help="show or rebuild bounded controlled consistency recheck contracts",
+    )
+    rca.add_argument("target", help="target name (state/<target>/...)")
+    rca.add_argument("--workspace", required=True,
+                     help="workspace root containing state/<target>/")
+    rca.add_argument("--rebuild", action="store_true",
+                     help="rebuild consistency and controlled recheck actions")
+    rca.add_argument("--json", action="store_true",
+                     help="machine-readable output")
+    rca.set_defaults(fn=cmd_research_consistency_actions)
+
+    rcr = sub.add_parser(
+        "research-consistency-rechecks",
+        help="show or rebuild bounded S4 closure for consistency rechecks",
+    )
+    rcr.add_argument("target", help="target name (state/<target>/...)")
+    rcr.add_argument("--workspace", required=True,
+                     help="workspace root containing state/<target>/")
+    rcr.add_argument("--round", type=int, default=0,
+                     help="specific round to rebuild; default: newest runtime-lab")
+    rcr.add_argument("--rebuild", action="store_true",
+                     help="rebuild from a bounded runtime-lab artifact")
+    rcr.add_argument("--json", action="store_true",
+                     help="machine-readable output")
+    rcr.set_defaults(fn=cmd_research_consistency_rechecks)
+
+    ra = sub.add_parser(
+        "research-agenda",
+        help="show or rebuild the bounded active research agenda",
+    )
+    ra.add_argument("target", help="target name (state/<target>/...)")
+    ra.add_argument("--workspace", required=True,
+                    help="workspace root containing state/<target>/")
+    ra.add_argument("--round", type=int, default=0,
+                    help="agenda round; default: strategy round")
+    ra.add_argument("--slots", type=int, default=8,
+                    help="max selected work items (default: 8)")
+    ra.add_argument("--max-per-surface", type=int, default=3,
+                    help="max selected items per surface (default: 3)")
+    ra.add_argument("--rebuild", action="store_true",
+                    help="rebuild from the normalized strategy and portfolio")
+    ra.add_argument("--json", action="store_true",
+                    help="machine-readable output")
+    ra.set_defaults(fn=cmd_research_agenda)
+
+    rao = sub.add_parser(
+        "research-agenda-outcomes",
+        help="show or rebuild bounded execution feedback for the active agenda",
+    )
+    rao.add_argument("target", help="target name (state/<target>/...)")
+    rao.add_argument("--workspace", required=True,
+                     help="workspace root containing state/<target>/")
+    rao.add_argument("--round", type=int, default=0,
+                     help="round to measure; default: agenda round")
+    rao.add_argument("--rebuild", action="store_true",
+                     help="rebuild from the agenda, schedule and S4/S8 summaries")
+    rao.add_argument("--json", action="store_true",
+                     help="machine-readable output")
+    rao.set_defaults(fn=cmd_research_agenda_outcomes)
+
+    rb = sub.add_parser(
+        "research-budget",
+        help="show or rebuild bounded outcome-adaptive research budget policy",
+    )
+    rb.add_argument("target", help="target name (state/<target>/...)")
+    rb.add_argument("--workspace", required=True,
+                    help="workspace root containing state/<target>/")
+    rb.add_argument("--round", type=int, default=0,
+                    help="budget round; default: newest agenda outcome")
+    rb.add_argument("--slots", type=int, default=8,
+                    help="finite research slots (default: 8)")
+    rb.add_argument("--rebuild", action="store_true",
+                    help="rebuild from agenda outcomes and prior policy")
+    rb.add_argument("--json", action="store_true",
+                    help="machine-readable output")
+    rb.set_defaults(fn=cmd_research_budget)
+
+    rs = sub.add_parser(
+        "research-strategy",
+        help="show or rebuild the bounded cross-artifact research strategy",
+    )
+    rs.add_argument("target", help="target name (state/<target>/...)")
+    rs.add_argument("--workspace", required=True,
+                    help="workspace root containing state/<target>/")
+    rs.add_argument("--root", default=None,
+                    help="target source root; needed by --rebuild when S1 is absent")
+    rs.add_argument("--source-dir", action="append", default=[],
+                    help="restrict an inventory rebuild (repeatable)")
+    rs.add_argument("--target-type", default=None,
+                    choices=["library", "web-app", "middleware", "logging",
+                             "expression", "message-rpc", "native-app"],
+                    help="target type used when rebuilding the strategy")
+    rs.add_argument("--rebuild", action="store_true",
+                    help="rebuild from threat model, memory and portfolio")
+    rs.add_argument("--benchmark-feedback", default=None,
+                    help="optional bounded benchmark result/feedback JSON")
+    rs.add_argument("--limit", type=int, default=20,
+                    help="max strategy items to print (default: 20)")
+    rs.add_argument("--json", action="store_true",
+                    help="machine-readable output")
+    rs.set_defaults(fn=cmd_research_strategy)
+
     cvr = sub.add_parser(
         "coverage",
         help="security audit coverage report: source/entry/sink/flow ratios + "
@@ -1116,6 +2640,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="score only the first N pool entries (debug aid)")
     sch.add_argument("--no-refresh", action="store_true",
                      help="skip the residual sweep before scoring (spec §14)")
+    sch.add_argument("--benchmark-result", default=None,
+                     help="benchmark result/feedback JSON; affects only bounded "
+                          "S2 weights and prompt guidance")
     sch.add_argument("--prompt", action="store_true",
                      help="also print the spec §15 structured prompt block")
     sch.add_argument("--json", action="store_true", help="machine-readable output")
@@ -1166,6 +2693,62 @@ def build_parser() -> argparse.ArgumentParser:
                           "default: newest state/<target>/round-*/S1/"
                           "security-fix-history.json")
     dfs.set_defaults(fn=cmd_differential)
+
+    cap = sub.add_parser(
+        "capability",
+        help="capability primitives and bounded attack-path hypotheses; "
+             "paths are not findings",
+    )
+    _add_analysis_args(cap)
+    cap.set_defaults(fn=cmd_capability)
+
+    sem = sub.add_parser(
+        "semantic-paths",
+        help="source-local control-order and same-symbol data-flow evidence; "
+             "all outputs are research leads, not findings",
+    )
+    _add_analysis_args(sem)
+    sem.set_defaults(fn=cmd_semantic_paths)
+
+    sg = sub.add_parser(
+        "semantic-guards",
+        help="bounded branch-posture and subject/object binding evidence; "
+             "all outputs are research leads, not findings",
+    )
+    _add_analysis_args(sg)
+    sg.set_defaults(fn=cmd_semantic_guards)
+
+    sc = sub.add_parser(
+        "semantic-calls",
+        help="bounded one-hop interprocedural argument/return binding evidence; "
+             "all outputs are research leads, not findings",
+    )
+    _add_analysis_args(sc)
+    sc.set_defaults(fn=cmd_semantic_calls)
+
+    scf = sub.add_parser(
+        "semantic-controlflow",
+        help="bounded branch-dominance and alternate-path evidence; "
+             "all outputs are research leads, not findings",
+    )
+    _add_analysis_args(scf)
+    scf.set_defaults(fn=cmd_semantic_controlflow)
+
+    sas = sub.add_parser(
+        "semantic-ast",
+        help="bounded Python-AST branch and scope evidence; all outputs are "
+             "research leads, not findings",
+    )
+    _add_analysis_args(sas)
+    sas.set_defaults(fn=cmd_semantic_ast)
+
+    tm = sub.add_parser(
+        "threat-model",
+        help="bounded attacker-path threat model; paths are research hypotheses, "
+             "not findings",
+    )
+    _add_analysis_args(tm)
+    tm.set_defaults(fn=cmd_threat_model)
 
     sp = sub.add_parser(
         "spawn-probe",

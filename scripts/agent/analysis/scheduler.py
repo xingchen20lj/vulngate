@@ -41,6 +41,37 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import coverage as cov
 from .inventory import CoverageStore, load_inventory
+from ..evaluation.benchmark import (
+    BENCHMARK_FEEDBACK_FACTORS,
+    MAX_FEEDBACK_WEIGHT_DELTA,
+    RESEARCH_SURFACES,
+    normalize_benchmark_feedback,
+)
+from ..memory.research import (
+    STATE_DECISION_RECORDED,
+    STATE_REVIEW_ACCEPTED,
+    STATE_REVIEW_NEEDS_EVIDENCE,
+    STATE_REVIEW_REJECTED,
+    STATE_REVIEW_SCOPE_CORRECTED,
+    load_research_memory,
+    load_review_feedback,
+    memory_match,
+    memory_prompt_rows,
+    research_key,
+)
+from ..memory.portfolio import load_research_portfolio
+from .research_agenda import load_research_agenda, normalize_research_agenda
+from .research_strategy import (
+    STRATEGY_GUIDANCE_ACTIONS,
+    apply_research_guidance,
+    build_research_strategy,
+    load_research_strategy,
+    normalize_research_strategy,
+    write_research_guidance,
+    write_research_strategy,
+)
+from ..tools.surface_variants import normalize_surface_variant_plan
+from .threat_model import load_threat_model
 
 # ---------------------------------------------------------------------------
 # configuration
@@ -75,6 +106,89 @@ DEFAULT_QUOTA: Dict[str, int] = {
 #: Priority bands, as a fraction of the achievable total.
 BAND_HIGH = 0.65
 BAND_MEDIUM = 0.40
+
+RESEARCH_SURFACE_TARGET_TYPES: Dict[str, str] = {
+    "web-app": "web", "middleware": "protocol", "message-rpc": "protocol",
+    "cloud-service": "cloud", "mobile-app": "mobile", "native-app": "native",
+}
+
+# The agenda is a bounded scheduling signal.  It can make an explicitly
+# selected research item visible within a finite candidate budget, but it is
+# deliberately smaller than a finding-impact adjustment and never suppresses
+# an otherwise eligible candidate.
+RESEARCH_AGENDA_BOOST = 3.0
+
+
+def _safe_weight(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _safe_delta(value: Any) -> int:
+    try:
+        return max(-8, min(8, int(value)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _normalize_weight_total(raw: Dict[str, int], target: int) -> Dict[str, int]:
+    """Scale integer weights back to the original total deterministically."""
+    names = list(FACTOR_ORDER)
+    if target <= 0:
+        return {name: 0 for name in names}
+    total = sum(max(0, int(raw.get(name, 0))) for name in names)
+    if total <= 0:
+        return {name: 0 for name in names}
+    floors: Dict[str, int] = {}
+    fractions: List[Tuple[float, int, str]] = []
+    for index, name in enumerate(names):
+        exact = max(0, int(raw.get(name, 0))) * target / float(total)
+        floor_value = int(exact)
+        floors[name] = floor_value
+        fractions.append((exact - floor_value, -index, name))
+    remainder = target - sum(floors.values())
+    for _fraction, _order, name in sorted(fractions, reverse=True)[:max(0, remainder)]:
+        floors[name] += 1
+    return floors
+
+
+def apply_benchmark_feedback_weights(
+        weights: Optional[Dict[str, int]],
+        benchmark_feedback: Optional[Dict[str, Any]],
+        ) -> Tuple[Dict[str, int], Dict[str, int]]:
+    """Apply bounded feedback while preserving the caller's weight scale.
+
+    A feedback artifact can only move existing scheduler factors by a small
+    signed delta.  Unknown factors and oversized values are ignored/clamped;
+    the resulting weights are rescaled to the original total so benchmark
+    feedback cannot silently change the meaning of a score from a percentage
+    into an arbitrary raw number.
+    """
+    provided = dict(weights or DEFAULT_FACTOR_WEIGHTS)
+    feedback = normalize_benchmark_feedback(benchmark_feedback or {})
+    if not feedback:
+        return provided, {}
+    base = {name: _safe_weight(provided.get(name, 0))
+            for name in FACTOR_ORDER}
+    target = sum(base.values())
+    requested = feedback.get("weight_deltas") or {}
+    adjusted = dict(base)
+    for name in FACTOR_ORDER:
+        # Parse the signed value explicitly so a balanced feedback object stays
+        # explainable instead of silently dropping negative deltas.
+        try:
+            signed = int(requested.get(name, 0))
+        except (TypeError, ValueError):
+            signed = 0
+        signed = max(-MAX_FEEDBACK_WEIGHT_DELTA,
+                     min(MAX_FEEDBACK_WEIGHT_DELTA, signed))
+        adjusted[name] = max(0, base[name] + signed)
+    effective = _normalize_weight_total(adjusted, target)
+    actual = {name: effective[name] - base[name]
+              for name in FACTOR_ORDER if effective[name] != base[name]}
+    return effective, actual
 
 # --- coarse category buckets (spec §13.3) ----------------------------------
 
@@ -155,6 +269,25 @@ CONTROL_PRESENT_UNREVIEWED = 0.8
 #: A candidate that re-covers an already reviewed region is damped, not banned.
 DUPLICATE_DAMPING = 0.3
 
+# Research memory changes the order only when it has an observed runtime state.
+# These are deliberately mild: the memory can avoid repeating a stable probe,
+# but it must not suppress a candidate or turn a lab observation into a verdict.
+RESEARCH_STABLE_DAMPING = 0.55
+RESEARCH_UNSTABLE_DAMPING = 0.85
+RESEARCH_DIFFERENCE_BOOST = 5.0
+# Human review is a scheduling signal, never a hard ban or a conclusion.
+RESEARCH_REVIEW_ACCEPTED_DAMPING = 0.75
+RESEARCH_REVIEW_REJECTED_DAMPING = 0.35
+RESEARCH_REVIEW_SCOPE_DAMPING = 0.85
+RESEARCH_REVIEW_NEEDS_EVIDENCE_BOOST = 4.0
+# The portfolio is a project-level view, so its scheduling signal is smaller
+# than a mechanism's direct runtime/review event.  It is a nudge for an
+# explicitly matching pending probe, never a finding or a hard selection.
+RESEARCH_PORTFOLIO_PROBE_BOOST = 2.0
+# The synthesized strategy is a cross-artifact planning signal.  It is smaller
+# than direct runtime/review feedback and can never exceed the score scale.
+RESEARCH_STRATEGY_BOOST = 1.5
+
 #: Duplicate threshold, used two ways.  Against a *reviewed region* it is the
 #: fraction of the candidate's own evidence that must already be covered
 #: (one-directional -- the reviewed region is coarser by construction); against
@@ -190,7 +323,14 @@ class ScheduleContext:
     flows: List[Dict[str, Any]] = field(default_factory=list)
     reachability: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     prior_coverage: List[Dict[str, Any]] = field(default_factory=list)
+    research_memory: List[Dict[str, Any]] = field(default_factory=list)
+    research_portfolio: Dict[str, Any] = field(default_factory=dict)
+    research_strategy: Dict[str, Any] = field(default_factory=dict)
+    research_agenda: Dict[str, Any] = field(default_factory=dict)
+    threat_model: Dict[str, Any] = field(default_factory=dict)
     weights: Dict[str, int] = field(default_factory=lambda: dict(DEFAULT_FACTOR_WEIGHTS))
+    benchmark_feedback: Dict[str, Any] = field(default_factory=dict)
+    weight_adjustments: Dict[str, int] = field(default_factory=dict)
 
     #: Indexes built on demand (memoised, never mutated afterwards).
     _flows_by_entry: Optional[Dict[str, List[Dict[str, Any]]]] = None
@@ -205,10 +345,29 @@ class ScheduleContext:
 
     @classmethod
     def from_store(cls, store: CoverageStore,
-                   weights: Optional[Dict[str, int]] = None) -> "ScheduleContext":
+                   weights: Optional[Dict[str, int]] = None,
+                   research_memory: Optional[Sequence[Dict[str, Any]]] = None,
+                   benchmark_feedback: Optional[Dict[str, Any]] = None,
+                   research_portfolio: Optional[Dict[str, Any]] = None,
+                   research_strategy: Optional[Dict[str, Any]] = None,
+                   research_agenda: Optional[Dict[str, Any]] = None,
+                   threat_model: Optional[Dict[str, Any]] = None
+                   ) -> "ScheduleContext":
         indices = load_inventory(store)
         reachability = {str(r.get("sink_id")): r
                         for r in indices.get("sink-reachability") or []}
+        feedback = normalize_benchmark_feedback(benchmark_feedback or {})
+        portfolio = (research_portfolio if isinstance(research_portfolio, dict)
+                     else load_research_portfolio(store.workspace, store.target))
+        strategy = (research_strategy if isinstance(research_strategy, dict)
+                    else load_research_strategy(store.workspace, store.target))
+        agenda = (normalize_research_agenda(research_agenda)
+                  if isinstance(research_agenda, dict)
+                  else load_research_agenda(store.workspace, store.target))
+        model = (threat_model if isinstance(threat_model, dict)
+                 else load_threat_model(store.workspace, store.target))
+        effective_weights, weight_adjustments = apply_benchmark_feedback_weights(
+            weights, feedback)
         return cls(
             entries={str(e.get("entry_id")): e
                      for e in indices.get("entry-index") or []},
@@ -223,7 +382,15 @@ class ScheduleContext:
             flows=list(indices.get("flow-index") or []),
             reachability=reachability,
             prior_coverage=list(indices.get("candidate-coverage") or []),
-            weights=dict(weights or DEFAULT_FACTOR_WEIGHTS),
+            research_memory=[item for item in (research_memory or [])
+                             if isinstance(item, dict)],
+            research_portfolio=portfolio,
+            research_strategy=strategy,
+            research_agenda=agenda,
+            threat_model=model,
+            weights=effective_weights,
+            benchmark_feedback=feedback,
+            weight_adjustments=weight_adjustments,
         )
 
     # --- lazy indexes ------------------------------------------------------
@@ -329,6 +496,50 @@ class ScheduleContext:
         return reviewed
 
 
+def _threat_model_snapshot(model: Any, path_limit: int = 24,
+                           boundary_limit: int = 16) -> Dict[str, Any]:
+    """Keep schedule artifacts bounded while retaining attacker-path context."""
+    if not isinstance(model, dict):
+        return {}
+    paths = [row for row in (model.get("attack_paths") or [])
+             if isinstance(row, dict)]
+    paths.sort(key=lambda row: (
+        -int(row.get("research_priority") or 0),
+        str(row.get("path_id") or ""),
+    ))
+    unresolved = model.get("unresolved")
+    if not isinstance(unresolved, dict):
+        unresolved = {}
+    return {
+        "schema_version": str(model.get("schema_version") or ""),
+        "summary": dict(model.get("summary") or {})
+        if isinstance(model.get("summary"), dict) else {},
+        "boundaries": [row for row in (model.get("boundaries") or [])
+                       if isinstance(row, dict)][:boundary_limit],
+        "attack_paths": paths[:path_limit],
+        "unresolved": {
+            "unmapped_entries": [row for row in
+                                  (unresolved.get("unmapped_entries") or [])
+                                  if isinstance(row, dict)][:path_limit],
+            "unmapped_sinks": [row for row in
+                                (unresolved.get("unmapped_sinks") or [])
+                                if isinstance(row, dict)][:path_limit],
+        },
+        "claim_status": "not-a-finding",
+    }
+
+
+def _research_strategy_snapshot(strategy: Any, item_limit: int = 32
+                                ) -> Dict[str, Any]:
+    """Keep strategy context bounded in a schedule and model prompt."""
+    normalized = normalize_research_strategy(strategy)
+    if not normalized:
+        return {}
+    normalized["items"] = list(normalized.get("items") or [])[
+        :max(0, int(item_limit))]
+    return normalized
+
+
 # ---------------------------------------------------------------------------
 # candidate -> coverage linkage
 # ---------------------------------------------------------------------------
@@ -372,6 +583,305 @@ def candidate_category(candidate: Dict[str, Any]) -> str:
         if re.search(pattern, text):
             return name
     return CATEGORY_FALLBACK
+
+
+def candidate_research_surface(candidate: Dict[str, Any]) -> str:
+    """Return an explicit benchmark surface, never infer one from prose.
+
+    Candidate ``surface`` is historically free-form (for example,
+    ``"cross-tenant authz"``), so substring matching would silently apply
+    benchmark feedback to unrelated candidates.  Only the explicit
+    ``research_surface``/``target_type`` fields or an exact surface value are
+    eligible for surface-aware scheduling.
+    """
+    for key in ("research_surface", "surface"):
+        value = str(candidate.get(key) or "").strip().lower()
+        if value in RESEARCH_SURFACES:
+            return value
+    target_type = str(candidate.get("target_type") or "").strip().lower()
+    return RESEARCH_SURFACE_TARGET_TYPES.get(target_type, "")
+
+
+def _benchmark_surface_guidance(candidate: Dict[str, Any],
+                               benchmark_feedback: Dict[str, Any]
+                               ) -> Dict[str, Any]:
+    """Find bounded guidance for a candidate's explicit research surface."""
+    surface = candidate_research_surface(candidate)
+    if not surface:
+        return {}
+    for item in benchmark_feedback.get("surface_guidance") or []:
+        if isinstance(item, dict) and item.get("surface") == surface:
+            try:
+                priority_delta = int(item.get("priority_delta") or 0)
+            except (TypeError, ValueError):
+                priority_delta = 0
+            return {
+                "surface": surface,
+                "priority_delta": priority_delta,
+                "metric_snapshot": dict(item.get("metric_snapshot") or {}),
+                "strategy_tags": list(item.get("strategy_tags") or [])[:12],
+                "required_observations": list(
+                    item.get("required_observations") or [])[:12],
+                "falsifiers": list(item.get("falsifiers") or [])[:12],
+                "claim_status": "not-a-finding",
+            }
+    return {}
+
+
+def _candidate_portfolio_values(candidate: Dict[str, Any]) -> Dict[str, set]:
+    """Return exact, explicit metadata eligible for portfolio matching."""
+    surface = candidate_research_surface(candidate)
+    target_type = str(candidate.get("target_type") or "").strip().lower()
+    attack_class = str(candidate.get("attack_class") or
+                       candidate.get("vuln_class") or
+                       candidate.get("category") or "").strip().lower()
+    precondition = str(candidate.get("precondition_class") or
+                       candidate.get("precondition_tier") or
+                       candidate.get("precondition_tier_hint") or "").strip().lower()
+    if precondition == "0":
+        precondition = "default"
+    variants = set()
+    for value in ([candidate.get("variant")] +
+                  list(candidate.get("variants") or []) +
+                  list(candidate.get("fix_variants") or []) +
+                  list(candidate.get("patch_variants") or [])):
+        text = str(value or "").strip().lower()
+        if text:
+            variants.add(text)
+    return {
+        "research_surface": {surface} if surface else set(),
+        "target_type": {target_type} if target_type else set(),
+        "attack_class": {attack_class} if attack_class else set(),
+        "precondition_class": {precondition} if precondition else set(),
+        "variant": variants,
+    }
+
+
+def _portfolio_probe_guidance(candidate: Dict[str, Any],
+                              portfolio: Dict[str, Any]) -> Dict[str, Any]:
+    """Find a bounded exact metadata match for a pending portfolio probe.
+
+    A free-form surface or a single shared word is never enough.  The match is
+    either the stable research key or at least two explicit dimensions,
+    including a variant when one is present.  This keeps project-level memory
+    useful without turning broad labels into an authorization or impact claim.
+    """
+    if not isinstance(portfolio, dict):
+        return {}
+    probes = [item for item in portfolio.get("next_probes") or []
+              if isinstance(item, dict)]
+    if not probes:
+        return {}
+    candidate_key = research_key(candidate)
+    values = _candidate_portfolio_values(candidate)
+    matches: List[Tuple[int, int, str, Dict[str, Any]]] = []
+    for probe in probes:
+        probe_key = str(probe.get("research_key") or "")
+        if not probe_key:
+            continue
+        probe_priority = min(5, _safe_weight(probe.get("priority")))
+        if probe_key == candidate_key:
+            matches.append((2, probe_priority, probe_key, probe))
+            continue
+        probe_values = {
+            "research_surface": {str(probe.get("research_surface") or "").lower()},
+            "target_type": {str(probe.get("target_type") or "").lower()},
+            "attack_class": {str(probe.get("attack_class") or "").lower()},
+            "precondition_class": {str(probe.get("precondition_class") or "").lower()},
+            "variant": {str(value).strip().lower()
+                        for value in (probe.get("variant") or [])
+                        if str(value).strip()},
+        }
+        dimensions = sum(bool(values[name] and probe_values[name] and
+                              values[name] & probe_values[name])
+                         for name in values)
+        variant_match = bool(values["variant"] & probe_values["variant"])
+        if dimensions >= 2 and (variant_match or not probe_values["variant"]):
+            matches.append((1, probe_priority, probe_key, probe))
+    if not matches:
+        return {}
+    match_kind, priority, probe_key, probe = sorted(
+        matches, key=lambda item: (-item[0], -item[1], item[2]))[0]
+    return {
+        "match_kind": "research-key" if match_kind == 2 else "explicit-dimensions",
+        "research_key": probe_key,
+        "priority": max(0, min(5, priority)),
+        "state": str(probe.get("state") or ""),
+        "claim_status": "not-a-finding",
+    }
+
+
+def _research_strategy_guidance(candidate: Dict[str, Any],
+                                strategy: Dict[str, Any],
+                                link: "LinkedRegions") -> Dict[str, Any]:
+    """Match a candidate to one bounded strategy item by explicit evidence.
+
+    Exact research-key/candidate matches are strongest.  Static path items may
+    match through a persisted flow, or through both its entry and sink; a
+    single shared label is never enough to trigger a boost.
+    """
+    if not isinstance(strategy, dict):
+        return {}
+    items = [item for item in strategy.get("items") or []
+             if isinstance(item, dict)]
+    if not items:
+        return {}
+    candidate_key = research_key(candidate)
+    candidate_id = str(candidate.get("candidate_id") or "")
+    flow_ids = {str(flow.get("flow_id")) for flow in link.all_flows()}
+    entry_ids = {str(entry.get("entry_id")) for entry in link.entries}
+    sink_ids = {str(sink.get("sink_id")) for sink in link.sinks}
+    matches: List[Tuple[int, int, str, Dict[str, Any]]] = []
+    for item in items:
+        strength = 0
+        match_kind = ""
+        if candidate_key and str(item.get("research_key") or "") == candidate_key:
+            strength, match_kind = 4, "research-key"
+        elif candidate_id and str(item.get("candidate_id") or "") == candidate_id:
+            strength, match_kind = 4, "candidate-id"
+        elif str(item.get("flow_id") or "") in flow_ids:
+            strength, match_kind = 3, "flow"
+        elif (str(item.get("entry_id") or "") in entry_ids and
+              str(item.get("sink_id") or "") in sink_ids):
+            strength, match_kind = 2, "entry-sink"
+        if not strength:
+            continue
+        matches.append((
+            strength,
+            min(5, _safe_weight(item.get("priority"))),
+            str(item.get("strategy_id") or ""),
+            dict(item, _match_kind=match_kind),
+        ))
+    if not matches:
+        return {}
+    _strength, priority, _strategy_id, item = sorted(
+        matches, key=lambda value: (-value[0], -value[1], value[2]))[0]
+    raw_guidance = item.get("guidance") or {}
+    raw_action = str(raw_guidance.get(
+        "next_action") or "continue-path-closure")
+    guidance = {
+        "next_action": (raw_action if raw_action in STRATEGY_GUIDANCE_ACTIONS
+                         else "continue-path-closure"),
+        "priority_delta": min(3, _safe_weight(
+            raw_guidance.get("priority_delta") or 0)),
+        "replacement_recommended": bool(
+            raw_guidance.get("replacement_recommended")),
+        "reason_codes": list(raw_guidance.get("reason_codes") or [])[:6],
+        "sources": list(raw_guidance.get("sources") or [])[:4],
+        "variant_gaps": list(raw_guidance.get("variant_gaps") or [])[:8],
+        "review_status": str(raw_guidance.get("review_status") or "")[:32],
+        "claim_status": "not-a-finding",
+    }
+    variant_plan = normalize_surface_variant_plan(
+        raw_guidance.get("surface_variant_plan"))
+    if variant_plan:
+        guidance["surface_variant_plan"] = {
+            "schema_version": variant_plan.get("schema_version"),
+            "surface": variant_plan.get("surface"),
+            "action": variant_plan.get("action"),
+            "selected_variants": [
+                str(row.get("variant_id"))
+                for row in variant_plan.get("selected_variants") or []
+                if isinstance(row, dict) and row.get("variant_id")
+            ][:3],
+            "lanes": [{
+                "variant_id": row.get("variant_id"),
+                "lane": row.get("lane"),
+                "required_observations": list(
+                    row.get("required_observations") or [])[:6],
+                "falsifiers": list(row.get("falsifiers") or [])[:5],
+            } for row in variant_plan.get("lanes") or []
+              if isinstance(row, dict)][:6],
+            "claim_status": "not-a-finding",
+        }
+    return {
+        "match_kind": item.get("_match_kind", "path"),
+        "strategy_id": str(item.get("strategy_id") or ""),
+        "kind": str(item.get("kind") or ""),
+        "state": str(item.get("state") or ""),
+        "priority": priority,
+        "reason_codes": list(item.get("reason_codes") or [])[:4],
+        "observation": {
+            "status": str((item.get("observation") or {}).get(
+                "status") or "unobserved"),
+            "current_status": str((item.get("observation") or {}).get(
+                "current_status") or "unobserved"),
+            "information_gain": min(5, max(0, int(
+                (item.get("observation") or {}).get("information_gain") or 0))),
+            "missing_observations": list(
+                (item.get("observation") or {}).get(
+                    "missing_observations") or [])[:8],
+            "claim_status": "not-a-finding",
+        },
+        "guidance": guidance,
+        "claim_status": "not-a-finding",
+    }
+
+
+def _research_agenda_guidance(candidate: Dict[str, Any],
+                              agenda: Dict[str, Any]) -> Dict[str, Any]:
+    """Match one candidate to the bounded active research agenda.
+
+    Exact research-key and candidate-id matches are accepted.  A broad
+    surface/attack label is intentionally not enough: the agenda is a budget
+    signal, not a free-form priority hint.
+    """
+    if not isinstance(agenda, dict):
+        return {}
+    items = [item for item in agenda.get("items") or []
+             if isinstance(item, dict)]
+    if not items:
+        return {}
+    candidate_key = research_key(candidate)
+    candidate_id = str(candidate.get("candidate_id") or "")
+    matches: List[Tuple[int, int, str, Dict[str, Any]]] = []
+    for item in items:
+        strength = 0
+        match_kind = ""
+        if candidate_key and str(item.get("research_key") or "") == candidate_key:
+            strength, match_kind = 3, "research-key"
+        elif candidate_id and str(item.get("candidate_id") or "") == candidate_id:
+            strength, match_kind = 2, "candidate-id"
+        if not strength:
+            continue
+        matches.append((
+            strength,
+            1 if item.get("selection_status") == "selected" else 0,
+            str(item.get("agenda_id") or ""),
+            dict(item, _match_kind=match_kind),
+        ))
+    if not matches:
+        return {}
+    _, _, _, item = sorted(
+        matches, key=lambda row: (-row[0], -row[1], row[2]))[0]
+    return {
+        "agenda_id": str(item.get("agenda_id") or ""),
+        "strategy_id": str(item.get("strategy_id") or ""),
+        "selection_status": str(item.get("selection_status") or ""),
+        "rank": _safe_weight(item.get("rank")),
+        "priority_score": _safe_weight(item.get("priority_score")),
+        "expected_information_gain": _safe_weight(
+            item.get("expected_information_gain")),
+        "estimated_cost": _safe_weight(item.get("estimated_cost")),
+        "action": str(item.get("action") or ""),
+        "last_outcome": str(item.get("last_outcome") or ""),
+        "outcome_round": _safe_weight(item.get("outcome_round")),
+        "outcome_information_gain": _safe_weight(
+            item.get("outcome_information_gain")),
+        "outcome_observed_signals": [
+            str(value) for value in item.get("outcome_observed_signals", [])[:8]
+            if str(value)
+        ],
+        "outcome_consecutive_no_information": _safe_weight(
+            item.get("outcome_consecutive_no_information")),
+        "budget_recommendation": str(
+            item.get("budget_recommendation") or ""),
+        "budget_priority_delta": _safe_delta(
+            item.get("budget_priority_delta")),
+        "budget_cap_hint": _safe_weight(item.get("budget_cap_hint")),
+        "match_kind": str(item.get("_match_kind") or ""),
+        "claim_status": "not-a-finding",
+    }
 
 
 @dataclass
@@ -963,11 +1473,118 @@ def score_candidate(candidate: Dict[str, Any], ctx: ScheduleContext,
     weighted = {name: round(factors[name] * float(ctx.weights.get(name, 0)), 4)
                 for name in FACTOR_ORDER}
     total = sum(weighted.values())
+    scale = float(sum(max(0, int(ctx.weights.get(name, 0))) for name in FACTOR_ORDER))
+    surface_guidance = _benchmark_surface_guidance(
+        candidate, ctx.benchmark_feedback)
+    if surface_guidance:
+        requested = max(-MAX_FEEDBACK_WEIGHT_DELTA,
+                        min(MAX_FEEDBACK_WEIGHT_DELTA,
+                            int(surface_guidance.get("priority_delta") or 0)))
+        before = total
+        total = max(0.0, min(scale, total + requested))
+        surface_guidance["applied_delta"] = round(total - before, 4)
     duplicate = _near_duplicate_of(candidate, ctx, pool, link)
     if duplicate:
         total *= DUPLICATE_DAMPING
         evidence["duplicate"] = {"of": duplicate, "damping": DUPLICATE_DAMPING}
-    scale = float(sum(max(0, int(ctx.weights.get(name, 0))) for name in FACTOR_ORDER))
+    remembered = memory_match(candidate, ctx.research_memory)
+    if remembered:
+        latest = remembered.get("latest_event") or {}
+        state = str(latest.get("state") or STATE_DECISION_RECORDED)
+        adjustment = 1.0
+        if state in ("stable-reproducer", "stable-observation"):
+            total *= RESEARCH_STABLE_DAMPING
+            adjustment = RESEARCH_STABLE_DAMPING
+        elif state == "unstable-replay":
+            total *= RESEARCH_UNSTABLE_DAMPING
+            adjustment = RESEARCH_UNSTABLE_DAMPING
+        elif state == "actionable-difference":
+            before = total
+            total = min(scale, total + RESEARCH_DIFFERENCE_BOOST)
+            adjustment = round(total - before, 4)
+        elif state == STATE_REVIEW_ACCEPTED:
+            total *= RESEARCH_REVIEW_ACCEPTED_DAMPING
+            adjustment = RESEARCH_REVIEW_ACCEPTED_DAMPING
+        elif state == STATE_REVIEW_REJECTED:
+            total *= RESEARCH_REVIEW_REJECTED_DAMPING
+            adjustment = RESEARCH_REVIEW_REJECTED_DAMPING
+        elif state == STATE_REVIEW_SCOPE_CORRECTED:
+            total *= RESEARCH_REVIEW_SCOPE_DAMPING
+            adjustment = RESEARCH_REVIEW_SCOPE_DAMPING
+        elif state == STATE_REVIEW_NEEDS_EVIDENCE:
+            before = total
+            total = min(scale, total + RESEARCH_REVIEW_NEEDS_EVIDENCE_BOOST)
+            adjustment = round(total - before, 4)
+        latest_evidence = latest.get("evidence") or {}
+        evidence["research_memory"] = {
+            "research_key": remembered.get("research_key", ""),
+            "latest_state": state,
+            "latest_round": latest.get("round", 0),
+            "next_probe_hints": list(latest.get("next_probe_hints") or [])[:4],
+            "score_adjustment": adjustment,
+            "claim_status": "not-a-finding",
+        }
+        for key in ("review_status", "reason_code", "reviewer_note",
+                    "evidence_refs", "feedback_id"):
+            if latest_evidence.get(key) not in (None, "", []):
+                evidence["research_memory"][key] = latest_evidence[key]
+    portfolio_guidance = _portfolio_probe_guidance(
+        candidate, ctx.research_portfolio)
+    if portfolio_guidance:
+        before = total
+        total = min(scale, total + RESEARCH_PORTFOLIO_PROBE_BOOST)
+        portfolio_guidance["applied_delta"] = round(total - before, 4)
+        evidence["research_portfolio"] = portfolio_guidance
+    strategy_guidance = _research_strategy_guidance(
+        candidate, ctx.research_strategy, link)
+    if strategy_guidance:
+        observation = strategy_guidance.get("observation") or {}
+        action_guidance = strategy_guidance.get("guidance") or {}
+        status = str(observation.get("status") or "unobserved")
+        try:
+            information_gain = int(observation.get("information_gain") or 0)
+        except (TypeError, ValueError):
+            information_gain = 0
+        # A strategy item that already has complete/falsifier evidence and
+        # produced no new signal should remain visible, but must not receive a
+        # fresh priority nudge merely because it is still linked statically.
+        # This is a scheduling rule, never a candidate suppression rule.
+        strategy_delta = 0.0 if status in {
+            "complete", "falsifier-observed"} and information_gain == 0 \
+            else RESEARCH_STRATEGY_BOOST
+        if action_guidance.get("next_action") in {
+                "hold-for-new-evidence", "reframe-scope"}:
+            # Keep the candidate eligible, but do not reward repeating a
+            # review-rejected or zero-yield experiment.
+            strategy_delta = 0.0
+        else:
+            strategy_delta += min(
+                2.25, 0.75 * min(3, _safe_weight(
+                    action_guidance.get("priority_delta") or 0)))
+        before = total
+        total = min(scale, total + strategy_delta)
+        strategy_guidance["applied_delta"] = round(total - before, 4)
+        evidence["research_strategy"] = strategy_guidance
+    agenda_guidance = _research_agenda_guidance(
+        candidate, ctx.research_agenda)
+    if agenda_guidance:
+        if agenda_guidance.get("selection_status") == "selected":
+            before = total
+            total = min(scale, total + RESEARCH_AGENDA_BOOST)
+            agenda_guidance["applied_delta"] = round(total - before, 4)
+        else:
+            agenda_guidance["applied_delta"] = 0.0
+        evidence["research_agenda"] = agenda_guidance
+    if ctx.benchmark_feedback:
+        evidence["benchmark_feedback"] = {
+            "benchmark_id": ctx.benchmark_feedback.get("benchmark_id", ""),
+            "alert_codes": [str(item.get("code")) for item in
+                            ctx.benchmark_feedback.get("alerts", [])
+                            if isinstance(item, dict) and item.get("code")][:8],
+            "weight_adjustments": dict(ctx.weight_adjustments),
+            "surface_guidance": surface_guidance,
+            "claim_status": "not-a-finding",
+        }
     return CandidateScore(
         candidate_id=str(candidate.get("candidate_id") or ""),
         category=candidate_category(candidate),
@@ -1008,6 +1625,12 @@ class SchedulePlan:
     coverage: Dict[str, Any] = field(default_factory=dict)
     residual: Dict[str, Any] = field(default_factory=dict)
     weights: Dict[str, int] = field(default_factory=dict)
+    benchmark_feedback: Dict[str, Any] = field(default_factory=dict)
+    research_portfolio: Dict[str, Any] = field(default_factory=dict)
+    research_strategy: Dict[str, Any] = field(default_factory=dict)
+    research_agenda: Dict[str, Any] = field(default_factory=dict)
+    threat_model: Dict[str, Any] = field(default_factory=dict)
+    weight_adjustments: Dict[str, int] = field(default_factory=dict)
     #: Candidates selected outside the quota because they carry runtime
     #: evidence the static score cannot see (see :func:`stratified_select`).
     pinned: List[str] = field(default_factory=list)
@@ -1020,6 +1643,13 @@ class SchedulePlan:
             "round": self.round_no,
             "slots": self.slots,
             "weights": dict(self.weights),
+            "weight_adjustments": dict(self.weight_adjustments),
+            "benchmark_feedback": self.benchmark_feedback,
+            "research_portfolio": self.research_portfolio,
+            "research_strategy": _research_strategy_snapshot(
+                self.research_strategy, item_limit=32),
+            "research_agenda": self.research_agenda,
+            "threat_model": _threat_model_snapshot(self.threat_model),
             "selected": [s.as_dict() for s in self.selected],
             "deferred": [s.as_dict() for s in self.deferred],
             "pinned": list(self.pinned),
@@ -1162,7 +1792,9 @@ def build_schedule(workspace: Path, target: str,
                    weights: Optional[Dict[str, int]] = None,
                    round_no: int = 0,
                    refresh: bool = True,
-                   pinned: Sequence[str] = ()) -> SchedulePlan:
+                   pinned: Sequence[str] = (),
+                   benchmark_feedback: Optional[Dict[str, Any]] = None
+                   ) -> SchedulePlan:
     """Score, dedupe and select this round's candidates.
 
     Writes ``state/<target>/coverage/schedule-round-NN.json`` (and
@@ -1180,7 +1812,41 @@ def build_schedule(workspace: Path, target: str,
     coverage: Dict[str, Any] = {}
     if refresh:
         coverage = residual_sweep(store, workspace, target, round_no)
-    ctx = ScheduleContext.from_store(store, weights)
+    memory = load_research_memory(workspace, target)
+    portfolio = load_research_portfolio(workspace, target)
+    threat_model = load_threat_model(workspace, target)
+    prior_strategy = load_research_strategy(workspace, target)
+    research_agenda = load_research_agenda(workspace, target)
+    # Replay calibration is an optional, bounded research-only input.  Keep
+    # the import local so the scheduler's analysis imports do not create a
+    # cycle through the evaluation package during CLI startup.
+    from ..evaluation.replay_calibration import load_replay_calibration
+
+    prior_replay_calibration = load_replay_calibration(workspace, target)
+    target_type = str(threat_model.get("target_type") or "")
+    strategy = build_research_strategy(
+        threat_model=threat_model,
+        research_portfolio=portfolio,
+        research_memory=memory.get("entries") or [],
+        benchmark_feedback=benchmark_feedback,
+        target=target,
+        target_type=target_type,
+        round_no=round_no,
+        prior_strategy=prior_strategy,
+    )
+    review_feedback = load_review_feedback(workspace, target)
+    if strategy:
+        strategy, _research_guidance = apply_research_guidance(
+            strategy, portfolio, review_feedback, round_no,
+            replay_calibration=prior_replay_calibration)
+        write_research_guidance(workspace, target, _research_guidance)
+    write_research_strategy(workspace, target, strategy)
+    ctx = ScheduleContext.from_store(
+        store, weights, research_memory=memory.get("entries") or [],
+        benchmark_feedback=benchmark_feedback,
+        research_portfolio=portfolio, research_strategy=strategy,
+        research_agenda=research_agenda,
+        threat_model=threat_model)
     scores = score_candidates(candidates, ctx)
     selected, deferred, requested, filled, relocated = stratified_select(
         scores, slots, quota, pinned)
@@ -1202,6 +1868,12 @@ def build_schedule(workspace: Path, target: str,
         coverage=coverage,
         residual=residual,
         weights=dict(ctx.weights),
+        benchmark_feedback=dict(ctx.benchmark_feedback),
+        research_portfolio=dict(ctx.research_portfolio),
+        research_strategy=dict(ctx.research_strategy),
+        research_agenda=dict(ctx.research_agenda),
+        threat_model=dict(ctx.threat_model),
+        weight_adjustments=dict(ctx.weight_adjustments),
         pinned=[str(cid) for cid in pinned if str(cid) in selected_ids],
     )
     payload = plan.as_dict()
@@ -1303,7 +1975,8 @@ def round_selection(workspace, target: str,
                     quota: Optional[Dict[str, int]] = None,
                     weights: Optional[Dict[str, int]] = None,
                     pinned: Sequence[str] = (),
-                    refresh: bool = True
+                    refresh: bool = True,
+                    benchmark_feedback: Optional[Dict[str, Any]] = None
                     ) -> Tuple[List[Dict[str, Any]], Optional[SchedulePlan], str]:
     """Pick this round's candidates, degrading to proposal order on failure.
 
@@ -1321,7 +1994,8 @@ def round_selection(workspace, target: str,
     try:
         plan = build_schedule(workspace, target, pool, slots=slots, quota=quota,
                               weights=weights, round_no=round_no,
-                              refresh=refresh, pinned=pinned)
+                              refresh=refresh, pinned=pinned,
+                              benchmark_feedback=benchmark_feedback)
     except Exception as exc:  # pragma: no cover - defensive by design
         return pool[:slots], None, (
             "scheduler unavailable (%s: %s); fell back to proposal order"
@@ -1517,7 +2191,187 @@ def prompt_coverage_block(ctx: ScheduleContext, plan: Optional[SchedulePlan] = N
                                        record.get("status"),
                                        record.get("conclusion", "")))
 
+    lines.append("## 跨轮研究记忆 / Cross-round Research Memory")
+    memory_rows = memory_prompt_rows(ctx.research_memory, limit_candidates)
+    if not memory_rows:
+        lines.append("  （暂无可复用的运行时记忆 / no reusable runtime memory）")
+    for row in memory_rows:
+        hints = "; ".join(row.get("next_probe_hints") or []) or "-"
+        review = row.get("review_status")
+        review_text = (" review=%s/%s" % (
+            review, row.get("reason_code") or "-") if review else "")
+        variants = "; ".join(row.get("fix_variants") or [])
+        variant_text = (" fix_variants=%s" % variants) if variants else ""
+        residuals = "; ".join(
+            "%s/%s/%s" % (
+                item.get("residual_id") or "-",
+                item.get("kind") or "unclassified",
+                "plan" if item.get("has_probe_plan") else "no-plan",
+            )
+            for item in row.get("pending_residuals") or []
+            if isinstance(item, dict)
+        ) or "-"
+        lines.append("  %s [%s, round=%s]%s next=%s residuals=%s "
+                     "claim_status=%s" % (
+            row.get("candidate_id") or row.get("research_key"),
+            row.get("state"), row.get("round", 0), review_text + variant_text, hints,
+            residuals, row.get("claim_status", "not-a-finding")))
+
+    lines.append("## 项目级研究组合 / Project Research Portfolio")
+    if not ctx.research_portfolio:
+        lines.append("  （暂无项目级组合视图 / no project portfolio yet）")
+    else:
+        portfolio = ctx.research_portfolio
+        lines.append("  " + json.dumps({
+            "round": portfolio.get("round", 0),
+            "summary": portfolio.get("summary", {}),
+            "variant_coverage": list(
+                portfolio.get("variant_coverage") or [])[:12],
+            "surface_lane_coverage": {
+                "summary": (portfolio.get("surface_lane_coverage") or {}
+                            ).get("summary", {}),
+                "lanes": list((portfolio.get("surface_lane_coverage") or {}
+                               ).get("lanes") or [])[:12],
+                "claim_status": ((portfolio.get("surface_lane_coverage") or {}
+                                  ).get("claim_status", "not-a-finding")),
+            },
+            "next_probes": list(portfolio.get("next_probes") or [])[:8],
+            "benchmark": portfolio.get("benchmark", {}),
+            "claim_status": portfolio.get("claim_status", "not-a-finding"),
+        }, ensure_ascii=False))
+
+    lines.append("## 主动研究议程 / Active Research Agenda")
+    if not ctx.research_agenda:
+        lines.append("  （暂无有界研究议程 / no bounded research agenda yet）")
+    else:
+        agenda = ctx.research_agenda
+        lines.append("  " + json.dumps({
+            "policy": agenda.get("policy", {}),
+            "summary": agenda.get("summary", {}),
+            "selected": [
+                {
+                    "agenda_id": item.get("agenda_id"),
+                    "research_key": item.get("research_key"),
+                    "candidate_id": item.get("candidate_id"),
+                    "surface": item.get("surface"),
+                    "action": item.get("action"),
+                    "priority_score": item.get("priority_score"),
+                    "expected_information_gain": item.get(
+                        "expected_information_gain"),
+                    "last_outcome": item.get("last_outcome", ""),
+                    "outcome_information_gain": item.get(
+                        "outcome_information_gain", 0),
+                    "outcome_observed_signals": item.get(
+                        "outcome_observed_signals", []),
+                    "outcome_consecutive_no_information": item.get(
+                        "outcome_consecutive_no_information", 0),
+                    "budget_recommendation": item.get(
+                        "budget_recommendation", ""),
+                    "budget_priority_delta": _safe_delta(item.get(
+                        "budget_priority_delta", 0)),
+                    "budget_cap_hint": item.get("budget_cap_hint", 0),
+                    "prerequisites": item.get("prerequisites", []),
+                    "claim_status": item.get("claim_status", "not-a-finding"),
+                }
+                for item in agenda.get("items", [])
+                if isinstance(item, dict)
+                and item.get("selection_status") == "selected"
+            ][:8],
+            "claim_status": agenda.get("claim_status", "not-a-finding"),
+        }, ensure_ascii=False))
+
+    lines.append("## 攻击路径威胁模型 / Attacker-Path Threat Model")
+    if not ctx.threat_model:
+        lines.append("  （暂无威胁模型 / no threat model yet）")
+    else:
+        model = _threat_model_snapshot(ctx.threat_model, path_limit=limit_flows,
+                                       boundary_limit=limit_selected)
+        lines.append("  " + json.dumps({
+            "summary": model.get("summary", {}),
+            "boundaries": model.get("boundaries", []),
+            "unresolved": model.get("unresolved", {}),
+            "claim_status": model.get("claim_status", "not-a-finding"),
+        }, ensure_ascii=False))
+        for path in model.get("attack_paths", []):
+            capability_ids = ",".join(
+                str(item.get("candidate_id"))
+                for item in (path.get("capability_hypotheses") or [])
+                if item.get("candidate_id")) or "-"
+            lines.append("  [priority=%s] %s %s -> %s posture=%s state=%s "
+                         "capability_hypotheses=%s questions=%s claim_status=%s" % (
+                             path.get("research_priority", 0),
+                             path.get("path_id"), path.get("entry_id"),
+                             path.get("sink_id"), path.get("control_posture"),
+                             path.get("research_state"),
+                             capability_ids,
+                             "; ".join(path.get("research_questions") or [])[:420],
+                             path.get("claim_status", "not-a-finding")))
+
+    lines.append("## 研究策略 / Research Strategy")
+    if not ctx.research_strategy:
+        lines.append("  （暂无研究策略 / no synthesized research strategy yet）")
+    else:
+        strategy = _research_strategy_snapshot(
+            ctx.research_strategy, item_limit=max(8, limit_flows * 2))
+        lines.append("  " + json.dumps({
+            "summary": strategy.get("summary", {}),
+            "benchmark_context": strategy.get("benchmark_context", {}),
+            "claim_status": strategy.get("claim_status", "not-a-finding"),
+        }, ensure_ascii=False))
+        for item in strategy.get("items", []):
+            observation = item.get("observation") or {}
+            guidance = item.get("guidance") or {}
+            variant_plan = guidance.get("surface_variant_plan") or {}
+            variant_ids = ",".join(
+                str(value) for value in variant_plan.get(
+                    "selected_variants") or []) or "-"
+            lane_names = ",".join(sorted({
+                str(row.get("lane")) for row in variant_plan.get("lanes") or []
+                if isinstance(row, dict) and row.get("lane")
+            })) or "-"
+            lines.append("  [priority=%s] %s kind=%s state=%s "
+                         "path=%s residual=%s objective=%s observe=%s "
+                         "falsify=%s observation=%s gain=%s missing=%s "
+                         "next_action=%s replace=%s action_reasons=%s "
+                         "surface_variants=%s lanes=%s "
+                         "claim_status=%s" % (
+                             item.get("priority", 0),
+                             item.get("strategy_id"), item.get("kind"),
+                             item.get("state"), item.get("path_id") or "-",
+                             item.get("residual_id") or "-",
+                             item.get("objective"),
+                             ";".join(item.get("required_observations") or []),
+                             ";".join(item.get("falsifiers") or [])[:360],
+                             observation.get("status", "unobserved"),
+                             observation.get("information_gain", 0),
+                             ";".join(observation.get(
+                                 "missing_observations") or []) or "-",
+                             guidance.get("next_action", "continue-path-closure"),
+                             "yes" if guidance.get(
+                                 "replacement_recommended") else "no",
+                             ";".join(guidance.get("reason_codes") or []) or "-",
+                             variant_ids, lane_names,
+                             item.get("claim_status", "not-a-finding")))
+
+    lines.append("## 评测反馈 / Benchmark Feedback")
+    if not ctx.benchmark_feedback:
+        lines.append("  （暂无：本轮未提供 research-benchmark feedback / none supplied）")
+    else:
+        feedback = ctx.benchmark_feedback
+        lines.append("  " + json.dumps({
+            "benchmark_id": feedback.get("benchmark_id"),
+            "alerts": [item.get("code") for item in feedback.get("alerts", [])
+                       if isinstance(item, dict)],
+            "weight_adjustments": ctx.weight_adjustments,
+            "surface_guidance": list(feedback.get("surface_guidance") or [])[:8],
+            "trend": feedback.get("trend") or {},
+            "prompt_hints": list(feedback.get("prompt_hints") or [])[:8],
+            "claim_status": feedback.get("claim_status", "not-a-finding"),
+        }, ensure_ascii=False))
+
     lines.append("## 覆盖新颖性要求 / Coverage Novelty Requirement")
     lines.append("  优先生成来自未覆盖区域的候选；禁止重复已排除的机制，"
-                 "除非存在新的数据流、安全控制差分或版本差分证据。")
+                 "除非存在新的数据流、安全控制差分或版本差分证据。稳定重放"
+                 "只能减少重复实验，不能证明不存在漏洞；环境缺口必须修复后重试；"
+                 "可行动版本差异应优先转化为最小复现和 source→sink 证据。")
     return "\n".join(lines)

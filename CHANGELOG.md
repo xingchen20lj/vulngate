@@ -4,6 +4,334 @@ All notable changes to VulnGate are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Added deterministic `semantic-path-evidence-v1` and
+  `semantic-path-candidates.json`. S1 now records bounded control-order
+  evidence and same-symbol parameter/alias reachability, while leaving
+  cross-symbol data flow, branch dominance, and all claim promotion to S3/S4.
+- Added `agent_cli.py semantic-paths` and merged semantic path leads into the
+  static S2 candidate pool.
+- Added `semantic-guard-evidence-v1` and `semantic-guard-candidates.json`.
+  S1 now records bounded branch posture and subject/object binding evidence for
+  semantic flows, including terminating-guard, nested-branch, non-branch-check,
+  overlap, mismatch, and unresolved states; all leads remain `not-a-finding`.
+- Added `agent_cli.py semantic-guards` and merged guard leads into the static
+  S2 candidate pool. The new layer does not claim branch dominance, object
+  identity, authorization correctness, or a vulnerability.
+- Added `semantic-call-evidence-v1` and `semantic-call-candidates.json`.
+  S1 now performs bounded one-hop call-site argument binding, tainted
+  parameter propagation, and return-shape hints across source-to-sink flows;
+  unresolved dispatch, arity, and sink binding remain explicit research gaps.
+- Added `agent_cli.py semantic-calls` and merged interprocedural binding leads
+  into the static S2 candidate pool without promoting static data flow to a
+  finding or runtime effect.
+- Added `semantic-controlflow-evidence-v1` and
+  `semantic-controlflow-candidates.json`. S1 now records bounded structural
+  relations for guarded branches, terminating rejection paths, and alternate
+  `else`/`except` paths without claiming a complete CFG or dominance proof.
+- Added `agent_cli.py semantic-controlflow` and merged control-flow gaps into
+  the static S2 candidate pool as `not-a-finding` research leads.
+- Added `semantic-ast-evidence-v1` and `semantic-ast-candidates.json`. Python
+  files now get bounded AST branch/scope witnesses for terminating guards,
+  alternate paths, exception handlers, and parse gaps without storing source
+  text or claiming a complete CFG.
+- Added `agent_cli.py semantic-ast` and merged AST structural gaps into the
+  static S2 candidate pool as `not-a-finding` research leads.
+
+### Fixed
+
+- Loopback service healthchecks now ignore inherited proxy environment
+  variables, so a forced host proxy cannot turn a healthy local S4 service into
+  a false `precondition-unavailable` result.
+
+## [1.2.0] - 2026-09-21
+
+### Added
+
+- Added `research-budget-v1` outcome-adaptive finite-budget policy. S8 now
+  aggregates agenda execution by research surface, cost, and information gain,
+  emitting bounded recovery, exploitation, exploration, and low-yield cooldown
+  hints for the next agenda. The policy is inspectable through
+  `agent_cli.py research-budget`, remains `not-a-finding`, and cannot change
+  candidate status, CVSS, G4, or G5.
+
+- Added `research-agenda-outcome-v1` execution feedback. S8 joins the prior
+  active queue with the actual schedule and bounded S4/S8 observations, records
+  productive information, falsifiers, no-information repeats, environment
+  gaps, and not-executed work, and feeds the latest outcome into the next
+  agenda. `agent_cli.py research-agenda-outcomes` can inspect or rebuild it;
+  all metadata remains `not-a-finding` and cannot change candidate status,
+  CVSS, G4, or G5.
+
+- Added `research-agenda-v1` active research budgeting. S8 converts the
+  normalized strategy into a bounded selected/deferred/hold queue with
+  expected information gain, estimated cost, prerequisites, and per-surface
+  diversity; the scheduler consumes only exact agenda matches as a small
+  priority signal, and `agent_cli.py research-agenda` can inspect or rebuild
+  it. Agenda metadata remains `not-a-finding` and cannot change candidate
+  status, CVSS, G4, or G5.
+
+- Added `research-consistency-recheck-v1` execution closure. S4 now expands a
+  pending consistency action into bounded positive/negative or environment-gap
+  lanes and records replay count, fixture/context identity, comparison status,
+  state-reset, typed-effect/safe-equivalent and environment witnesses without
+  persisting raw process data. S8, the portfolio, the strategy layer, replay
+  packs, and `agent_cli.py research-consistency-rechecks` distinguish observed,
+  partial, environment-gap, and not-executed closure; all metadata remains
+  `not-a-finding` and cannot change candidate status, CVSS, G4, or G5.
+
+- Added `research-consistency-v1` for bounded cross-round evidence checks.
+  `agent_cli.py research-consistency` compares effect, reproduction, comparison,
+  runtime-state, and context classifications from `research-memory`, while
+  portfolio and strategy convert conflicts into controlled follow-up actions.
+  S8 and replay packs persist the target/round artifact; all metadata remains
+  `not-a-finding` and cannot affect candidate status, CVSS, G4, or G5.
+
+- Added `research-consistency-action-v1` controlled recheck contracts.
+  `agent_cli.py research-consistency-actions` materializes fixed isolation axes,
+  paired lanes, required observations, and falsifiers; S2 emits a bounded
+  `consistency-recheck` plan and S4 carries the normalized contract through
+  MatrixCell, PoC environment, and runtime-lab fixtures. Action artifacts and
+  replay-pack provenance remain `not-a-finding` and cannot affect candidate
+  status, CVSS, G4, or G5.
+
+- Added `research-replay-pack-v1` provenance packs. S8 and
+  `agent_cli.py replay-pack` retain only allowlisted workspace-local artifact
+  names, schema versions, sizes, SHA-256 fingerprints, and bounded lane/
+  comparison summaries. `replay-cohort-calibrate --pack` rejects incomplete or
+  digest-inconsistent packs; all replay provenance remains `not-a-finding` and
+  cannot affect candidate status, CVSS, G4, or G5.
+
+- Added bounded cross-project replay calibration, `research-replay-cohort-v1`.
+  `agent_cli.py replay-cohort-calibrate` aggregates explicit per-target
+  `research-replay-calibration-v1` artifacts by distinct-project sample counts,
+  preserves per-surface sufficiency, and activates a one-to-two-round
+  zero-information replacement policy only when the cohort is sufficiently
+  observed. Target-local calibration takes precedence; insufficient cohorts
+  retain the default. The artifact is `not-a-finding` and cannot affect
+  candidate status, CVSS, G4, or G5.
+
+- S8/S2 now produce `research-replay-calibration-v1` from bounded real-project
+  round history. `agent_cli.py replay-calibrate` measures replacement hit rate,
+  unproductive repeats, environment recovery, fixture-budget truncation, and
+  comparison gaps; only a validated sample can change the replacement
+  zero-gain threshold between one and two rounds. The artifact is
+  `not-a-finding` and cannot affect candidate status, CVSS, G4, or G5.
+
+- S2/S4 now carry `comparison-orchestration-v1` for bounded cross-version and
+  fix-completeness research. Configured version pairs are compared on the same
+  fixture/lane, read-only patch parent/fixed references remain explicit
+  build-required arms, and sibling hints remain pending until a matching lane
+  runs. S4 distinguishes bucket changes, signature-only drift, missing runtime
+  cells, and unexecuted source/sibling arms; S8 retains the bounded comparison
+  state as research-only memory; all comparison output remains `not-a-finding`.
+
+- S4 now supports explicit `source_revision_artifacts` arms for exact before/
+  after commit references. Workspace-local JAR/WAR/ZIP files are validated and
+  fingerprinted, then executed through the existing isolated Java runner on
+  the same fixture/lane; VulnGate never performs checkout or builds source.
+  Missing, invalid, non-Java, or unavailable artifacts remain explicit
+  `precondition-unavailable`/`inconclusive` research gaps, and executed source
+  comparisons remain `not-a-finding` metadata.
+
+- S4 runtime research now consumes the shared surface plan through
+  `surface-variant-fixture-v1`. Within the configured fixture budget, each
+  selected Web/protocol/cloud/mobile/native variant expands into positive,
+  negative/safe, and environment-gap runner cells with fixed state-step
+  identifiers. PoCs receive only bounded `VULNGATE_VARIANT_*` metadata, and
+  `S4/runtime-lab.json` records lane context and truncation explicitly while
+  preserving `not-a-finding`; no lane declaration satisfies G4/G5 or changes
+  CVSS.
+
+- S4 now emits `surface-variant-evidence-v1` from actual replay/differential
+  rows. The bounded witness layer distinguishes observed, partial,
+  environment-gap, and not-executed lanes; only a complete observed STEP trace
+  satisfies state-sequence, while typed-effect and safe-equivalent remain
+  separate signals. S8/S2 reuse missing signals as next-probe hints, without
+  persisting raw output or changing candidate status, CVSS, G4, or G5.
+
+- S8 now aggregates persisted lane witnesses as
+  `surface-variant-coverage-v1` inside `research-portfolio-v1`. Historical and
+  latest status/signal counts stay separate; only a latest actual `observed`
+  lane closes, while partial, not-executed, and environment-gap lanes produce
+  exact research-key next probes. The coverage view remains
+  `not-a-finding` and cannot affect candidate status, CVSS, G4, or G5.
+
+- S2 experiment plans now carry a shared `surface-variant-plan-v1` for Web,
+  protocol, cloud, mobile, and native research. Each selected state-machine,
+  identity-boundary, lifecycle, route, parser, or method-body variant is
+  expanded into positive, negative/safe, and environment-gap lanes with fixed
+  observation signals and falsifier codes. Strategy guidance, config-driven
+  S2, and autonomous S2 reuse the same bounded plan; it remains
+  `not-a-finding` metadata and cannot satisfy G4/G5.
+
+- S8/S2 now produce `research-strategy-guidance-v1`: a bounded next-action layer
+  that joins real strategy observations, latest human review status, and
+  explicit portfolio variant gaps. It can recommend environment repair,
+  negative-control/capability/typed-effect follow-up, residual or new-variant
+  replay, scope reframing, or replacing a zero-information experiment. The
+  guidance is persisted at `state/<target>/coverage/research-guidance.json` and
+  `S8/research-guidance.json`, and only adjusts research scheduling; it never
+  changes candidate status, CVSS, G4/G5, or the `not-a-finding` boundary.
+
+- S8 now feeds bounded real S4 observations back into matching research-strategy items. The new `research-strategy-feedback-v1` snapshot records current/history observation status, missing required signals, explicit falsifier observations, and per-round information gain without copying runtime output; complete items with zero new signal no longer receive a strategy scheduling nudge.
+
+- S3 residuals now carry a bounded S2->S4 closure contract. The matrix parser
+  records only allowlisted `RESIDUAL_ID` / `RESIDUAL_STATUS` /
+  `RESIDUAL_FALSIFIER` observations; S8 advances a residual to
+  `residual-falsified` only after a declared contract matches an executed
+  no-effect cell. Gate failures, unavailable prerequisites and effect-bearing
+  cells remain pending, and `S4/residual-closure.json` plus all memory and
+  portfolio views remain `not-a-finding`.
+
+- Composite source-to-sink paths that include an authorization boundary are now
+  promoted from S1 hints into deterministic `chain-*` S2 candidates. The
+  candidates carry credential-free authorization cases, source locations and
+  heuristic provenance, and are scheduled identically by the config-driven and
+  autonomous pipelines.
+- S4 cells now support a bounded stateful/race experiment contract: declared
+  step identifiers, concurrency and availability probes are passed to Java and
+  Shell PoCs, while ordered `STEP`/`STEP_EVIDENCE`/`STATE` traces and the
+  declaration are persisted. Declarations remain metadata; A:H still requires
+  observed concurrent saturation and service unavailability.
+- S2 now emits deterministic, bounded `experiment-plans.json` records for the
+  complete candidate pool. Plans carry required observations and explicit
+  falsifiers for baseline, authorization, state/race, availability, fix
+  variants and typed effects, and are explicitly marked `not-a-finding`.
+- S1 now builds a bounded capability-primitive graph from the persisted
+  entry/sink/flow indices and promotes explicit `read` / `write` / `exec` /
+  `ssrf` / credential/evaluation chain hypotheses into S2. Every path records
+  observed versus missing primitives, provenance, transition rules and a
+  minimal verification sequence; capability paths remain
+  `claim_status=not-a-finding` until manual data-flow and runtime typed-effect
+  evidence exist.
+- Capability-chain candidates now carry a bounded `capability_contract` into
+  every S4 Java, shell, autonomous and CLI-manifest cell. PoCs can emit
+  ordered `CAPABILITY`/`CAPABILITY_EVIDENCE` and
+  `TRANSITION`/`TRANSITION_EVIDENCE` traces; S4 summarizes them as
+  `no-trace`/`partial`/`complete` and keeps typed effects separate from
+  intermediate capability observations. A complete trace remains
+  `claim_status=not-a-finding`.
+- The directed fuzz path now persists a deterministic `fuzz-corpus.json`,
+  stable fixture ids/content digests, and minimized reproducer metadata. A
+  bounded runtime lab replays selected reproducers and compares every
+  configured version × SafeMode cell, separating stable reproduction, bucket
+  changes, signature-only drift, and precondition/harness gaps in
+  `runtime-lab.json`; the lab remains `not-a-finding` evidence.
+- Ordinary Java and shell S4 PoCs now have the same bounded fixture adapter.
+  It derives a stable identity from the execution context without persisting
+  raw arguments, reuses the isolated matrix runners for replay and version ×
+  SafeMode comparison, and writes `S4/runtime-lab.json`; replay and
+  differential gaps remain `not-a-finding` evidence.
+- Stateful S4 runs can now declare a bounded local `runtime_lab.service`.
+  Service commands are argv-only and workspace-local, health checks are
+  loopback-only, owned process groups are always torn down, and
+  `S4/processes.json` records PID/port lifecycle without command or secret
+  values. `S4/runtime-lab.json` also records a credential-free configuration
+  snapshot and stable `authz_fixture_id` values for tenant/object comparisons.
+- S8 now persists target-scoped cross-round research memory. Stable mechanism
+  keys, bounded replay/differential states, environment gaps, and next-probe
+  hints are merged idempotently into `state/<target>/research-memory.json`;
+  the scheduler dampens exact stable repeats and prioritizes actionable
+  differences while preserving every candidate and keeping the memory
+  `claim_status=not-a-finding`.
+- Research memory now absorbs a bounded S4 context view (service readiness and
+  config digests, version/URL digests, authorization fixture IDs, and patch
+  variant hints) without copying commands, credentials, raw arguments or
+  process output. `agent_cli.py review` records accepted, rejected,
+  needs-evidence, or scope-corrected feedback in
+  `state/<target>/review-feedback.json`; S8 snapshots it and the scheduler
+  uses it only to reprioritize follow-up research.
+- Added the deterministic `research-benchmark-v1` evaluator and a safe sample
+  manifest/run. It measures observation coverage, confirmed precision/recall,
+  negative-result safety, environment-gap fidelity, justified versus
+  unjustified research-key repeats, evidence completeness, decision stability,
+  and CVSS/severity calibration; benchmark output remains
+  `claim_status=not-a-finding`.
+- Added deterministic `research-benchmark-feedback-v1`: benchmark metrics can
+  produce capped alert codes, signed scheduler-factor deltas, and bounded
+  experiment observations. CLI scheduling, config-driven S2, and the
+  autonomous loop accept the feedback explicitly; plans and schedules record
+  the source and actual adjustments while preserving default behavior and
+  never changing G4/G5 conclusions or CVSS.
+- Added the cross-surface synthetic research benchmark and sample run. Fifteen
+  bounded cases cover web, protocol, cloud, mobile and native surfaces, with a
+  vulnerable, negative and environment-gap variant per surface. The evaluator
+  preserves surface/variant metadata and reports `research_profile` plus
+  `coverage_by_surface`; tool or runtime gaps remain pending and the artifact
+  remains `claim_status=not-a-finding`.
+- Added bounded surface-aware benchmark feedback. Weak per-surface coverage,
+  evidence completeness, negative-result safety, or environment-gap fidelity
+  produces allowlisted `surface_guidance`; only explicitly matching candidates
+  receive a small scheduler priority delta, and matching experiment plans gain
+  the corresponding observations/falsifiers. Findings, CVSS and G4/G5 remain
+  unchanged.
+- Added bounded longitudinal benchmark comparison via `--baseline`. The new
+  `research-benchmark-trend-v1` artifact compares fixed aggregate and common
+  surface metrics, turns regressions into allowlisted feedback, and preserves
+  all benchmark safety boundaries.
+- Added the bounded `research-portfolio-v1` project view. S8 aggregates
+  research memory, review feedback and benchmark context by research surface,
+  target type, attack class, variant and precondition class, and emits
+  deterministic `next_probes` without promoting portfolio state to a finding.
+- The scheduler now gives only an exact research-key or multi-dimension
+  explicit portfolio match a small, recorded priority nudge; broad/free-form
+  labels cannot steer a candidate and the nudge never changes G4/G5, CVSS or
+  finding status.
+- Added bounded `threat-model-v1` attacker-path artifacts. S1 now joins trust
+  boundaries, entries, flows, sinks, static control posture, unresolved
+  reachability, and matching capability hypotheses; the scheduler prompt and
+  `agent_cli.py threat-model` expose the same view. Unmapped regions remain
+  pending and every row is forced to `claim_status=not-a-finding`.
+
+### Documentation
+
+- Added the Chinese research-capability roadmap in
+  [`docs/RESEARCH-ROADMAP.zh-CN.md`](docs/RESEARCH-ROADMAP.zh-CN.md), including
+  acceptance criteria for capability-graph, runtime-lab, memory and evaluation
+  stages.
+- Documented the `capability` CLI report and the additional S1/S2 coverage
+  artifacts in the VulnGate audit skill.
+- Documented cross-round research memory, its state taxonomy, and its
+  separation from G4/G5 conclusions in the roadmap, README, evolution notes,
+  and audit skill.
+- Documented the bounded service lifecycle, configuration snapshot, process
+  registry, and credential-free authz fixture contract in the roadmap, README,
+  quickstart, evolution notes, and audit skill.
+- Documented the replayable human-review feedback contract, review CLI, bounded
+  statuses/reason codes, and its separation from G4/G5 conclusions.
+- Documented the benchmark manifest/run contract and the metrics that constrain
+  planner, scheduler and conclusion-rule regressions.
+- Documented the benchmark feedback artifact, `--feedback-out`, explicit
+  `schedule --benchmark-result` wiring, target-config opt-in, and its strict
+  `not-a-finding` boundary.
+- Documented the cross-surface benchmark fixture, per-surface coverage metrics,
+  and the rule that unavailable runtime or analysis tools remain pending rather
+  than becoming negative evidence.
+- Documented surface-aware scheduling/planning, exact metadata matching, and
+  the bounded `surface_guidance` safety boundary.
+- Documented `--baseline`, trend artifacts, fixed comparison metrics, and the
+  rule that regressions are research guidance rather than findings.
+- Documented the project research portfolio, its S8 artifacts, bounded variant
+  coverage and next-probe contract, including its strict `not-a-finding`
+  boundary.
+- Documented the attacker-path threat model, its target/round artifacts, CLI,
+  trust-boundary assumptions, unresolved-region handling, and strict
+  separation from vulnerability, CVSS, and G4/G5 conclusions.
+- S3 residuals now persist across S8 as bounded research metadata. Research
+  memory retains only controlled kind/reason codes, bounded locations, probe
+  digests and plan presence; the project portfolio emits `pending-residual`
+  next probes even when the primary replay is stable. The residual loop stays
+  `claim_status=not-a-finding` and never copies raw probe text.
+- S2 now synthesizes a bounded `research-strategy-v1` from the attacker-path
+  model, unresolved coverage, residual-aware portfolio probes, cross-round
+  memory and benchmark context. Each strategy item carries fixed required
+  observations and falsifiers; explicit path/research-key matches can receive
+  only a small scheduler nudge and remain `claim_status=not-a-finding`.
+
 ## [1.1.0] - 2026-09-16
 
 ### Added

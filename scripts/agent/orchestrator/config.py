@@ -24,7 +24,27 @@ class TargetConfig:
     output_lang: str = "zh"  # "zh" | "en" (ledger/finding output language)
     llm_audit: bool = False  # S5b mechanism audit (LLM) in config-driven pipeline
     fuzzer: Dict[str, Any] = field(default_factory=dict)  # directed fuzz config (plan 2.1)
+    # Bounded ordinary-S4 fixture replay/differential evidence.  The adapter
+    # is enabled by default and can be disabled per target or candidate when a
+    # PoC is intentionally non-repeatable.  An optional ``service`` mapping
+    # owns a workspace-local argv-only process with a loopback healthcheck.
+    runtime_lab: Dict[str, Any] = field(default_factory=dict)
+    # Optional, explicit historical build artifacts for comparison
+    # source-revision arms.  This is an artifact adapter only: it never
+    # performs checkout or invokes a build command.
+    source_revision_artifacts: Dict[str, Any] = field(default_factory=dict)
     public_scan: Dict[str, Any] = field(default_factory=dict)  # internet novelty scan (plan 2.7)
+    # Optional, explicitly supplied research-quality feedback.  It only
+    # influences S2 prioritisation and experiment checklists; it never changes
+    # a candidate conclusion or CVSS value.  A path is resolved relative to the
+    # workspace and must contain a benchmark result or feedback artifact.
+    benchmark_feedback: Dict[str, Any] = field(default_factory=dict)
+    benchmark_feedback_path: Optional[str] = None
+    # Optional, explicitly supplied cross-project replay cohort.  It only
+    # supplies a bounded research-guidance scheduling policy when the target's
+    # own replay history is insufficient; it never changes findings, CVSS, or
+    # G4/G5.
+    replay_cohort_calibration_path: Optional[str] = None
     jars: List[Dict[str, str]] = field(default_factory=list)
     deps: List[Dict[str, str]] = field(default_factory=list)
     source_dirs: List[str] = field(default_factory=list)
@@ -35,9 +55,10 @@ class TargetConfig:
     # auditing every configured candidate; a positive value caps the round and
     # lets the scheduler choose which ones, deferring the rest with a reason.
     max_candidates: int = 0
-    # Index-derived candidates (spec §11/§12) enter the round's pool
-    # automatically: an unguarded path and a sibling control differential are
-    # exactly the "high value candidates" the spec says to promote, and they are
+    # Index-derived candidates (spec §11/§12 plus capability paths) enter the
+    # round's pool automatically: an unguarded path, sibling control
+    # differential, and explicit primitive chain are exactly the "high value
+    # candidates" the spec says to promote, and they are
     # derived from persisted indices, not from the model.  Set false to run the
     # pre-PR4 proposal path unchanged -- e.g. to compare a round with and
     # without them.
@@ -69,3 +90,10 @@ class TargetConfig:
                 for version_jars in out.values():
                     version_jars.append(p)
         return out
+
+    def resolve_source_revision_artifacts(self, workspace: Path) -> Dict[str, Any]:
+        """Validate operator-supplied historical artifacts for S4 only."""
+        from ..tools.source_revisions import resolve_source_revision_artifacts
+
+        return resolve_source_revision_artifacts(
+            workspace, self.source_revision_artifacts)

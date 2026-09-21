@@ -28,11 +28,18 @@ Module map:
 ``controls``    security-control index + control map, Entry->Sink verdicts (§11)
 ``scheduler``   coverage-aware candidate scheduling (§13/§14)
 ``differential`` sibling/differential analysis: where a family disagrees (§12)
+``capability_graph`` bounded capability-primitive composition and research paths
+``semantic_paths`` bounded source-local control-order and same-symbol data-flow evidence
+``semantic_guards`` bounded branch-posture and subject/object binding evidence
+``semantic_calls`` bounded one-hop interprocedural argument/return evidence
+``semantic_controlflow`` bounded branch-dominance and alternate-path evidence
+``semantic_ast`` bounded Python-AST branch and scope evidence
 """
 
 from __future__ import annotations
 
 __all__ = [
+    "capability_graph",
     "callgraph",
     "coverage",
     "controls",
@@ -42,5 +49,10 @@ __all__ = [
     "languages",
     "models",
     "scheduler",
+    "semantic_guards",
+    "semantic_calls",
+    "semantic_controlflow",
+    "semantic_ast",
+    "semantic_paths",
     "symbols",
 ]

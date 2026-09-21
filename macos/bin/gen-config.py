@@ -266,6 +266,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "output_lang": "zh",
         "llm_audit": False,
         "safe_mode_switch": "none",
+        "runtime_lab": {},
         "jars": jars,
         "deps": deps,
         "source_dirs": [src_rel],

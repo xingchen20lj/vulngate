@@ -2,12 +2,14 @@
 
 Runs `{version} x {safe-mode on/off} x {precondition}` cells for a candidate,
 captures stdout/stderr per cell, and extracts machine-readable observations
-(GATE_BLOCKED / INSTANTIATED / ERROR / NETWORK / PARSED lines) that the G4
-runtime gate consumes.
+(GATE_BLOCKED / INSTANTIATED / ERROR / NETWORK / PARSED plus bounded
+STEP/STEP_EVIDENCE/STATE, capability/transition, and residual-falsifier
+traces) that the G4 runtime gate consumes.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -15,11 +17,20 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from ..sandbox.approval import ApprovalGate
 from ..sandbox.runner import CommandRunner, RunResult, minimal_poc_env
-from .authz import assert_authz_observations, authz_env, authz_jvm_props, normalize_authz_case
+from ..evaluation.research_consistency_actions import (
+    normalize_research_consistency_action,
+    normalize_research_consistency_lane,
+)
+from .authz import (assert_authz_observations, authz_env, authz_fixture_id,
+                    authz_jvm_props, normalize_authz_case)
+from .experiment import (experiment_metadata, normalize_capability_contract,
+                         normalize_experiment, normalize_residual_contracts,
+                         sequence_trace_status)
+from .surface_variants import normalize_variant_fixture_context
 
 
 RUNNER_POLICY_VERSION = "loopback-only-v2"
@@ -85,6 +96,110 @@ class MatrixCell:
     required_runtime: str = ""                           # e.g. jdk8 / java21
     java_bin: str = ""                                   # explicit .../bin/java
     java_home: str = ""                                  # explicit JDK home
+    # Bounded stateful/race experiment declaration.  The PoC owns the actual
+    # local requests and transitions; the runner exposes only these identifiers
+    # and persists the declaration with the observed cell evidence.
+    sequence: List[str] = field(default_factory=list)
+    concurrency: int = 1
+    availability_probe: bool = False
+    # Bounded capability-chain contract.  This is an observation checklist,
+    # never proof that a primitive or transition exists.
+    capability_contract: Dict[str, Any] = field(default_factory=dict)
+    # S3 residual closure checklist; also never proof that a residual exists.
+    residual_contracts: List[Dict[str, Any]] = field(default_factory=list)
+    # Surface-specific fixture/state-machine context.  This is a bounded
+    # experiment identity, never a payload or a runtime observation.
+    variant_context: Dict[str, Any] = field(default_factory=dict)
+    # Cross-round contradiction recheck contract.  This is scheduling
+    # metadata only; it is not an observation or a finding.
+    consistency_action: Dict[str, Any] = field(default_factory=dict)
+    # The runtime lab materializes the action's paired lane here.  The label
+    # is only an execution selector; the PoC must still emit observations.
+    consistency_lane: str = ""
+    experiment_warnings: List[str] = field(default_factory=list, init=False)
+
+    def __post_init__(self) -> None:
+        (self.sequence, self.concurrency, self.availability_probe,
+         self.experiment_warnings) = normalize_experiment(
+            self.sequence, self.concurrency, self.availability_probe)
+        self.capability_contract = normalize_capability_contract(
+            self.capability_contract)
+        self.residual_contracts = normalize_residual_contracts(
+            self.residual_contracts)
+        self.variant_context = normalize_variant_fixture_context(
+            self.variant_context)
+        self.consistency_action = normalize_research_consistency_action(
+            self.consistency_action)
+        self.consistency_lane = normalize_research_consistency_lane(
+            self.consistency_lane)
+
+
+def _cell_experiment_env(cell: MatrixCell) -> Dict[str, str]:
+    """Expose only bounded experiment metadata to a PoC process."""
+    contract = normalize_capability_contract(cell.capability_contract)
+    env = {
+        "VULNGATE_SEQUENCE": json.dumps(cell.sequence, ensure_ascii=False),
+        "VULNGATE_CONCURRENCY": str(cell.concurrency),
+        "VULNGATE_AVAILABILITY_PROBE": (
+            "true" if cell.availability_probe else "false"),
+        "VULNGATE_CAPABILITY_CONTRACT": json.dumps(
+            contract, ensure_ascii=False, separators=(",", ":")),
+        "VULNGATE_CAPABILITIES": json.dumps(
+            contract.get("required_capabilities", []), ensure_ascii=False),
+        "VULNGATE_OBSERVED_CAPABILITIES": json.dumps(
+            contract.get("observed_capabilities", []), ensure_ascii=False),
+        "VULNGATE_MISSING_CAPABILITIES": json.dumps(
+            contract.get("missing_capabilities", []), ensure_ascii=False),
+        "VULNGATE_TRANSITIONS": json.dumps(
+            contract.get("transition_rules", []), ensure_ascii=False),
+        "VULNGATE_RESIDUAL_CONTRACT": json.dumps(
+            normalize_residual_contracts(cell.residual_contracts),
+            ensure_ascii=False, separators=(",", ":")),
+        "VULNGATE_RESIDUAL_IDS": json.dumps([
+            row["residual_id"] for row in
+            normalize_residual_contracts(cell.residual_contracts)
+        ], ensure_ascii=False),
+        "VULNGATE_CONSISTENCY_ACTION": json.dumps(
+            normalize_research_consistency_action(cell.consistency_action),
+            ensure_ascii=False, separators=(",", ":")),
+        "VULNGATE_CONSISTENCY_LANE": cell.consistency_lane,
+    }
+    variant = normalize_variant_fixture_context(cell.variant_context)
+    if variant:
+        env.update({
+            "VULNGATE_VARIANT_SURFACE": variant["surface"],
+            "VULNGATE_VARIANT_ID": variant["variant_id"],
+            "VULNGATE_VARIANT_LANE": variant["lane"],
+            "VULNGATE_VARIANT_FIXTURE": variant["fixture_key"],
+            "VULNGATE_VARIANT_FAMILY": variant["family"],
+            "VULNGATE_VARIANT_STATE_STEPS": json.dumps(
+                variant["state_steps"], ensure_ascii=False),
+            "VULNGATE_VARIANT_OBSERVATIONS": json.dumps(
+                variant["required_observations"], ensure_ascii=False),
+            "VULNGATE_VARIANT_FALSIFIERS": json.dumps(
+                variant["falsifiers"], ensure_ascii=False),
+        })
+    return env
+
+
+def _cell_metadata(cell: MatrixCell) -> Dict[str, Any]:
+    """Common persisted metadata for Java and Shell cells."""
+    meta = experiment_metadata(cell)
+    return {
+        "sequence": meta["sequence"],
+        "concurrency": meta["concurrency"],
+        "availability_probe": meta["availability_probe"],
+        "authz_fixture_id": authz_fixture_id(cell.authz),
+        "capability_contract": meta["capability_contract"],
+        "residual_contracts": meta["residual_contracts"],
+        "variant_context": normalize_variant_fixture_context(
+            cell.variant_context),
+        "consistency_action": normalize_research_consistency_action(
+            cell.consistency_action),
+        "consistency_lane": normalize_research_consistency_lane(
+            cell.consistency_lane),
+        "experiment": meta,
+    }
 
 
 @dataclass
@@ -235,10 +350,27 @@ def resolve_java_runtime(cell: MatrixCell) -> Dict[str, str]:
             "java_version": version, "java_version_line": probe.get("version_line", "")}
 
 
-def parse_observations(stdout: str, stderr: str = "") -> Dict[str, str]:
-    obs: Dict[str, str] = {}
+def parse_observations(stdout: str, stderr: str = "") -> Dict[str, Any]:
+    """Parse scalar observations plus bounded state/capability evidence traces."""
+    obs: Dict[str, Any] = {}
     combined = stdout + "\n" + stderr
     for line in combined.splitlines():
+        for source_key, trace_key in (
+                ("STEP", "STEP_TRACE"),
+                ("STEP_EVIDENCE", "STEP_EVIDENCE"),
+                ("STATE", "STATE_TRACE"),
+                ("CAPABILITY", "CAPABILITY_TRACE"),
+                ("CAPABILITY_EVIDENCE", "CAPABILITY_EVIDENCE"),
+                ("TRANSITION", "TRANSITION_TRACE"),
+                ("TRANSITION_EVIDENCE", "TRANSITION_EVIDENCE")):
+            if line.startswith(source_key + "="):
+                values = obs.setdefault(trace_key, [])
+                if not isinstance(values, list):
+                    values = []
+                    obs[trace_key] = values
+                if len(values) < 32:
+                    values.append(line[len(source_key) + 1:len(source_key) + 241])
+                break
         for key in ("GATE_BLOCKED", "INSTANTIATED", "ERROR", "NETWORK", "LEAKED",
                     "SHORTNAME", "PARSED", "INPUT_BYTES", "CELL_START",
                     "DEFAULT_READER_FEATURES", "SUPPORTS_AUTOTYPE",
@@ -249,7 +381,8 @@ def parse_observations(stdout: str, stderr: str = "") -> Dict[str, str]:
                     "NETWORK_ATTEMPTS", "NETWORK_SUCCESS", "CONCURRENCY",
                     "SERVICE_UNAVAILABLE", "AVAILABILITY", "OBJECT_MUTATED",
                     "AUTHZ_RESULT", "AUTHZ_NOTE", "JAVA_VERSION",
-                    "JDK8_RUNTIME_ACTIVE"):
+                    "JDK8_RUNTIME_ACTIVE", "RESIDUAL_ID", "RESIDUAL_STATUS",
+                    "RESIDUAL_FALSIFIER"):
             if line.startswith(key + "="):
                 obs[key] = line[len(key) + 1:]
     if "ERROR" not in obs:
@@ -344,6 +477,7 @@ class JavaMatrixRunner:
             "cmd": "",
             "runner_policy": RUNNER_POLICY_VERSION,
         }
+        result.update(_cell_metadata(cell))
         result.update(self._runtime_fields(runtime))
         return result
 
@@ -372,6 +506,7 @@ class JavaMatrixRunner:
             result = self.runner.run(
                 java_cmd,
                 cwd=out,
+                env_extra=_cell_experiment_env(cell),
                 operation="loopback_connect",
                 operation_detail="mechanism-level PoC %s (JNDI/HTTP limited to 127.0.0.1)" % spec.class_name,
                 timeout=cell.timeout,
@@ -389,6 +524,7 @@ class JavaMatrixRunner:
                 "stderr": str(exc), "cmd": " ".join(java_cmd),
                 "runner_policy": RUNNER_POLICY_VERSION,
             }
+            denied.update(_cell_metadata(cell))
             denied.update(self._runtime_fields(runtime))
             return denied
         obs = parse_observations(result.stdout, result.stderr)
@@ -412,6 +548,7 @@ class JavaMatrixRunner:
             "cmd": " ".join(java_cmd),
             "runner_policy": RUNNER_POLICY_VERSION,
         }
+        result_payload.update(_cell_metadata(cell))
         result_payload.update(self._runtime_fields(runtime))
         return result_payload
 
@@ -453,6 +590,7 @@ class JavaMatrixRunner:
                         "observations": {},
                         "cmd": " ".join(compiled.cmd),
                         }
+                        item.update(_cell_metadata(cell))
                         item.update(self._runtime_fields(runtime))
                         results.append(item)
                     continue
@@ -495,11 +633,18 @@ class ShellMatrixRunner:
       EVIDENCE=<text>           side-effect proof (marker file / DB row / log line)
       GATE_BLOCKED=<reason>     config/precondition blocked the path
       ERROR=<exception>         runtime error observed
+      STEP=<step-id>            ordered state/operation step reached
+      STEP_EVIDENCE=<detail>    evidence for that step
+      STATE=<state-id>          observed state checkpoint
+      RESIDUAL_ID=<rr-id>       declared residual identity under test
+      RESIDUAL_STATUS=<status>  explicit residual outcome marker
+      RESIDUAL_FALSIFIER=<id>   bounded residual falsifier code
 
     Loopback-only egress is enforced by the same static source scan used for
     Java PoCs; any non-loopback URL/IP in the script is refused before run.
     Cells receive VULNGATE_VERSION / VULNGATE_SAFE_MODE / VULNGATE_PRECONDITION
-    / VULNGATE_FEATURES via environment.
+    / VULNGATE_FEATURES plus bounded sequence/concurrency metadata via
+    environment.
     """
 
     def __init__(self, workspace: Path, target: str, round_no: int,
@@ -529,7 +674,7 @@ class ShellMatrixRunner:
     def run_cell(self, spec: ShellPOCSpec, cell: MatrixCell) -> Dict:
         script = self.src_dir / spec.script
         if not script.exists():
-            return {
+            result = {
                 "candidate_id": spec.candidate_id,
                 "poc_script": spec.script,
                 "version": cell.version,
@@ -540,13 +685,15 @@ class ShellMatrixRunner:
                 "authz_assertion": assert_authz_observations(cell.authz, {}),
                 "lang": "shell",
             }
+            result.update(_cell_metadata(cell))
+            return result
         egress = scan_source_egress(
             script.read_text(encoding="utf-8", errors="replace"), str(script),
             self.staging_hosts if self.authorized_staging else None)
         if egress:
             detail = "PoC 脚本含非回环网络目标: %s" % "; ".join(sorted(set(egress))[:6])
             self.approval.request("external_egress", detail)
-            return {
+            result = {
                 "candidate_id": spec.candidate_id,
                 "poc_script": spec.script,
                 "version": cell.version,
@@ -556,6 +703,8 @@ class ShellMatrixRunner:
                 "stderr": "EGRESS_DENIED " + detail,
                 "lang": "shell",
             }
+            result.update(_cell_metadata(cell))
+            return result
         env_extra = {
             "VULNGATE_VERSION": cell.version,
             "VULNGATE_SAFE_MODE": "true" if cell.safe_mode else "false",
@@ -564,6 +713,9 @@ class ShellMatrixRunner:
             "VULNGATE_TARGET_URL": spec.urls.get(cell.version, spec.env.get("VULNGATE_TARGET_URL", "")),
         }
         env_extra.update(spec.env)
+        # Structured experiment metadata wins over free-form PoC environment
+        # values, just like the authorization context below.
+        env_extra.update(_cell_experiment_env(cell))
         # Structured authorization context wins over free-form PoC env values;
         # credentials are never part of this contract.
         env_extra.update(authz_env(cell.authz))
@@ -578,7 +730,7 @@ class ShellMatrixRunner:
                 timeout=cell.timeout,
             )
         except PermissionError as exc:
-            return {
+            denied = {
                 "candidate_id": spec.candidate_id, "poc_script": spec.script,
                 "version": cell.version, "safe_mode": cell.safe_mode,
                 "features": cell.features, "precondition": cell.precondition,
@@ -589,9 +741,11 @@ class ShellMatrixRunner:
                 "stderr": str(exc), "cmd": " ".join(cmd), "lang": "shell",
                 "runner_policy": RUNNER_POLICY_VERSION,
             }
+            denied.update(_cell_metadata(cell))
+            return denied
         obs = parse_observations(result.stdout, result.stderr)
         authz_assertion = assert_authz_observations(cell.authz, obs)
-        return {
+        result_payload = {
             "candidate_id": spec.candidate_id,
             "poc_script": spec.script,
             "version": cell.version,
@@ -610,6 +764,8 @@ class ShellMatrixRunner:
             "lang": "shell",
             "runner_policy": RUNNER_POLICY_VERSION,
         }
+        result_payload.update(_cell_metadata(cell))
+        return result_payload
 
     def _write_cells(self, candidate_id: str, cells: List[Dict]) -> None:
         d = self.matrix_dir / candidate_id
@@ -620,6 +776,118 @@ class ShellMatrixRunner:
 
 
 _FALSY_MARKERS = ("", "true", "yes", "ok", "none", "null", "0", "false")
+
+
+def _trace_values(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return [str(item)[:240] for item in value[:32] if str(item).strip()]
+    if value is None or not str(value).strip():
+        return []
+    return [str(value)[:240]]
+
+
+def _capability_name(value: Any, allowed: List[str]) -> str:
+    """Extract a declared capability id from one PoC trace value."""
+    text = str(value or "").strip()
+    for candidate in (text, text.split("=", 1)[0].strip(),
+                      text.split(":", 1)[0].strip()):
+        if candidate in allowed:
+            return candidate
+    return ""
+
+
+def _transition_name(value: Any) -> str:
+    text = str(value or "").strip()
+    if "=" in text:
+        text = text.split("=", 1)[0].strip()
+    if ":" in text:
+        text = text.split(":", 1)[0].strip()
+    if "->" not in text:
+        return ""
+    left, right = (part.strip() for part in text.split("->", 1))
+    return "%s->%s" % (left, right) if left and right else ""
+
+
+def _capability_cell_evidence(cell: Dict[str, Any], obs: Dict[str, Any]
+                              ) -> Optional[Dict[str, Any]]:
+    """Summarize intermediate capability observations without judging impact."""
+    experiment = cell.get("experiment") or {}
+    contract = normalize_capability_contract(
+        cell.get("capability_contract") or experiment.get("capability_contract"))
+    required = list(contract.get("required_capabilities") or [])
+    if not required:
+        return None
+    capability_trace = _trace_values(obs.get("CAPABILITY_TRACE"))
+    capability_evidence = _trace_values(obs.get("CAPABILITY_EVIDENCE"))
+    transition_trace = _trace_values(obs.get("TRANSITION_TRACE"))
+    transition_evidence = _trace_values(obs.get("TRANSITION_EVIDENCE"))
+    observed = []
+    for raw in capability_trace:
+        name = _capability_name(raw, required)
+        if name and name not in observed:
+            observed.append(name)
+    missing = [name for name in required if name not in observed]
+    evidence_capabilities = []
+    for raw in capability_evidence:
+        name = _capability_name(raw, required)
+        if name and name not in evidence_capabilities:
+            evidence_capabilities.append(name)
+    missing_capability_evidence = [name for name in observed
+                                   if name not in evidence_capabilities]
+    expected_transitions = [
+        "%s->%s" % (rule["from"], rule["to"])
+        for rule in contract.get("transition_rules", [])
+    ]
+    observed_transitions = []
+    for raw in transition_trace:
+        name = _transition_name(raw)
+        if name in expected_transitions and name not in observed_transitions:
+            observed_transitions.append(name)
+    missing_transitions = [name for name in expected_transitions
+                           if name not in observed_transitions]
+    evidence_transitions = []
+    for raw in transition_evidence:
+        name = _transition_name(raw)
+        if name in expected_transitions and name not in evidence_transitions:
+            evidence_transitions.append(name)
+    missing_transition_evidence = [name for name in observed_transitions
+                                   if name not in evidence_transitions]
+    effect_kind = str(obs.get("EFFECT_KIND", "")).strip().lower()
+    effect = str(obs.get("EFFECT", obs.get("SIDE_EFFECT", ""))).strip()
+    safe_effect = any(marker in effect_kind
+                      for marker in ("canary", "simulat", "shape-only", "in-memory"))
+    typed_effect_observed = bool(effect_kind and effect and not safe_effect)
+    if not capability_trace:
+        status = "no-trace"
+    elif (missing or missing_transitions or missing_capability_evidence or
+          missing_transition_evidence or
+          (contract.get("typed_effect_required") and not typed_effect_observed)):
+        status = "partial"
+    else:
+        status = "complete"
+    return {
+        "version": cell.get("version"),
+        "safe": cell.get("safe_mode"),
+        "precondition": cell.get("precondition"),
+        "declared_capabilities": required,
+        "observed_capabilities": observed,
+        "missing_capabilities": missing,
+        "capability_evidence_ids": evidence_capabilities,
+        "missing_capability_evidence": missing_capability_evidence,
+        "declared_transitions": expected_transitions,
+        "observed_transitions": observed_transitions,
+        "missing_transitions": missing_transitions,
+        "transition_evidence_ids": evidence_transitions,
+        "missing_transition_evidence": missing_transition_evidence,
+        "capability_trace": capability_trace,
+        "capability_evidence": capability_evidence,
+        "transition_trace": transition_trace,
+        "transition_evidence": transition_evidence,
+        "status": status,
+        "typed_effect_required": bool(contract.get("typed_effect_required")),
+        "typed_effect_observed": typed_effect_observed,
+        "claim_status": "not-a-finding",
+    }
 
 
 def classify_s4_execution(cells: List[Dict]) -> Dict[str, object]:
@@ -765,6 +1033,45 @@ def converge_s4_cells(workspace: Path, target: str, round_no: int,
                     "proxy_timeout_does_not_override": True}
 
 
+_RESIDUAL_ID = re.compile(r"^rr-[0-9a-f]{20}$")
+_RESIDUAL_CODE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def _residual_cell_ref(cell: Dict[str, Any], residual_id: str) -> str:
+    """Return a non-sensitive, stable reference for one S4 cell."""
+    core = "%s|%s|%s|%s|%s" % (
+        cell.get("candidate_id", ""), residual_id, cell.get("version", ""),
+        bool(cell.get("safe_mode")), cell.get("precondition", ""))
+    return "s4c-" + hashlib.sha256(core.encode("utf-8", errors="replace")).hexdigest()[:20]
+
+
+def _residual_execution_state(cell: Dict[str, Any], obs: Dict[str, Any]) -> str:
+    if cell.get("precondition_status") == RUNTIME_UNAVAILABLE:
+        return "precondition-unavailable"
+    blocked = str(obs.get("GATE_BLOCKED", "")).strip().lower()
+    if blocked and blocked not in _FALSY_MARKERS:
+        return "gate-blocked"
+    if (isinstance(cell.get("returncode"), int)
+            and cell.get("returncode") == 0
+            and not cell.get("compile_error")
+            and not cell.get("harness_error")
+            and not cell.get("timed_out")
+            and not obs.get("ERROR")
+            and not obs.get("ENV_ERROR")):
+        return "executed"
+    if cell.get("returncode") is not None or cell.get("harness_error") \
+            or cell.get("compile_error") or cell.get("timed_out"):
+        return "run-failed"
+    return "unexecuted"
+
+
+def _declared_residual_contracts(cell: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    experiment = cell.get("experiment") or {}
+    rows = normalize_residual_contracts(
+        cell.get("residual_contracts") or experiment.get("residual_contracts"))
+    return {row["residual_id"]: row for row in rows}
+
+
 def summarize_candidate(cells: List[Dict]) -> Dict:
     """Derive runtime facts from a candidate's cell results (data-driven, no hard-coding)."""
     harness_errors = [c.get("harness_error", "") for c in cells if c.get("harness_error")]
@@ -780,8 +1087,11 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
     safe_equivalent = []
     effect_evidence = []
     availability_proof = []
+    experiment_evidence = []
+    capability_evidence = []
     authz_results = []
     authz_boundary_violations = []
+    residual_falsifiers = []
 
     def truthy(v: str) -> bool:
         # LLM-authored PoCs may emit INSTANTIATED=false / GATE_BLOCKED=none /
@@ -790,6 +1100,55 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
 
     for c in cells:
         obs = c.get("observations", {})
+        if not isinstance(obs, dict):
+            obs = {}
+        experiment = c.get("experiment") or {}
+        declared_sequence = c.get("sequence", experiment.get("sequence", [])) or []
+        declared_concurrency = c.get(
+            "concurrency", experiment.get("concurrency", 1))
+        declared_probe = c.get(
+            "availability_probe", experiment.get("availability_probe", False))
+        if not isinstance(declared_sequence, list):
+            declared_sequence = [str(declared_sequence)] if declared_sequence else []
+        try:
+            declared_workers = int(declared_concurrency or 1)
+        except (TypeError, ValueError):
+            declared_workers = 1
+        step_trace = obs.get("STEP_TRACE", [])
+        step_evidence = obs.get("STEP_EVIDENCE", [])
+        state_trace = obs.get("STATE_TRACE", [])
+        if not isinstance(step_trace, list):
+            step_trace = [str(step_trace)] if step_trace else []
+        if not isinstance(step_evidence, list):
+            step_evidence = [str(step_evidence)] if step_evidence else []
+        if not isinstance(state_trace, list):
+            state_trace = [str(state_trace)] if state_trace else []
+        if declared_sequence or declared_workers > 1 or declared_probe \
+                or step_trace or step_evidence or state_trace:
+            experiment_row = {
+                "version": c.get("version"),
+                "safe": c.get("safe_mode"),
+                "precondition": c.get("precondition"),
+                "declared_sequence": list(declared_sequence),
+                "declared_concurrency": declared_workers,
+                "declared_availability_probe": bool(declared_probe),
+                "sequence_status": sequence_trace_status(
+                    [str(step) for step in declared_sequence],
+                    [str(step) for step in step_trace]),
+                "step_trace": [str(x)[:240] for x in step_trace[:32]],
+                "step_evidence": [str(x)[:240] for x in step_evidence[:32]],
+                "state_trace": [str(x)[:240] for x in state_trace[:32]],
+                "warnings": list(experiment.get("warnings", [])),
+            }
+            capability_row = _capability_cell_evidence(c, obs)
+            if capability_row:
+                experiment_row["capability"] = capability_row
+                capability_evidence.append(capability_row)
+            experiment_evidence.append(experiment_row)
+        else:
+            capability_row = _capability_cell_evidence(c, obs)
+            if capability_row:
+                capability_evidence.append(capability_row)
         assertion = c.get("authz_assertion")
         if assertion is None and c.get("authz"):
             assertion = assert_authz_observations(c.get("authz"), obs)
@@ -877,6 +1236,31 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
             if ev and ev.lower() not in _FALSY_MARKERS:
                 rec["evidence"] = ev[:200]
             http_evidence.append(rec)
+        residual_id = str(obs.get("RESIDUAL_ID", "")).strip().lower()
+        residual_status = str(obs.get("RESIDUAL_STATUS", "")).strip().lower()[:40]
+        residual_code = str(obs.get("RESIDUAL_FALSIFIER", "")).strip().lower()[:64]
+        if _RESIDUAL_ID.fullmatch(residual_id):
+            effect_observed = bool(
+                (effect and effect_kind and not any(marker in effect_kind for marker in
+                                                    ("canary", "simulat", "shape-only", "in-memory")))
+                or (lk and lk.lower() not in _FALSY_MARKERS)
+                or (truthy(obs.get("NETWORK")) and "://" in str(obs.get("NETWORK")))
+                or (ev and ev.lower() not in _FALSY_MARKERS)
+                or bool(assertion and assertion.get("boundary_violation")))
+            contract = _declared_residual_contracts(c).get(residual_id, {})
+            residual_falsifiers.append({
+                "residual_id": residual_id,
+                "status": residual_status,
+                "falsifier_code": residual_code if _RESIDUAL_CODE.fullmatch(
+                    residual_code) else "",
+                "execution_state": _residual_execution_state(c, obs),
+                "effect_observed": effect_observed,
+                "contract_declared": bool(contract),
+                "contract_match": residual_code in set(
+                    contract.get("allowed_falsifiers") or []),
+                "cell_ref": _residual_cell_ref(c, residual_id),
+                "claim_status": "not-a-finding",
+            })
     summary = {
         "instantiated": instantiated,
         "errors": errors,
@@ -889,8 +1273,12 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
         "safe_equivalent": safe_equivalent,
         "effect_evidence": effect_evidence,
         "availability_proof": availability_proof,
+        "experiment_evidence": experiment_evidence,
+        "capability_evidence": capability_evidence,
         "authz_results": authz_results,
         "authz_boundary_violations": authz_boundary_violations,
+        "residual_falsifiers": residual_falsifiers[:32],
+        "residual_falsifier_count": len(residual_falsifiers),
         "cells_ran": len(cells),
     }
     if harness_errors:

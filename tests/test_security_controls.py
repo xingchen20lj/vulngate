@@ -511,12 +511,28 @@ class PersistenceTests(ControlFixture):
 
     def test_static_candidates_read_control_map_and_differential(self):
         from agent.analysis import differential as DIFF
+        from agent.analysis import capability_graph as CAP
+        from agent.analysis import semantic_guards as GUARD
+        from agent.analysis import semantic_calls as CALLS
+        from agent.analysis import semantic_controlflow as CONTROLFLOW
+        from agent.analysis import semantic_ast as AST
+        from agent.analysis import semantic_paths as SEM
         static = CTL.static_candidates(self.store)
         sources = {c["source"] for c in static}
         self.assertIn("control-map", sources)
-        self.assertTrue(sources <= {"control-map", "differential"})
+        self.assertTrue(sources <= {"control-map", "differential", "capability-graph",
+                                    "semantic-paths", "semantic-guards",
+                                    "semantic-calls", "semantic-controlflow",
+                                    "semantic-ast"})
         self.assertEqual(len(self.candidates()) + len(
-            DIFF.load_differential_candidates(self.store)), len(static))
+            DIFF.load_differential_candidates(self.store)) + len(
+            CAP.load_capability_candidates(self.store)) + len(
+            SEM.load_semantic_candidates(self.store)) + len(
+            GUARD.load_semantic_guard_candidates(self.store)) + len(
+            CALLS.load_semantic_call_candidates(self.store)) + len(
+            CONTROLFLOW.load_semantic_controlflow_candidates(self.store)) + len(
+            AST.load_semantic_ast_candidates(self.store)),
+            len(static))
 
     def test_merging_never_displaces_an_existing_id(self):
         existing = [{"candidate_id": "ctl-authz-0001", "surface": "kept"}]
@@ -525,7 +541,7 @@ class PersistenceTests(ControlFixture):
         kept = [c for c in pool if c["candidate_id"] == "ctl-authz-0001"]
         self.assertEqual([existing[0]], kept)
         # Everything else from the store is added, ahead of the given pool.
-        self.assertEqual(len(self.candidates()) - 1, len(added))
+        self.assertEqual(len(CTL.static_candidates(self.store)) - 1, len(added))
         self.assertEqual([c["candidate_id"] for c in pool
                           if c["candidate_id"] in added], added)
         self.assertEqual(pool[-1], existing[0])

@@ -20,7 +20,20 @@ Storage layout follows spec §3::
     ├── uncovered-regions.json   coverage-summary.json
     ├── control-map.json         control-candidates.json        (PR4, spec §11)
     ├── sibling-groups.json      differential-index.json        (PR4, spec §12)
-    └── differential-candidates.json
+    ├── differential-candidates.json
+    ├── capability-graph.json    capability-candidates.json     (research paths)
+    ├── semantic-path-evidence.json semantic-path-candidates.json (path evidence)
+    ├── semantic-guard-evidence.json semantic-guard-candidates.json (guard evidence)
+    ├── semantic-call-evidence.json semantic-call-candidates.json (call binding)
+    ├── semantic-controlflow-evidence.json semantic-controlflow-candidates.json (branch evidence)
+    ├── semantic-ast-evidence.json semantic-ast-candidates.json (Python AST evidence)
+    ├── threat-model.json        (attacker-path / trust-boundary research view)
+    ├── research-strategy.json   (cross-artifact S2 research agenda)
+    ├── research-agenda.json     (bounded active research queue)
+    ├── research-agenda-outcomes.json (bounded agenda execution feedback)
+    ├── research-budget.json     (outcome-adaptive finite budget policy)
+    ├── research-guidance.json   (bounded next-action scheduling layer)
+    └── inventory-summary.json
 
 Files not yet produced by an implemented phase are omitted rather than written
 empty, so ``coverage-summary.json`` can always state which indices it had.
@@ -38,9 +51,16 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..tools import search as srch
+from . import capability_graph as capability_analysis
 from . import controls as control_map
 from . import differential as differential_analysis
 from . import models
+from . import semantic_paths as semantic_path_analysis
+from . import semantic_guards as semantic_guard_analysis
+from . import semantic_calls as semantic_call_analysis
+from . import semantic_controlflow as semantic_controlflow_analysis
+from . import semantic_ast as semantic_ast_analysis
+from . import threat_model as threat_model_analysis
 from .callgraph import build_call_graph
 from .dataflow import build_flow_index
 from .languages import (JVM_LANGUAGES, ExcludedDir, SourceFilter, classify_file,
@@ -684,6 +704,20 @@ class InventoryResult:
     differential: Dict[str, Any] = field(default_factory=dict)
     sibling_groups: List[Dict[str, Any]] = field(default_factory=list)
     differential_candidates: List[Dict[str, Any]] = field(default_factory=list)
+    #: Bounded capability-primitive graph and its S2 research candidates.
+    capability_graph: Dict[str, Any] = field(default_factory=dict)
+    capability_candidates: List[Dict[str, Any]] = field(default_factory=list)
+    #: Bounded source-local order and same-symbol data-flow evidence.
+    semantic_path_evidence: Dict[str, Any] = field(default_factory=dict)
+    semantic_path_candidates: List[Dict[str, Any]] = field(default_factory=list)
+    semantic_guard_evidence: Dict[str, Any] = field(default_factory=dict)
+    semantic_guard_candidates: List[Dict[str, Any]] = field(default_factory=list)
+    semantic_call_evidence: Dict[str, Any] = field(default_factory=dict)
+    semantic_call_candidates: List[Dict[str, Any]] = field(default_factory=list)
+    semantic_controlflow_evidence: Dict[str, Any] = field(default_factory=dict)
+    semantic_controlflow_candidates: List[Dict[str, Any]] = field(default_factory=list)
+    semantic_ast_evidence: Dict[str, Any] = field(default_factory=dict)
+    semantic_ast_candidates: List[Dict[str, Any]] = field(default_factory=list)
     symbol_read_failures: Dict[str, str] = field(default_factory=dict)
     callgraph_summary: Dict[str, Any] = field(default_factory=dict)
     flow_summary: Dict[str, Any] = field(default_factory=dict)
@@ -756,6 +790,18 @@ class InventoryResult:
             "differential": self.differential.get("summary", {}),
             "sibling_groups": len(self.sibling_groups),
             "differential_candidates": len(self.differential_candidates),
+            "capability_graph": self.capability_graph.get("summary", {}),
+            "capability_candidates": len(self.capability_candidates),
+            "semantic_paths": self.semantic_path_evidence.get("summary", {}),
+            "semantic_path_candidates": len(self.semantic_path_candidates),
+            "semantic_guards": self.semantic_guard_evidence.get("summary", {}),
+            "semantic_guard_candidates": len(self.semantic_guard_candidates),
+            "semantic_calls": self.semantic_call_evidence.get("summary", {}),
+            "semantic_call_candidates": len(self.semantic_call_candidates),
+            "semantic_controlflow": self.semantic_controlflow_evidence.get("summary", {}),
+            "semantic_controlflow_candidates": len(self.semantic_controlflow_candidates),
+            "semantic_ast": self.semantic_ast_evidence.get("summary", {}),
+            "semantic_ast_candidates": len(self.semantic_ast_candidates),
             "records_relinked": self.relinked,
         }
 
@@ -779,6 +825,17 @@ class InventoryResult:
             "flow_summary": self.flow_summary,
             "control_map": self.control_map,
             "differential": self.differential,
+            "capability_graph": self.capability_graph,
+            "semantic_path_evidence": self.semantic_path_evidence,
+            "semantic_path_candidates": self.semantic_path_candidates,
+            "semantic_guard_evidence": self.semantic_guard_evidence,
+            "semantic_guard_candidates": self.semantic_guard_candidates,
+            "semantic_call_evidence": self.semantic_call_evidence,
+            "semantic_call_candidates": self.semantic_call_candidates,
+            "semantic_controlflow_evidence": self.semantic_controlflow_evidence,
+            "semantic_controlflow_candidates": self.semantic_controlflow_candidates,
+            "semantic_ast_evidence": self.semantic_ast_evidence,
+            "semantic_ast_candidates": self.semantic_ast_candidates,
             "symbol_read_failures": dict(self.symbol_read_failures),
         }
 
@@ -827,6 +884,18 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
     diff_dict: Dict[str, Any] = {}
     sibling_groups: List[Dict[str, Any]] = []
     diff_candidates: List[Dict[str, Any]] = []
+    capability_dict: Dict[str, Any] = {}
+    capability_candidates: List[Dict[str, Any]] = []
+    semantic_dict: Dict[str, Any] = {}
+    semantic_candidates: List[Dict[str, Any]] = []
+    semantic_guard_dict: Dict[str, Any] = {}
+    semantic_guard_candidates: List[Dict[str, Any]] = []
+    semantic_call_dict: Dict[str, Any] = {}
+    semantic_call_candidates: List[Dict[str, Any]] = []
+    semantic_controlflow_dict: Dict[str, Any] = {}
+    semantic_controlflow_candidates: List[Dict[str, Any]] = []
+    semantic_ast_dict: Dict[str, Any] = {}
+    semantic_ast_candidates: List[Dict[str, Any]] = []
     if with_flows:
         symbol_records, read_failures = extract_symbols(root, production_rels, flt)
         # Replace PR1's ``<file>#<nearest-declaration>`` hint with the real
@@ -858,6 +927,27 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
         sibling_groups = differential_result.group_dicts()
         diff_candidates = differential_analysis.differential_candidates(
             differential_result.findings)
+        capability_dict = capability_analysis.build_capability_graph(
+            entries, sinks, flows, controls)
+        capability_candidates = list(capability_dict.get("candidates") or [])
+        semantic_dict = semantic_path_analysis.build_semantic_path_evidence(
+            root, entries, sinks, flows, controls, symbol_records,
+            control_map=cmap)
+        semantic_candidates = list(semantic_dict.get("candidates") or [])
+        semantic_guard_dict = semantic_guard_analysis.build_semantic_guard_evidence(
+            root, semantic_dict)
+        semantic_guard_candidates = list(semantic_guard_dict.get("candidates") or [])
+        semantic_call_dict = semantic_call_analysis.build_semantic_call_evidence(
+            root, entries, sinks, flows, symbol_records, call_edges)
+        semantic_call_candidates = list(semantic_call_dict.get("candidates") or [])
+        semantic_controlflow_dict = (
+            semantic_controlflow_analysis.build_semantic_controlflow_evidence(
+                root, semantic_guard_dict))
+        semantic_controlflow_candidates = list(
+            semantic_controlflow_dict.get("candidates") or [])
+        semantic_ast_dict = semantic_ast_analysis.build_semantic_ast_evidence(
+            root, semantic_controlflow_dict)
+        semantic_ast_candidates = list(semantic_ast_dict.get("candidates") or [])
 
     entry_counts: Dict[str, int] = {}
     for entry in entries:
@@ -893,6 +983,18 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
         control_map=cmap, control_candidates=control_candidates,
         differential=diff_dict, sibling_groups=sibling_groups,
         differential_candidates=diff_candidates,
+        capability_graph=capability_dict,
+        capability_candidates=capability_candidates,
+        semantic_path_evidence=semantic_dict,
+        semantic_path_candidates=semantic_candidates,
+        semantic_guard_evidence=semantic_guard_dict,
+        semantic_guard_candidates=semantic_guard_candidates,
+        semantic_call_evidence=semantic_call_dict,
+        semantic_call_candidates=semantic_call_candidates,
+        semantic_controlflow_evidence=semantic_controlflow_dict,
+        semantic_controlflow_candidates=semantic_controlflow_candidates,
+        semantic_ast_evidence=semantic_ast_dict,
+        semantic_ast_candidates=semantic_ast_candidates,
         relinked=relinked,
         non_source_files=universe.non_source_files,
         scanned_files=universe.scanned_files,
@@ -946,6 +1048,59 @@ def persist_inventory(store: CoverageStore, result: InventoryResult,
         written[differential_analysis.DIFFERENTIAL_CANDIDATE_INDEX] = str(
             store.write(differential_analysis.DIFFERENTIAL_CANDIDATE_INDEX,
                         result.differential_candidates))
+    if result.capability_graph:
+        written[capability_analysis.CAPABILITY_GRAPH_INDEX] = str(
+            store.write(capability_analysis.CAPABILITY_GRAPH_INDEX,
+                        result.capability_graph))
+        written[capability_analysis.CAPABILITY_CANDIDATE_INDEX] = str(
+            store.write(capability_analysis.CAPABILITY_CANDIDATE_INDEX,
+                        result.capability_candidates))
+    if result.semantic_path_evidence:
+        written[semantic_path_analysis.SEMANTIC_PATH_INDEX] = str(
+            store.write(semantic_path_analysis.SEMANTIC_PATH_INDEX,
+                        result.semantic_path_evidence))
+        written[semantic_path_analysis.SEMANTIC_CANDIDATE_INDEX] = str(
+            store.write(semantic_path_analysis.SEMANTIC_CANDIDATE_INDEX,
+                        result.semantic_path_candidates))
+    if result.semantic_guard_evidence:
+        written[semantic_guard_analysis.SEMANTIC_GUARD_INDEX] = str(
+            store.write(semantic_guard_analysis.SEMANTIC_GUARD_INDEX,
+                        result.semantic_guard_evidence))
+        written[semantic_guard_analysis.SEMANTIC_GUARD_CANDIDATE_INDEX] = str(
+            store.write(semantic_guard_analysis.SEMANTIC_GUARD_CANDIDATE_INDEX,
+                        result.semantic_guard_candidates))
+    if result.semantic_call_evidence:
+        written[semantic_call_analysis.SEMANTIC_CALL_INDEX] = str(
+            store.write(semantic_call_analysis.SEMANTIC_CALL_INDEX,
+                        result.semantic_call_evidence))
+        written[semantic_call_analysis.SEMANTIC_CALL_CANDIDATE_INDEX] = str(
+            store.write(semantic_call_analysis.SEMANTIC_CALL_CANDIDATE_INDEX,
+                        result.semantic_call_candidates))
+    if result.semantic_controlflow_evidence:
+        written[semantic_controlflow_analysis.SEMANTIC_CONTROLFLOW_INDEX] = str(
+            store.write(semantic_controlflow_analysis.SEMANTIC_CONTROLFLOW_INDEX,
+                        result.semantic_controlflow_evidence))
+        written[semantic_controlflow_analysis.SEMANTIC_CONTROLFLOW_CANDIDATE_INDEX] = str(
+            store.write(semantic_controlflow_analysis.SEMANTIC_CONTROLFLOW_CANDIDATE_INDEX,
+                        result.semantic_controlflow_candidates))
+    if result.semantic_ast_evidence:
+        written[semantic_ast_analysis.SEMANTIC_AST_INDEX] = str(
+            store.write(semantic_ast_analysis.SEMANTIC_AST_INDEX,
+                        result.semantic_ast_evidence))
+        written[semantic_ast_analysis.SEMANTIC_AST_CANDIDATE_INDEX] = str(
+            store.write(semantic_ast_analysis.SEMANTIC_AST_CANDIDATE_INDEX,
+                        result.semantic_ast_candidates))
+    # The threat model is a deterministic join of the inventory, control map,
+    # and capability graph.  Persist it beside the source ledger so the
+    # scheduler and both pipeline drivers consume the same attacker-path view.
+    threat_model = threat_model_analysis.build_threat_model(
+        entries=result.entries, sinks=result.sinks, flows=result.flows,
+        control_map=result.control_map,
+        capability_graph=result.capability_graph,
+        reachability=result.sink_reachability, target=result.target,
+        target_type=target_type or "")
+    written[threat_model_analysis.THREAT_MODEL_INDEX] = str(
+        store.write(threat_model_analysis.THREAT_MODEL_INDEX, threat_model))
     written["inventory-summary"] = str(store.write("inventory-summary", {
         "root": result.root, "target": result.target,
         "generated_at": result.generated_at, "elapsed_ms": result.elapsed_ms,
@@ -981,6 +1136,33 @@ def load_inventory(store: CoverageStore) -> Dict[str, Any]:
             differential_analysis.DIFFERENTIAL_INDEX) or {},
         differential_analysis.DIFFERENTIAL_CANDIDATE_INDEX: store.read_records(
             differential_analysis.DIFFERENTIAL_CANDIDATE_INDEX),
+        capability_analysis.CAPABILITY_GRAPH_INDEX: store.read(
+            capability_analysis.CAPABILITY_GRAPH_INDEX) or {},
+        capability_analysis.CAPABILITY_CANDIDATE_INDEX: store.read_records(
+            capability_analysis.CAPABILITY_CANDIDATE_INDEX),
+        semantic_path_analysis.SEMANTIC_PATH_INDEX: store.read(
+            semantic_path_analysis.SEMANTIC_PATH_INDEX) or {},
+        semantic_path_analysis.SEMANTIC_CANDIDATE_INDEX: store.read_records(
+            semantic_path_analysis.SEMANTIC_CANDIDATE_INDEX),
+        semantic_guard_analysis.SEMANTIC_GUARD_INDEX: store.read(
+            semantic_guard_analysis.SEMANTIC_GUARD_INDEX) or {},
+        semantic_guard_analysis.SEMANTIC_GUARD_CANDIDATE_INDEX: store.read_records(
+            semantic_guard_analysis.SEMANTIC_GUARD_CANDIDATE_INDEX),
+        semantic_call_analysis.SEMANTIC_CALL_INDEX: store.read(
+            semantic_call_analysis.SEMANTIC_CALL_INDEX) or {},
+        semantic_call_analysis.SEMANTIC_CALL_CANDIDATE_INDEX: store.read_records(
+            semantic_call_analysis.SEMANTIC_CALL_CANDIDATE_INDEX),
+        semantic_controlflow_analysis.SEMANTIC_CONTROLFLOW_INDEX: store.read(
+            semantic_controlflow_analysis.SEMANTIC_CONTROLFLOW_INDEX) or {},
+        semantic_controlflow_analysis.SEMANTIC_CONTROLFLOW_CANDIDATE_INDEX:
+            store.read_records(
+                semantic_controlflow_analysis.SEMANTIC_CONTROLFLOW_CANDIDATE_INDEX),
+        semantic_ast_analysis.SEMANTIC_AST_INDEX: store.read(
+            semantic_ast_analysis.SEMANTIC_AST_INDEX) or {},
+        semantic_ast_analysis.SEMANTIC_AST_CANDIDATE_INDEX: store.read_records(
+            semantic_ast_analysis.SEMANTIC_AST_CANDIDATE_INDEX),
+        threat_model_analysis.THREAT_MODEL_INDEX: threat_model_analysis.load_threat_model(
+            store.workspace, store.target),
         "inventory-summary": store.read("inventory-summary") or {},
         "call-graph-summary": store.read("call-graph-summary") or {},
         "flow-summary": store.read("flow-summary") or {},

@@ -170,6 +170,12 @@ def _evidence_lines(summary: Dict[str, Any]) -> list:
             az.get("case_id", "?"), az.get("principal", "?"), az.get("role", "?"),
             az.get("tenant_id", "?"), az.get("object_id", "?"),
             a.get("status", "?"), a.get("boundary_violation", False)))
+    for residual in summary.get("residual_falsifiers", [])[:8]:
+        lines.append("RESIDUAL=%s status=%s falsifier=%s execution=%s effect=%s" % (
+            residual.get("residual_id", "?"), residual.get("status", ""),
+            residual.get("falsifier_code", ""),
+            residual.get("execution_state", ""),
+            residual.get("effect_observed", False)))
     for issue in summary.get("validation_issues", [])[:4]:
         lines.append("VALIDATION_ISSUE=%s" % issue)
     lines.append("cells_ran=%d" % summary.get("cells_ran", 0))
