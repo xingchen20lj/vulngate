@@ -50,7 +50,7 @@
 | 33 | 结果自适应研究预算分配 | 已实现（bounded outcome-cost adaptive budget） | `research-budget-v1`、`research-budget` CLI、S8 surface budget、agenda budget hints、replay pack provenance | 按 research surface 汇总成本、信息增益、环境缺口和无信息重复；产生 recovery/exploit/explore/cooldown 策略并影响下一轮有限预算，保留探索与假设，不改变候选、CVSS、G4/G5 |
 | 34 | 语义路径证据与有限同符号数据流 | 已实现（bounded semantic path evidence） | `semantic-path-evidence-v1`、`semantic-path-evidence.json`、`semantic-path-candidates.json`、`semantic-paths` CLI | 区分控制在 sink 前/后/同一行及语义块关系；对同符号参数/简单别名给出 direct/propagated/not-traced，跨符号明确 unresolved；不复制源码、不升级 candidate/CVSS/G4/G5 |
 | 35 | 语义守卫姿态与主体绑定 | 已实现（bounded semantic guard evidence） | `semantic-guard-evidence-v1`、`semantic-guard-evidence.json`、`semantic-guard-candidates.json`、`semantic-guards` CLI | 区分 terminating/nested/non-branch/未解析分支姿态及 overlap/mismatch/unresolved 主体绑定；只生成 `not-a-finding` 研究线索，不声称 branch dominance、对象身份或授权绕过 |
-| 36 | 有界跨符号调用点参数/返回绑定 | 已实现（bounded interprocedural binding evidence） | `semantic-call-evidence-v1`、`semantic-call-evidence.json`、`semantic-call-candidates.json`、`semantic-calls` CLI | 对一跳调用点绑定实参/形参、有限传播污染参数、记录返回形状和 sink 参数绑定；跨符号 unresolved、静态线索保持 `not-a-finding`，不声称完整数据流或漏洞 |
+| 36 | 有界跨符号调用点参数/返回绑定 | 已实现（bounded interprocedural binding evidence；含多边传播与预算） | `semantic-call-evidence-v1`、`semantic-call-evidence.json`、`semantic-call-candidates.json`、`semantic-calls` CLI | 对 bounded flow 的多条调用边绑定实参/形参，识别简单 `parameter -> local alias -> return`，记录 `returned`/`assigned` 与深度/节点/路径/时间预算；超预算显式 gap，静态线索保持 `not-a-finding`，不声称完整数据流或漏洞 |
 | 37 | 有界控制流关系与备用路径 | 已实现（bounded control-flow relation evidence） | `semantic-controlflow-evidence-v1`、`semantic-controlflow-evidence.json`、`semantic-controlflow-candidates.json`、`semantic-controlflow` CLI | 区分可能支配、终止拒绝分支之后、`else`/`except` alternate path 和同块未验证检查；不声称完整 CFG、路径可行性或授权绕过 |
 | 38 | Python AST 结构见证与解析缺口 | 已实现（bounded Python-AST structural evidence） | `semantic-ast-evidence-v1`、`semantic-ast-evidence.json`、`semantic-ast-candidates.json`、`semantic-ast` CLI | 以语法树确认 Python 作用域、终止守卫、`else`/异常备用路径和解析状态；不声称完整 CFG、SSA、类型/运行时证明，其他语言保留显式降级 |
 | 39 | 变换结果绑定与清洗失效线索 | 已实现（bounded transform binding evidence） | `semantic-transform-evidence-v1`、`semantic-transform-evidence.json`、`semantic-transform-candidates.json`、`semantic-transforms` CLI | 区分校验/清洗结果真正绑定、被丢弃、被覆盖、未绑定和跨符号缺口；不声称 sanitizer 语义、SSA、完整别名或漏洞结论 |
@@ -556,6 +556,17 @@ S2→S4→S8 的单向契约：
 - 对控制和 sink 的有限 identifier token 做 subject/object binding：`overlap`、`mismatch`、`unresolved`、`cross-symbol-unverified`。`mismatch` 只表示值得人工追踪“检查了 A、操作了 B”，不表示已经存在越权；
 - 对满足基础控制图前置条件的路径生成 `semantic-subject-binding` 与 `semantic-branch-posture` 线索，写入完整静态候选池，同时保留稳定 ID、位置、`requires_manual_dataflow=true` 和 `claim_status=not-a-finding`；
 - 产物与 CLI 为 `state/<target>/coverage/semantic-guard-evidence.json`、`semantic-guard-candidates.json` 和 `python3 scripts/agent_cli.py semantic-guards <target> --workspace <audit-dir> --show-candidates --json`。两条 pipeline 共用同一份索引；后续可用 CFG、类型、DI 和运行时授权证据替换启发式层，而不改变既有闸门。
+
+## 阶段 36 增量：多边参数传播与返回别名
+
+在一跳调用绑定基础上，本增量只扩展已经由 call graph 选出的 bounded path，不重新猜测调用目标，也不新增平台抽象层：
+
+- 沿 `A -> B -> C -> Sink` 的已有路径逐边传递有限的 tainted parameter；每条边继续记录实参/形参绑定，最终 sink 只在有限标识符交集存在时记为 `bound`；
+- 在 callee 作用域内只识别简单标识符别名，例如 `local = value; return local`，并记录 `alias_map`、`returned_aliases` 和 `tainted_return_aliases`；transform、container、attribute、callback 或未解析 dispatch 保持 unresolved；
+- 对每条 flow 设置 `max_call_depth`、`max_propagation_nodes`、`max_propagation_paths` 与 `timeout_seconds`。预算触发会保留 flow 行并写入 `analysis_gaps`，不静默删除，也不转成“无漏洞”；
+- 所有新增记录、候选和预算摘要继续保持 `claim_status=not-a-finding`、`confidence=heuristic-nearby`、`requires_manual_dataflow=true`，不影响 S4/G4/G5、CVSS、Novelty 或 confirmed 状态。
+
+验收用例覆盖三段参数传播、局部别名返回和预算耗尽；该测试证明的是静态线索的可追踪性，不是历史 CVE recall/precision 或运行时效果。
 
 ## 阶段 36 初步实现：有界跨符号调用点参数/返回绑定
 

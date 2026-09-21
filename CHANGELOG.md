@@ -63,6 +63,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added `agent_cli.py semantic-calls` and merged interprocedural binding leads
   into the static S2 candidate pool without promoting static data flow to a
   finding or runtime effect.
+- Extended semantic call evidence across bounded multi-edge paths. Simple
+  `parameter -> local alias -> return` shapes now retain returned aliases and
+  `returned`/`assigned` call-site context; call-depth, node, path-count and
+  wall-clock budgets produce explicit analysis gaps instead of silently
+  dropping work. All rows and candidates remain `not-a-finding` and cannot
+  satisfy S4/G4/G5.
 - Added `semantic-controlflow-evidence-v1` and
   `semantic-controlflow-candidates.json`. S1 now records bounded structural
   relations for guarded branches, terminating rejection paths, and alternate

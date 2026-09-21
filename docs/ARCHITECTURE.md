@@ -79,6 +79,15 @@ dominance, or feasibility, and stores no raw source text. Its
 `semantic-call-candidates.json` entries remain `not-a-finding` with
 `requires_manual_dataflow=true`.
 
+The same layer performs a bounded multi-edge propagation over the path already
+selected by the call graph. It recognizes only simple identifier aliases such
+as `local = parameter` before `return local`, reports the alias and
+`returned`/`assigned` shape, and leaves transforms, containers, attributes and
+unresolved dispatch as gaps. Each row carries call-depth, node, path-count and
+wall-clock budgets; a budget hit is an explicit `analysis_gaps` state, never a
+negative result. This remains `heuristic-nearby` / `not-a-finding` evidence and
+cannot satisfy S4/G4/G5.
+
 ```bash
 python3 scripts/agent_cli.py semantic-calls <target> \
   --workspace <audit-dir> --show-candidates --json

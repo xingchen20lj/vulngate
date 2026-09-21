@@ -198,6 +198,15 @@ The call-binding candidates join the same deterministic S2 pool and are kept
 as a separate artifact so a later typed/CFG resolver can replace the lexical
 bridge without weakening the evidence gates.
 
+The bounded propagation pass now carries simple `parameter -> local alias ->
+return` shapes through every edge already present in a flow, rather than
+stopping at the first call. It records returned aliases and the caller's
+`returned`/`assigned` shape, while rejecting transforms, containers and
+attribute writes as unresolved. The layer has explicit call-depth, node,
+path-count and wall-clock budgets; exhausted work remains an explicit
+`analysis_gaps` row and is never interpreted as no flow. This is still lexical
+evidence, not a CFG, type/dispatch proof, runtime effect, or finding.
+
 ## Unreleased semantic control-flow evidence
 
 The guard layer can identify a likely terminating check or a nested branch, but

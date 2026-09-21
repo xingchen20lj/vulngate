@@ -246,6 +246,13 @@ call edge 记录调用点、实参到形参的绑定、被污染的 callee 参�
 reflection、callback、async、类型转换、变换语义、分支支配或路径可行性，也不保存源码原文；
 `semantic-call-candidates.json` 保持 `not-a-finding` 与 `requires_manual_dataflow=true`。
 
+在已选定的 bounded flow path 内，该层现在继续传播多条调用边，并识别有限的
+`parameter -> local alias -> return` 形状，例如 `local = value; return local`。返回记录同时保留
+返回别名以及调用点是 `returned` 还是 `assigned`；变换、容器、属性写入和未解析 dispatch 不会被猜成
+别名。每条记录都有 call depth、节点数、路径数和 wall-clock budget；预算耗尽会写入
+`analysis_gaps`，不能被解释为无数据流或安全。该层仍是 `heuristic-nearby` / `not-a-finding`，不满足
+S4/G4/G5。
+
 ```bash
 python3 scripts/agent_cli.py semantic-calls <target> \
   --workspace <audit-dir> --show-candidates --json

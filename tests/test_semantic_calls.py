@@ -96,6 +96,100 @@ class SemanticCallEvidenceTests(unittest.TestCase):
         self.assertEqual("tainted-return-likely", returned["status"])
         self.assertEqual("not-a-finding", evidence["claim_status"])
 
+    def test_simple_local_alias_is_traced_to_a_tainted_return(self):
+        root, entry, sink, flow, symbols, edges = self._fixture(
+            "def handler(path):\n"
+            "    return worker(path)\n"
+            "\n"
+            "\n"
+            "def worker(value):\n"
+            "    local = value\n"
+            "    return local\n"
+            "    os.system(value)\n",
+            callee_end=8)
+        evidence = semantic_calls.build_semantic_call_evidence(
+            root, [entry], [sink], [flow], symbols, edges)
+        returned = evidence["flows"][0]["call_steps"][0]["return_binding"]
+        self.assertEqual("tainted-return-likely", returned["status"])
+        self.assertEqual(["local"], returned["returned_aliases"])
+        self.assertEqual(["local"], returned["tainted_return_aliases"])
+        self.assertEqual({"local": "value"}, returned["alias_map"])
+        self.assertEqual("not-a-finding", evidence["flows"][0]["claim_status"])
+
+    def test_three_hop_argument_propagation_reaches_the_final_sink(self):
+        root = Path(tempfile.mkdtemp(prefix="vulngate-calls-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        source = (
+            "def handler(path):\n"
+            "    return worker(path)\n"
+            "\n"
+            "def worker(value):\n"
+            "    return middle(value)\n"
+            "\n"
+            "def middle(item):\n"
+            "    return sink_fn(item)\n"
+            "\n"
+            "def sink_fn(raw):\n"
+            "    os.system(raw)\n"
+        )
+        (root / "app.py").write_text(source, encoding="utf-8")
+        handler = "python:app.py#handler"
+        worker = "python:app.py#worker"
+        middle = "python:app.py#middle"
+        sink_fn = "python:app.py#sink_fn"
+        symbols = [
+            models.SymbolRecord(handler, "python", "app.py", 1, 2,
+                                "function", "handler", parameters=["path"]),
+            models.SymbolRecord(worker, "python", "app.py", 4, 5,
+                                "function", "worker", parameters=["value"]),
+            models.SymbolRecord(middle, "python", "app.py", 7, 8,
+                                "function", "middle", parameters=["item"]),
+            models.SymbolRecord(sink_fn, "python", "app.py", 10, 11,
+                                "function", "sink_fn", parameters=["raw"]),
+        ]
+        entry = models.EntryRecord("entry-1", "http", "app.py", 1,
+                                   handler, "query")
+        sink = models.SinkRecord("sink-1", "command-exec", "app.py", 11,
+                                 sink_fn, "os.system", "os.system(...)",
+                                 severity_hint="high")
+        flow = models.FlowRecord("flow-1", "entry-1", handler, "sink-1",
+                                 [handler, worker, middle, sink_fn])
+        edges = [
+            models.CallEdge(handler, worker, file="app.py", line=2,
+                            propagation="argument", callee_name="worker"),
+            models.CallEdge(worker, middle, file="app.py", line=5,
+                            propagation="argument", callee_name="middle"),
+            models.CallEdge(middle, sink_fn, file="app.py", line=8,
+                            propagation="argument", callee_name="sink_fn"),
+        ]
+        evidence = semantic_calls.build_semantic_call_evidence(
+            root, [entry], [sink], [flow], symbols, edges)
+        row = evidence["flows"][0]
+        self.assertEqual(3, len(row["call_steps"]))
+        self.assertTrue(all(step["binding_status"] == "bound"
+                            for step in row["call_steps"]))
+        self.assertEqual("bound", row["sink_binding"]["status"])
+        self.assertEqual([], row["analysis_gaps"])
+
+    def test_budget_exhaustion_is_explicit_and_not_a_negative_result(self):
+        root, entry, sink, flow, symbols, edges = self._fixture(
+            "def handler(path):\n"
+            "    return worker(path)\n"
+            "\n"
+            "\n"
+            "def worker(value):\n"
+            "    os.system(value)\n")
+        evidence = semantic_calls.build_semantic_call_evidence(
+            root, [entry], [sink], [flow], symbols, edges,
+            max_call_depth=0, max_propagation_nodes=1,
+            max_propagation_paths=1, timeout_seconds=0)
+        row = evidence["flows"][0]
+        self.assertIn("call-depth-budget-exceeded", row["analysis_gaps"])
+        self.assertIn("node-budget-exceeded", row["analysis_gaps"])
+        self.assertEqual("unresolved", row["sink_binding"]["status"])
+        self.assertEqual("not-a-finding", row["claim_status"])
+        self.assertEqual(0, evidence["summary"]["analysis_budget"]["processed_paths"])
+
     def test_artifact_is_deterministic_bounded_and_enters_static_pool(self):
         root, entry, sink, flow, symbols, edges = self._fixture(
             "def handler(path):\n"

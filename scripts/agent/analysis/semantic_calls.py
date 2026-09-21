@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
@@ -29,6 +30,14 @@ SEMANTIC_CALL_VERSION = "semantic-call-evidence-v1"
 CLAIM_STATUS = "not-a-finding"
 CONFIDENCE = "heuristic-nearby"
 EVIDENCE_TYPE = "static-inferred"
+
+# These limits belong to this semantic layer even though the call graph has
+# its own reachability cap.  Keeping them here prevents a large/stale flow
+# input from turning a bounded evidence pass into an unbounded analysis.
+DEFAULT_MAX_CALL_DEPTH = 8
+DEFAULT_MAX_PROPAGATION_NODES = 256
+DEFAULT_MAX_PROPAGATION_PATHS = 10000
+DEFAULT_TIMEOUT_SECONDS = 5.0
 
 _IDENTIFIER = re.compile(r"\b[A-Za-z_$][A-Za-z0-9_$]*\b")
 _PARAM_NOISE = frozenset({
@@ -50,6 +59,7 @@ _LIMITATIONS = (
     "argument propagation does not prove that a callee returns, transforms, preserves or uses the bound value on every path",
     "return evidence is a source-shape hint and does not prove dominance, path feasibility or sanitizer semantics",
     "unresolved or not-bound states are manual source-review leads, never proof of a vulnerability or proof of safety",
+    "alias/return propagation is limited to simple identifier assignments and bounded call paths",
 )
 
 
@@ -254,20 +264,47 @@ def _parameters(root: Path, symbol: Any,
 
 def _return_parameters(root: Path, symbol: Any, params: Sequence[str],
                        line_cache: Dict[str, Optional[List[str]]]
-                       ) -> Tuple[List[str], int]:
+                       ) -> Tuple[List[str], int, Dict[str, str], List[str]]:
+    """Return parameter origins through a small, syntax-only alias walk.
+
+    This deliberately recognizes only ``alias = parameter`` (and a bounded
+    chain of the same shape).  A transform, container write, attribute access,
+    or conditional assignment is left unresolved instead of being guessed as
+    a preserved taint value.
+    """
     lines = _read_lines(root, _field(symbol, "file", ""), line_cache)
     start = max(0, _int(_field(symbol, "start_line", 1)) - 1)
     end = min(len(lines), _int(_field(symbol, "end_line", len(lines))))
-    returned: Set[str] = set()
+    origins: Dict[str, str] = {str(param): str(param) for param in params if str(param)}
+    aliases: Dict[str, str] = {}
     sites = 0
-    wanted = set(params)
+    returned_aliases: Set[str] = set()
     for line in lines[start:end]:
         masked = _mask(line)
+        assignment = re.match(
+            r"^\s*(?:var\s+|let\s+|const\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\s*=(?!=)\s*(.*?)\s*;?\s*$",
+            masked,
+        )
+        if assignment:
+            lhs, rhs = assignment.group(1), assignment.group(2).strip()
+            rhs_tokens = _tokens(rhs)
+            # A pure identifier assignment is the only alias shape accepted.
+            # This prevents ``safe = sanitize(value)`` from being mistaken for
+            # a return-preserving alias.
+            if len(rhs_tokens) == 1 and rhs_tokens[0] in origins:
+                origins[lhs] = origins[rhs_tokens[0]]
+                aliases[lhs] = origins[lhs]
+            else:
+                origins.pop(lhs, None)
+                aliases.pop(lhs, None)
         if not re.search(r"\breturn\b", masked):
             continue
         sites += 1
-        returned.update(token for token in _tokens(masked, 16) if token in wanted)
-    return sorted(returned)[:16], sites
+        for token in _tokens(masked, 16):
+            if token in origins:
+                returned_aliases.add(token)
+    returned = sorted({origins[token] for token in returned_aliases})[:16]
+    return returned, sites, dict(sorted(aliases.items())[:16]), sorted(returned_aliases)[:16]
 
 
 def _callsite_result(line: str, name: str) -> Tuple[str, List[str]]:
@@ -364,6 +401,8 @@ def _candidate(flow: Mapping[str, Any], row: Mapping[str, Any]) -> Dict[str, Any
         "callsite_status": row.get("callsite_status", "unresolved"),
         "binding_status": status,
         "unresolved_steps": row.get("unresolved_steps", 0),
+        "analysis_gaps": list(row.get("analysis_gaps") or []),
+        "analysis_budget": dict(row.get("analysis_budget") or {}),
         "requires_manual_dataflow": True,
         "source": "semantic-calls",
         "producer": "semantic-calls",
@@ -376,9 +415,25 @@ def _candidate(flow: Mapping[str, Any], row: Mapping[str, Any]) -> Dict[str, Any
 def build_semantic_call_evidence(
         root: Path, entries: Sequence[Any], sinks: Sequence[Any],
         flows: Sequence[Any], symbols: Sequence[Any],
-        call_edges: Sequence[Any]) -> Dict[str, Any]:
-    """Build bounded call-site and tainted-parameter evidence for all flows."""
+        call_edges: Sequence[Any],
+        max_call_depth: int = DEFAULT_MAX_CALL_DEPTH,
+        max_propagation_nodes: int = DEFAULT_MAX_PROPAGATION_NODES,
+        max_propagation_paths: int = DEFAULT_MAX_PROPAGATION_PATHS,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS) -> Dict[str, Any]:
+    """Build bounded call-site and tainted-parameter evidence for all flows.
+
+    The result retains a row for every supplied flow.  If a depth/node/path or
+    wall-clock budget is exhausted, the row carries an explicit analysis gap
+    and remains a manual research lead rather than disappearing or becoming a
+    negative result.
+    """
     root = Path(root).resolve()
+    max_call_depth = max(0, int(max_call_depth))
+    max_propagation_nodes = max(1, int(max_propagation_nodes))
+    max_propagation_paths = max(0, int(max_propagation_paths))
+    timeout_seconds = max(0.0, float(timeout_seconds))
+    started_at = time.monotonic()
+    deadline = started_at + timeout_seconds if timeout_seconds else None
     symbol_index = {
         str(_field(symbol, "symbol_id", "")): symbol for symbol in symbols
         if _field(symbol, "symbol_id", "")
@@ -403,7 +458,10 @@ def build_semantic_call_evidence(
     binding_counts: Counter = Counter()
     return_counts: Counter = Counter()
     sink_counts: Counter = Counter()
+    budget_counts: Counter = Counter()
     cross_symbol_flows = 0
+    visited_nodes = 0
+    processed_paths = 0
 
     ordered_flows = sorted(flows, key=lambda item: str(
         _field(item, "flow_id", "") or ""))
@@ -414,6 +472,72 @@ def build_semantic_call_evidence(
         sink = sink_index.get(str(_field(flow, "sink_id", "") or ""))
         entry_symbol_id = str(_field(flow, "source_symbol", "") or "")
         entry_symbol = symbol_index.get(entry_symbol_id)
+        path_nodes = set(path)
+        analysis_gaps: List[str] = []
+        if len(path) - 1 > max_call_depth:
+            analysis_gaps.append("call-depth-budget-exceeded")
+        if processed_paths >= max_propagation_paths:
+            analysis_gaps.append("path-budget-exceeded")
+        if visited_nodes + len(path_nodes) > max_propagation_nodes:
+            analysis_gaps.append("node-budget-exceeded")
+        if deadline is not None and time.monotonic() >= deadline:
+            analysis_gaps.append("timeout-budget-exceeded")
+        if analysis_gaps:
+            for gap in analysis_gaps:
+                budget_counts[gap] += 1
+            row = {
+                "flow_id": flow_id,
+                "entry_id": str(_field(flow, "entry_id", "") or ""),
+                "sink_id": str(_field(flow, "sink_id", "") or ""),
+                "path": path,
+                "same_symbol": len(path) <= 1,
+                "call_steps": [],
+                "callsite_status": "unresolved" if len(path) > 1 else "not-applicable",
+                "binding_status": "unresolved" if len(path) > 1 else "not-applicable",
+                "sink": {
+                    "category": str(_field(sink, "category", "") or "") if sink else "",
+                    "api": str(_field(sink, "api", "") or "") if sink else "",
+                    "file": str(_field(sink, "file", "") or "") if sink else "",
+                    "line": _int(_field(sink, "line", 0)) if sink else 0,
+                },
+                "sink_parse_status": "unresolved",
+                "sink_variables": [],
+                "sink_binding": {"status": "unresolved", "tainted_variables": [],
+                                  "sink_variables": []},
+                "unresolved_steps": max(0, len(path) - 1),
+                "analysis_gaps": sorted(set(analysis_gaps)),
+                "analysis_budget": {
+                    "max_call_depth": max_call_depth,
+                    "max_propagation_nodes": max_propagation_nodes,
+                    "max_propagation_paths": max_propagation_paths,
+                    "timeout_seconds": timeout_seconds,
+                },
+                "required_manual_checks": [
+                    "rerun with a larger bounded budget or inspect the truncated path",
+                    "verify each callsite against the real overload, dispatch, DI or callback target",
+                ],
+                "claim_status": CLAIM_STATUS,
+                "producer": "semantic-calls",
+                "confidence": CONFIDENCE,
+                "evidence_type": EVIDENCE_TYPE,
+            }
+            flow_rows.append(row)
+            if len(path) > 1:
+                candidates.append(_candidate({
+                    "flow_id": flow_id,
+                    "entry_id": _field(flow, "entry_id", ""),
+                    "sink_id": _field(flow, "sink_id", ""),
+                    "path": path,
+                    "entry": {"entry_id": _field(entry, "entry_id", "") if entry else "",
+                              "api": _field(entry, "api", "") if entry else "",
+                              "input_shape": _field(entry, "input_shape", "unknown") if entry else "unknown",
+                              "file": _field(entry, "file", "") if entry else "",
+                              "line": _field(entry, "line", 0) if entry else 0},
+                    "sink": row["sink"],
+                }, row))
+            continue
+        visited_nodes += len(path_nodes)
+        processed_paths += 1
         current_taint = set(_parameters(root, entry_symbol, parameter_cache,
                                         line_cache)) if entry_symbol else set()
         call_steps: List[Dict[str, Any]] = []
@@ -479,9 +603,12 @@ def build_semantic_call_evidence(
             result, target_tokens = _callsite_result(
                 caller_lines[edge_line - 1] if 0 < edge_line <= len(caller_lines) else "",
                 edge_name)
-            returned_parameters, return_sites = (
-                _return_parameters(root, callee, callee_parameters, line_cache)
-                if callee else ([], 0))
+            if callee:
+                returned_parameters, return_sites, alias_map, returned_aliases = (
+                    _return_parameters(root, callee, callee_parameters, line_cache))
+            else:
+                returned_parameters, return_sites, alias_map, returned_aliases = (
+                    [], 0, {}, [])
             tainted_returns = sorted(set(returned_parameters) & callee_taint)
             if not returned_parameters:
                 return_status = "not-observed"
@@ -510,6 +637,11 @@ def build_semantic_call_evidence(
                     "target_tokens": target_tokens[:16],
                     "returned_parameters": returned_parameters[:16],
                     "tainted_return_parameters": tainted_returns[:16],
+                    "alias_map": alias_map,
+                    "returned_aliases": returned_aliases,
+                    "tainted_return_aliases": [alias for alias in returned_aliases
+                                               if alias in alias_map and
+                                               alias_map[alias] in tainted_returns][:16],
                     "return_sites": return_sites,
                     "status": return_status,
                 },
@@ -570,6 +702,13 @@ def build_semantic_call_evidence(
                 "sink_variables": sink_variables,
             },
             "unresolved_steps": unresolved_steps,
+            "analysis_gaps": analysis_gaps,
+            "analysis_budget": {
+                "max_call_depth": max_call_depth,
+                "max_propagation_nodes": max_propagation_nodes,
+                "max_propagation_paths": max_propagation_paths,
+                "timeout_seconds": timeout_seconds,
+            },
             "required_manual_checks": [
                 "verify each callsite against the real overload, dispatch, DI or callback target",
                 "verify parameter/return transformations and branch dominance in the callee",
@@ -607,6 +746,15 @@ def build_semantic_call_evidence(
         "parameter_bindings": dict(sorted(binding_counts.items())),
         "return_bindings": dict(sorted(return_counts.items())),
         "sink_binding": dict(sorted(sink_counts.items())),
+        "analysis_budget": {
+            "max_call_depth": max_call_depth,
+            "max_propagation_nodes": max_propagation_nodes,
+            "max_propagation_paths": max_propagation_paths,
+            "timeout_seconds": timeout_seconds,
+            "visited_nodes": visited_nodes,
+            "processed_paths": processed_paths,
+            "budget_gaps": dict(sorted(budget_counts.items())),
+        },
         "candidates": len(candidates),
         "claim_status": CLAIM_STATUS,
         "producer": "semantic-calls",
