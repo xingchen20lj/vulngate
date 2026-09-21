@@ -19,8 +19,11 @@ Usage:
   agent_cli.py benchmark --manifest <gold.json> [--run <run.json>] [--out <result.json>]
                            [--feedback-out <feedback.json>] [--json]
   agent_cli.py replay-calibrate <target> --workspace <dir> [--out <result.json>] [--json]
+  agent_cli.py replay-pack <target> --workspace <dir> [--round <N> ...]
+                           [--out <result.json>] [--json]
   agent_cli.py replay-cohort-calibrate --artifact <calibration.json> \
                            [--artifact <calibration.json> ...] \
+                           [--pack <replay-pack.json> ...] \
                            [--project-id <label> ...] [--out <result.json>] [--json]
   agent_cli.py review <target> --workspace <dir> (--research-key <rk>|--candidate-id <id>)
                            --status <accepted|rejected|needs-evidence|scope-corrected>
@@ -645,15 +648,63 @@ def cmd_replay_calibrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_replay_pack(args: argparse.Namespace) -> int:
+    """Build a provenance-carrying pack from local replay artifacts."""
+    from agent.evaluation.replay_pack import (
+        build_replay_pack, write_replay_pack,
+    )
+
+    workspace = Path(args.workspace).resolve()
+    pack = build_replay_pack(workspace, args.target, args.round or None)
+    if not pack:
+        _out({"error": "replay pack could not be built",
+              "target": args.target, "workspace": str(workspace)})
+        return 2
+    target_path = write_replay_pack(workspace, args.target, pack)
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "artifact": str(target_path.relative_to(workspace)),
+        "pack": pack,
+        "claim_status": "not-a-finding",
+    }
+    if args.out:
+        out_path = Path(args.out)
+        if not out_path.is_absolute():
+            out_path = workspace / out_path
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(pack, indent=2, ensure_ascii=False),
+                            encoding="utf-8")
+        payload["written_to"] = str(out_path.resolve())
+    if args.json:
+        _out(payload)
+    else:
+        provenance = pack.get("provenance", {})
+        print("replay pack: %s" % payload["artifact"])
+        print("  status=%s rounds=%s artifacts=%s valid_for_cohort=%s "
+              "claim_status=%s" % (
+                  provenance.get("status", "not-executed"),
+                  provenance.get("round_count", 0),
+                  provenance.get("round_artifact_count", 0),
+                  provenance.get("valid_for_cohort", False),
+                  pack.get("claim_status", "not-a-finding")))
+        if args.out:
+            print("  written_to: %s" % payload["written_to"])
+    return 0
+
+
 def cmd_replay_cohort_calibrate(args: argparse.Namespace) -> int:
     """Aggregate bounded replay calibration from independent projects."""
     from agent.evaluation.replay_cohort import calibrate_replay_cohort
+    from agent.evaluation.replay_pack import load_replay_pack_file
 
     artifact_paths = [Path(value).resolve() for value in args.artifact or []]
+    pack_paths = [Path(value).resolve() for value in args.pack or []]
     project_ids = [str(value).strip() for value in args.project_id or []]
-    if project_ids and len(project_ids) != len(artifact_paths):
-        _out({"error": "--project-id must be repeated once per --artifact",
-              "artifacts": len(artifact_paths),
+    input_count = len(artifact_paths) + len(pack_paths)
+    if project_ids and len(project_ids) != input_count:
+        _out({"error": "--project-id must be repeated once per --artifact/--pack",
+              "inputs": input_count,
               "project_ids": len(project_ids)})
         return 2
     inputs = []
@@ -673,17 +724,30 @@ def cmd_replay_cohort_calibrate(args: argparse.Namespace) -> int:
             "calibration": raw,
             "project_id": project_ids[index] if project_ids else "",
         })
+    for offset, path in enumerate(pack_paths):
+        pack = load_replay_pack_file(path)
+        provenance = pack.get("provenance") if pack else {}
+        if not pack or not provenance.get("valid_for_cohort"):
+            invalid.append(str(path))
+            continue
+        index = len(artifact_paths) + offset
+        inputs.append({
+            "pack": pack,
+            "project_id": project_ids[index] if project_ids else "",
+        })
     if invalid:
-        _out({"error": "invalid replay calibration artifact",
+        _out({"error": "invalid or provenance-incomplete replay input",
               "paths": invalid[:8]})
         return 2
     if not inputs:
-        _out({"error": "at least one --artifact is required"})
+        _out({"error": "at least one --artifact or --pack is required"})
         return 2
     cohort = calibrate_replay_cohort(inputs)
     payload = {
         "cohort": cohort,
         "artifact_count": len(inputs),
+        "input_kind_counts": cohort.get("metrics", {}).get(
+            "input_kind_counts", {}),
         "claim_status": "not-a-finding",
     }
     if args.out:
@@ -1636,12 +1700,29 @@ def build_parser() -> argparse.ArgumentParser:
                     help="machine-readable output")
     rc.set_defaults(fn=cmd_replay_calibrate)
 
+    rp = sub.add_parser(
+        "replay-pack",
+        help="build a provenance-carrying bounded replay pack",
+    )
+    rp.add_argument("target", help="target name (state/<target>/...)")
+    rp.add_argument("--workspace", required=True,
+                    help="workspace root containing state/<target>/")
+    rp.add_argument("--round", type=int, action="append", default=[],
+                    help="optional round number; repeat to build a filtered pack")
+    rp.add_argument("--out", default=None,
+                    help="optional extra copy of the replay pack")
+    rp.add_argument("--json", action="store_true",
+                    help="machine-readable output")
+    rp.set_defaults(fn=cmd_replay_pack)
+
     rcc = sub.add_parser(
         "replay-cohort-calibrate",
         help="aggregate bounded replay calibration across independent projects",
     )
-    rcc.add_argument("--artifact", action="append", required=True,
-                     help="per-target research-replay-calibration-v1 JSON; repeatable")
+    rcc.add_argument("--artifact", action="append", default=[],
+                     help="legacy per-target research-replay-calibration-v1 JSON; repeatable")
+    rcc.add_argument("--pack", action="append", default=[],
+                     help="provenance-carrying research-replay-pack-v1 JSON; repeatable")
     rcc.add_argument("--project-id", action="append", default=[],
                      help="optional opaque label, repeated once per artifact")
     rcc.add_argument("--out", default=None,

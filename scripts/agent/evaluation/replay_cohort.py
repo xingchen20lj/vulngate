@@ -30,6 +30,7 @@ from .replay_calibration import (
     CALIBRATION_SCHEMA_VERSION,
     normalize_replay_calibration,
 )
+from .replay_pack import normalize_replay_pack
 
 
 COHORT_SCHEMA_VERSION = "research-replay-cohort-v1"
@@ -200,21 +201,51 @@ def _project_id(label: str, target: str, history_digest: str,
     ).hexdigest()[:24]
 
 
-def _project_from_calibration(raw: Any, label: str = "",
-                              index: int = 0) -> Dict[str, Any]:
+def _project_from_calibration(raw: Any, label: str = "", index: int = 0,
+                              pack: Optional[Mapping[str, Any]] = None
+                              ) -> Dict[str, Any]:
     calibration = normalize_replay_calibration(raw)
     if not calibration:
         return {}
     metrics = calibration.get("metrics") or {}
     status = _text(calibration.get("status"), 32)
     replayed = _int(metrics.get("replayed_guidance_items"), 0, 0, 1000000)
+    normalized_pack = normalize_replay_pack(pack) if pack else {}
+    pack_provenance = normalized_pack.get("provenance") or {}
+    input_kind = "pack" if normalized_pack else "calibration"
+    provenance_status = (_text(pack_provenance.get("status"), 32).lower()
+                         if normalized_pack else "legacy-calibration")
+    provenance_eligible = bool(
+        normalized_pack and pack_provenance.get("valid_for_cohort"))
+    pack_metrics = {
+        "round_count": _int(pack_provenance.get("round_count"), 0, 0, 1000000),
+        "artifact_count": _int(
+            pack_provenance.get("round_artifact_count"), 0, 0, 1000000),
+        "lane_count": sum(
+            _int((row.get("lane_summary") or {}).get("lane_count"), 0, 0, 4096)
+            for row in normalized_pack.get("rounds") or []),
+        "comparison_gaps": sum(
+            _int((row.get("comparison_summary") or {}).get("gap_count"),
+                 0, 0, 128)
+            for row in normalized_pack.get("rounds") or []),
+    }
     project = {
         "project_id": _project_id(
             _text(label, 96), _text(calibration.get("target"), 96),
             _text(calibration.get("history_digest"), 48), index),
         "calibration_status": status,
+        "input_kind": input_kind,
+        "provenance_status": provenance_status,
+        "provenance_eligible": provenance_eligible,
+        "pack_digest": (_text(normalized_pack.get("pack_digest"), 40)
+                         if normalized_pack else ""),
+        "pack_round_count": pack_metrics["round_count"],
+        "pack_artifact_count": pack_metrics["artifact_count"],
+        "pack_lane_count": pack_metrics["lane_count"],
+        "pack_comparison_gaps": pack_metrics["comparison_gaps"],
         "eligible": bool(status == "calibrated" and
-                          replayed >= MIN_PROJECT_REPLAYS),
+                          replayed >= MIN_PROJECT_REPLAYS and
+                          (not normalized_pack or provenance_eligible)),
         "replayed_guidance_items": replayed,
         "replacement_recommendations": _int(
             metrics.get("replacement_recommendations"), 0, 0, 1000000),
@@ -253,9 +284,39 @@ def _normalize_project(raw: Any, index: int = 0) -> Dict[str, Any]:
     status = _text(raw.get("calibration_status"), 32)
     if status not in {"no-data", "insufficient-sample", "calibrated"}:
         status = "no-data"
+    input_kind = _text(raw.get("input_kind"), 24).lower()
+    if input_kind not in {"calibration", "pack"}:
+        input_kind = "calibration"
+    provenance_status = _text(raw.get("provenance_status"), 32).lower()
+    if input_kind == "pack":
+        if provenance_status not in {
+                "complete", "partial", "environment-gap", "not-executed",
+                "invalid"}:
+            provenance_status = "invalid"
+    else:
+        provenance_status = "legacy-calibration"
+    pack_digest = _text(raw.get("pack_digest"), 40).lower()
+    if input_kind == "pack" and not re.fullmatch(
+            r"rpk-[0-9a-f]{24}", pack_digest):
+        provenance_status = "invalid"
+        pack_digest = ""
+    provenance_eligible = bool(
+        input_kind == "pack" and
+        provenance_status == "complete" and
+        raw.get("provenance_eligible") is True and pack_digest)
     project: Dict[str, Any] = {
         "project_id": project_id,
         "calibration_status": status,
+        "input_kind": input_kind,
+        "provenance_status": provenance_status,
+        "provenance_eligible": provenance_eligible,
+        "pack_digest": pack_digest,
+        "pack_round_count": _int(raw.get("pack_round_count"), 0, 0, 1000000),
+        "pack_artifact_count": _int(
+            raw.get("pack_artifact_count"), 0, 0, 1000000),
+        "pack_lane_count": _int(raw.get("pack_lane_count"), 0, 0, 4096),
+        "pack_comparison_gaps": _int(
+            raw.get("pack_comparison_gaps"), 0, 0, 1000000),
         "replayed_guidance_items": _int(
             raw.get("replayed_guidance_items"), 0, 0, 1000000),
         "replacement_recommendations": _int(
@@ -282,7 +343,8 @@ def _normalize_project(raw: Any, index: int = 0) -> Dict[str, Any]:
     }
     project["eligible"] = bool(
         status == "calibrated" and
-        project["replayed_guidance_items"] >= MIN_PROJECT_REPLAYS)
+        project["replayed_guidance_items"] >= MIN_PROJECT_REPLAYS and
+        (input_kind != "pack" or provenance_eligible))
     seen = set()
     for item in raw.get("surface_metrics") or []:
         row = _normalize_surface_row(item)
@@ -355,12 +417,27 @@ def _build_cohort(projects: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     eligible = [row for row in deduped if row.get("eligible")]
     replayed = _sum(deduped, "replayed_guidance_items")
     eligible_replayed = _sum(eligible, "replayed_guidance_items")
+    pack_projects = [row for row in deduped if row.get("input_kind") == "pack"]
+    provenance_projects = [row for row in pack_projects
+                           if row.get("provenance_eligible")]
     metrics: Dict[str, Any] = {
         "project_count": len(deduped),
         "calibrated_projects": sum(
             row.get("calibration_status") == "calibrated" for row in deduped),
         "eligible_projects": len(eligible),
         "insufficient_sample_projects": len(deduped) - len(eligible),
+        "pack_projects": len(pack_projects),
+        "provenance_eligible_projects": len(provenance_projects),
+        "provenance_gap_projects": len(pack_projects) - len(provenance_projects),
+        "pack_rounds": _sum(pack_projects, "pack_round_count"),
+        "pack_artifacts": _sum(pack_projects, "pack_artifact_count"),
+        "pack_lane_witnesses": _sum(pack_projects, "pack_lane_count"),
+        "pack_comparison_gaps": _sum(pack_projects, "pack_comparison_gaps"),
+        "input_kind_counts": {
+            "calibration": sum(row.get("input_kind") == "calibration"
+                                for row in deduped),
+            "pack": len(pack_projects),
+        },
         "replayed_guidance_items": replayed,
         "eligible_replayed_guidance_items": eligible_replayed,
         "replacement_recommendations": _sum(eligible, "replacement_recommendations"),
@@ -470,10 +547,14 @@ def calibrate_replay_cohort(
         artifacts: Sequence[Any],
         project_ids: Optional[Sequence[str]] = None,
         ) -> Dict[str, Any]:
-    """Build a cohort artifact from normalized calibration JSON values.
+    """Build a cohort artifact from calibration JSON values or replay packs.
 
     ``artifacts`` may contain calibration dictionaries directly or wrappers of
-    the form ``{"calibration": <artifact>, "project_id": "label"}``.
+    the form ``{"calibration": <artifact>, "project_id": "label"}``, or
+    provenance-carrying ``{"pack": <pack>, "project_id": "label"}``
+    wrappers.  Pack-origin projects are policy-eligible only when their
+    workspace-local provenance is complete and self-consistent.  The legacy
+    calibration form remains supported for backwards compatibility.
     Explicit labels are used only to derive opaque project IDs.
     """
     rows: List[Dict[str, Any]] = []
@@ -481,10 +562,18 @@ def calibrate_replay_cohort(
     for index, item in enumerate(artifacts or []):
         label = labels[index] if index < len(labels) else ""
         raw = item
+        pack = None
         if isinstance(item, Mapping) and "calibration" in item:
             raw = item.get("calibration")
             label = _text(item.get("project_id"), 96) or label
-        row = _project_from_calibration(raw, label=label, index=index)
+        elif isinstance(item, Mapping) and "pack" in item:
+            pack = normalize_replay_pack(item.get("pack"))
+            if not pack:
+                continue
+            raw = pack.get("calibration")
+            label = _text(item.get("project_id"), 96) or label
+        row = _project_from_calibration(
+            raw, label=label, index=index, pack=pack)
         if row:
             rows.append(row)
         if len(rows) >= MAX_PROJECTS:

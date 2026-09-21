@@ -120,14 +120,31 @@ future guidance; insufficient history keeps the default. The calibration
 artifact contains no raw payloads, commands, output, credentials, or finding
 evidence, and changes S2/S8 research scheduling only.
 
+To make a calibration replayable rather than merely copyable, S8 also writes
+`research-replay-pack-v1`. The standalone command is:
+
+```bash
+python3 scripts/agent_cli.py replay-pack <target> \
+  --workspace <audit-dir> --json
+```
+
+The pack records only allowlisted workspace-local artifact names, schema
+versions, sizes, SHA-256 fingerprints, and bounded per-round lane/comparison
+summaries. It carries no source text, payload, command, output, credential, or
+finding conclusion. Its provenance status distinguishes complete, partial,
+environment-gap, not-executed, and invalid inputs; the embedded calibration
+must also match the round-history digest. `verify_replay_pack` can re-hash the
+same local workspace after a pack is created. A pack is eligible for cohort
+calibration only when the provenance is complete and self-consistent.
+
 When enough independent targets have produced that bounded artifact, an
 operator may aggregate them into `research-replay-cohort-v1`:
 
 ```bash
 python3 scripts/agent_cli.py replay-cohort-calibrate \
-  --artifact /path/to/project-a/research-replay-calibration.json \
-  --artifact /path/to/project-b/research-replay-calibration.json \
-  --artifact /path/to/project-c/research-replay-calibration.json \
+  --pack /path/to/project-a/research-replay-pack.json \
+  --pack /path/to/project-b/research-replay-pack.json \
+  --pack /path/to/project-c/research-replay-pack.json \
   --out state/research-replay-cohort.json --json
 ```
 
@@ -137,10 +154,12 @@ only when at least three distinct projects have sufficient replay history and
 the project-level low-yield signal is consistent. With fewer projects it keeps
 the default and emits a `collect-more-projects` recommendation. A target may
 explicitly set `replay_cohort_calibration_path`; local target calibration wins
-over the cohort, and the cohort is never discovered implicitly. The pipeline
-copies only the bounded cohort snapshot into S8 and uses it as a scheduling
-fallback; it never copies the input paths, raw replay data, or target finding
-evidence, and it cannot alter candidate status, CVSS, G4, or G5.
+over the cohort, and the cohort is never discovered implicitly. Pack inputs
+must carry complete, digest-consistent provenance; incomplete packs are
+rejected instead of becoming policy samples. The legacy `--artifact` form
+remains available for backwards compatibility and is tracked separately from
+pack provenance. The pipeline copies only bounded research metadata into S8
+and cannot alter candidate status, CVSS, G4, or G5.
 
 ## Two operating modes
 

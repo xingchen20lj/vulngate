@@ -1230,6 +1230,9 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
     from ..evaluation.replay_cohort import (
         select_effective_replay_calibration,
     )
+    from ..evaluation.replay_pack import (
+        build_replay_pack, write_replay_pack,
+    )
     prior_replay_calibration = load_replay_calibration(
         ctx.workspace, ctx.target)
     replay_cohort = ctx.replay_cohort_calibration()
@@ -1283,6 +1286,10 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
     ctx.store.write_artifact("S8", "research-memory-summary.json", memory["summary"])
     ctx.store.write_artifact("S8", "review-feedback.json", review_feedback)
     ctx.store.write_artifact("S8", "research-portfolio.json", portfolio)
+    replay_pack = build_replay_pack(ctx.workspace, ctx.target)
+    replay_pack_file = write_replay_pack(
+        ctx.workspace, ctx.target, replay_pack)
+    ctx.store.write_artifact("S8", "research-replay-pack.json", replay_pack)
     by_candidate_memory = {
         str(entry.get("candidate_id")): entry for entry in memory_delta.get("entries", [])
     }
@@ -1355,6 +1362,18 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
             "metrics", {}).get("replacement_hit_rate"),
         "claim_status": "not-a-finding",
     }
+    summary["research_replay_pack"] = {
+        "artifact": str(replay_pack_file.relative_to(
+            ctx.workspace.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-replay-pack.json"
+                          % (ctx.target, ctx.round_no),
+        "status": (replay_pack.get("provenance") or {}).get(
+            "status", "not-executed"),
+        "valid_for_cohort": (replay_pack.get("provenance") or {}).get(
+            "valid_for_cohort", False),
+        "pack_digest": replay_pack.get("pack_digest", ""),
+        "claim_status": "not-a-finding",
+    }
     if replay_cohort:
         summary["research_replay_cohort"] = {
             "artifact": "configured:replay_cohort_calibration_path",
@@ -1373,7 +1392,8 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
             "research_memory": summary["research_memory"],
             "research_portfolio": summary["research_portfolio"],
             "research_replay_calibration": summary[
-                "research_replay_calibration"],
+            "research_replay_calibration"],
+            "research_replay_pack": summary["research_replay_pack"],
             "research_replay_cohort": summary.get(
                 "research_replay_cohort", {
                     "claim_status": "not-a-finding"}),

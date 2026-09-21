@@ -41,6 +41,7 @@
 | 24 | Surface lane 的真实观测见证 | 已实现（bounded lane witness） | `surface-variant-evidence-v1`、S4 lane evidence、S8/S2 bounded signals | 只从真实 runner row 提取 observed/partial/environment-gap/not-executed、state sequence 和 typed effect 信号；计划不等于观测，不改变 G4/G5/CVSS |
 | 25 | 跨轮研究面 lane coverage 与闭环调度 | 已实现（bounded surface coverage view） | `surface-variant-coverage-v1`、`research-portfolio-v1.surface_lane_coverage`、lane-specific `next_probes` | 跨轮合并历史/最新 lane 状态，保留信号、序列状态、环境缺口和 research key；未闭合 lane 生成精确下一步 probe，仍不升级为漏洞结论 |
 | 26 | 跨项目回放 cohort 校准 | 已实现（bounded cross-project replay cohort） | `research-replay-cohort-v1`、distinct-project/per-surface sufficiency、`replay-cohort-calibrate`、显式 config fallback | 只从多个目标的 bounded calibration 汇聚可重复的调度信号；样本不足保持默认，本地校准优先；不改变候选、CVSS、G4/G5 |
+| 27 | 可验证的真实项目回放 pack | 已实现（bounded provenance replay pack） | `research-replay-pack-v1`、文件 SHA-256 provenance、轮次 lane/comparison 摘要、`replay-pack` CLI、S8 自动产物 | 只消费 workspace-local allowlist 文件指纹和有界摘要；完整且自洽的 pack 才能进入 cohort；篡改、缺失和环境缺口保持可区分，不改变候选、CVSS、G4/G5 |
 
 ## 已实现基础：可证伪实验规划
 
@@ -451,3 +452,13 @@ S2→S4→S8 的单向契约：
 - cohort 同时检查不同项目数与每个研究面的回放充分性。至少三个独立项目拥有足够的可回放样本后，才允许 cohort policy 影响调度；项目数不足时保留默认阈值并生成 `collect-more-projects`。
 - 两轮 zero-gain threshold 只有在项目级低收益 replacement signal 达到有界多数条件时才启用；目标本地已经充分校准时优先使用本地结果，显式 `replay_cohort_calibration_path` 只作为本地历史不足时的 fallback。
 - cohort 可以在 S8 复制一份 bounded snapshot，仍只影响 research-guidance scheduling，不会确认/排除候选，不会填补运行时证据，不会改变 CVSS、G4 或 G5；默认未配置时行为保持不变。
+
+## 阶段 27 初步实现：可验证的真实项目回放 pack
+
+阶段 26 的 calibration artifact 能汇聚调度信号，但单独复制一个 JSON 仍无法证明它来自哪些轮次、哪些 S4 lane witness、哪些 comparison gap，容易让“真实项目经验”退化为不可审计的数字。阶段 27 增加 `research-replay-pack-v1`：
+
+- `agent_cli.py replay-pack <target> --workspace <dir> --json` 只扫描显式 allowlist 的 workspace-local 轮次/目标产物，记录相对 artifact 名、文件大小、SHA-256、schema version 和 present/absent/invalid 状态，不复制源码、payload、命令、stdout/stderr、凭据或漏洞结论；
+- 每个 round 保留有界的 lane witness 摘要（observed/partial/environment-gap/not-executed、typed-effect、safe-equivalent、state-sequence）以及 comparison 状态/缺口/待执行 arm 计数；环境缺口仍不是负向证据；
+- pack 内嵌归一化的 `research-replay-calibration-v1`，并把 target-level calibration 的 history digest 与轮次历史做一致性校验；缺失、篡改、schema 不匹配或 digest 不一致分别保留为 partial/invalid，不静默降级为可信样本；
+- S8 的 config-driven 与 autonomous 管线自动写入 `state/<target>/coverage/research-replay-pack.json` 和 round snapshot。`replay-cohort-calibrate --pack ...` 只接受 provenance 完整、自洽且 `valid_for_cohort=true` 的 pack；旧的 `--artifact` 输入仍保留兼容，但不会被伪装成 pack provenance；
+- pack/cohort 始终是 `claim_status=not-a-finding` 的研究元数据。它只影响研究调度样本是否可进入 cohort，不改变 candidate status、CVSS、G4 或 G5；文件被修改后可用 `verify_replay_pack` 重新做本地哈希核验。

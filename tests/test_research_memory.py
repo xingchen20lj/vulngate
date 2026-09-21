@@ -569,7 +569,11 @@ class ResearchMemoryTests(unittest.TestCase):
                           / "research-guidance.json")
         round_calibration = (self.root / "state" / "target" / "round-01" / "S8"
                              / "research-replay-calibration.json")
+        round_pack = (self.root / "state" / "target" / "round-01" / "S8"
+                      / "research-replay-pack.json")
         target_portfolio = self.root / "state" / "target" / "research-portfolio.json"
+        target_pack = (self.root / "state" / "target" / "coverage"
+                       / "research-replay-pack.json")
         target_strategy = (self.root / "state" / "target" / "coverage"
                            / "research-strategy.json")
         target_guidance = (self.root / "state" / "target" / "coverage"
@@ -581,6 +585,8 @@ class ResearchMemoryTests(unittest.TestCase):
         self.assertTrue(round_strategy_feedback.exists())
         self.assertTrue(round_guidance.exists())
         self.assertTrue(round_calibration.exists())
+        self.assertTrue(round_pack.exists())
+        self.assertTrue(target_pack.exists())
         self.assertTrue(target_portfolio.exists())
         self.assertTrue(target_strategy.exists())
         self.assertTrue(target_guidance.exists())
@@ -601,6 +607,15 @@ class ResearchMemoryTests(unittest.TestCase):
         self.assertEqual("research-replay-calibration-v1",
                          json.loads(round_calibration.read_text(
                              encoding="utf-8"))["schema_version"])
+        self.assertEqual("research-replay-pack-v1",
+                         json.loads(round_pack.read_text(
+                             encoding="utf-8"))["schema_version"])
+        self.assertEqual("research-replay-pack-v1",
+                         json.loads(target_pack.read_text(
+                             encoding="utf-8"))["schema_version"])
+        self.assertEqual("not-a-finding",
+                         json.loads(target_pack.read_text(
+                             encoding="utf-8"))["claim_status"])
         portfolio = json.loads(target_portfolio.read_text(encoding="utf-8"))
         self.assertEqual("research-portfolio-v1", portfolio["schema_version"])
         self.assertEqual("not-a-finding", portfolio["claim_status"])

@@ -563,15 +563,31 @@ research key, so a stable primary replay cannot hide an unverified lane. This
 view is scheduling metadata only, remains `claim_status=not-a-finding`, and
 cannot alter candidate status, CVSS, G4, or G5.
 
-When several independent targets have produced bounded
-`research-replay-calibration-v1` artifacts, an operator may explicitly create
-`research-replay-cohort-v1`:
+S8 also writes a provenance-carrying `research-replay-pack-v1`. It contains
+only allowlisted workspace-local artifact names, schema versions, sizes,
+SHA-256 fingerprints, and bounded per-round lane/comparison summaries; it
+never copies source text, payloads, commands, stdout/stderr, credentials, or
+finding conclusions. The standalone command is:
+
+```bash
+python3 scripts/agent_cli.py replay-pack <target> \
+  --workspace <audit-dir> --json
+```
+
+The pack distinguishes complete, partial, environment-gap, not-executed, and
+invalid provenance, and checks that its embedded calibration matches the
+round-history digest. A later `verify_replay_pack` call can re-hash the same
+workspace. Only complete, self-consistent packs are eligible for cohort
+policy; all pack state remains `claim_status=not-a-finding`.
+
+When several independent targets have produced bounded replay packs, an
+operator may explicitly create `research-replay-cohort-v1`:
 
 ```bash
 python3 scripts/agent_cli.py replay-cohort-calibrate \
-  --artifact /path/to/project-a/research-replay-calibration.json \
-  --artifact /path/to/project-b/research-replay-calibration.json \
-  --artifact /path/to/project-c/research-replay-calibration.json \
+  --pack /path/to/project-a/research-replay-pack.json \
+  --pack /path/to/project-b/research-replay-pack.json \
+  --pack /path/to/project-c/research-replay-pack.json \
   --out state/research-replay-cohort.json --json
 ```
 
@@ -582,7 +598,9 @@ two-round zero-information replacement threshold only when the project-level
 low-yield signal meets the bounded majority rule; otherwise it emits a
 `collect-more-projects` recommendation and keeps the default. A target may
 explicitly configure `replay_cohort_calibration_path`; sufficient target-local
-calibration always wins, and the cohort is never discovered implicitly. S8
+calibration always wins, and the cohort is never discovered implicitly. Incomplete
+or digest-inconsistent packs are rejected; the legacy `--artifact` form remains
+available for compatibility and is tracked separately from pack provenance. S8
 may snapshot the normalized cohort and use it only as a research-guidance
 fallback. Cohort state is `claim_status=not-a-finding`, contains no input
 paths, raw replay data, payloads, commands, output, credentials, or finding
@@ -1420,18 +1438,31 @@ environment-gap 元数据。只有最新真实状态为 `observed` 的 lane 才�
 `environment-gap` 必须按精确 research key 生成有界 next probe，不能让稳定的主 replay 掩盖未验证 lane。这个视图
 只用于调度，始终是 `claim_status=not-a-finding`，不能改变 candidate status、CVSS、G4 或 G5。
 
-当多个独立目标已有有界的 `research-replay-calibration-v1` 时，操作者可以显式生成
+S8 还会生成带来源指纹的 `research-replay-pack-v1`。它只保留 allowlist 内的 workspace-local artifact 名称、schema
+version、大小、SHA-256 指纹和有界的每轮 lane/comparison 摘要，不会复制源码、payload、命令、stdout/stderr、凭据或漏洞结论。
+也可以单独运行：
+
+```bash
+python3 scripts/agent_cli.py replay-pack <target> \
+  --workspace <audit-dir> --json
+```
+
+pack 会区分 complete、partial、environment-gap、not-executed 和 invalid provenance，并校验内嵌 calibration 与轮次历史
+digest 一致；之后可用 `verify_replay_pack` 对原 workspace 重新哈希。只有来源完整且自洽的 pack 才能进入 cohort，所有
+pack 状态继续保持 `claim_status=not-a-finding`。
+
+当多个独立目标已有有界 replay pack 时，操作者可以显式生成
 `research-replay-cohort-v1`：
 
 ```bash
 python3 scripts/agent_cli.py replay-cohort-calibrate \
-  --artifact /path/to/project-a/research-replay-calibration.json \
-  --artifact /path/to/project-b/research-replay-calibration.json \
-  --artifact /path/to/project-c/research-replay-calibration.json \
+  --pack /path/to/project-a/research-replay-pack.json \
+  --pack /path/to/project-b/research-replay-pack.json \
+  --pack /path/to/project-c/research-replay-pack.json \
   --out state/research-replay-cohort.json --json
 ```
 
-cohort 会从不透明的 project row 重新计算策略，同时检查不同项目数与按研究面的样本充分性；只有至少三个 eligible 项目时才允许影响调度。只有项目级低收益 replacement signal 满足有界多数条件时，才可选择已有的一轮或两轮 zero-information threshold；否则生成 `collect-more-projects` 并保留默认值。目标可以显式配置 `replay_cohort_calibration_path`；目标本地校准充分时始终优先，cohort 不会被隐式发现。S8 只可保存归一化快照并将其用作 research-guidance fallback。cohort 仍是 `claim_status=not-a-finding`，不得携带输入路径、原始回放、payload、命令、输出、凭据或漏洞证据，也不能改变 candidate status、CVSS、G4 或 G5。
+cohort 会从不透明的 project row 重新计算策略，同时检查不同项目数与按研究面的样本充分性；只有至少三个 eligible 项目时才允许影响调度。只有项目级低收益 replacement signal 满足有界多数条件时，才可选择已有的一轮或两轮 zero-information threshold；否则生成 `collect-more-projects` 并保留默认值。目标可以显式配置 `replay_cohort_calibration_path`；目标本地校准充分时始终优先，cohort 不会被隐式发现。来源不完整或 digest 不一致的 pack 会被拒绝；旧的 `--artifact` 入口仍保留兼容，但会与 pack provenance 分开统计。S8 只可保存归一化快照并将其用作 research-guidance fallback。cohort 仍是 `claim_status=not-a-finding`，不得携带输入路径、原始回放、payload、命令、输出、凭据或漏洞证据，也不能改变 candidate status、CVSS、G4 或 G5。
 
 S2 还会写出有界的 `research-strategy-v1`：目标级为
 `state/<target>/coverage/research-strategy.json`，轮次快照为 `S2/research-strategy.json`。它将

@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added `research-replay-pack-v1` provenance packs. S8 and
+  `agent_cli.py replay-pack` retain only allowlisted workspace-local artifact
+  names, schema versions, sizes, SHA-256 fingerprints, and bounded lane/
+  comparison summaries. `replay-cohort-calibrate --pack` rejects incomplete or
+  digest-inconsistent packs; all replay provenance remains `not-a-finding` and
+  cannot affect candidate status, CVSS, G4, or G5.
+
 - Added bounded cross-project replay calibration, `research-replay-cohort-v1`.
   `agent_cli.py replay-cohort-calibrate` aggregates explicit per-target
   `research-replay-calibration-v1` artifacts by distinct-project sample counts,

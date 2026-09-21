@@ -92,6 +92,7 @@ Evidence Gates
 - **可证伪实验规划** —— S2 为基线、授权、有状态、可用性、修复变体和 typed effect 生成带必需观测/证伪条件的有界计划；计划保持 `not-a-finding`，不会冒充漏洞结论。
 - **真实项目回放校准** —— `agent_cli.py replay-calibrate` 与 S8 从有界 guidance、strategy-feedback 和 runtime-lab 历史生成 `research-replay-calibration-v1`；替换命中率、无信息重复、环境恢复、fixture 截断和 comparison gap 只可调整有界的零增益阈值（1–2 轮），不会改变漏洞结论、CVSS 或 G4/G5。
 - **跨项目回放 cohort 校准** —— `agent_cli.py replay-cohort-calibrate` 汇聚操作者显式提供的多个目标回放 artifact，并检查不同项目数与研究面样本是否足够；显式配置的 cohort 只在目标本地历史不足时作为 fallback，始终是 `not-a-finding` 的调度元数据。
+- **带 provenance 的回放 pack** —— `agent_cli.py replay-pack` 与 S8 只保存 allowlist workspace-local artifact 的哈希和有界 lane/comparison 摘要；`replay-cohort-calibrate --pack` 只接受来源完整且自洽的 pack，缺失或被修改的 artifact 保持为明确的 provenance 缺口。
 - **能力原语与攻击路径图** —— S1 从 entry/sink/flow 索引生成有界 `read` / `write` / `exec` / `ssrf` 等能力链候选，区分已观察与缺失原语，并自动生成最小验证序列；链路始终保持 `not-a-finding`，等待数据流与运行时 typed effect 证据。
 - **能力链运行时契约** —— 能力候选会把有界 `capability_contract` 传入 S4 cell；`CAPABILITY`/`TRANSITION` 轨迹会被分类为 `no-trace`、`partial` 或 `complete`，终点 typed effect 仍单独要求真实证据。
 - **运行时研究实验室** —— 定向 fuzz 输入会固化为 corpus fixture 和缩减 reproducer；有界重放与版本 × SafeMode 对照会保留稳定性、差分、签名漂移和前置缺口证据，但不会直接升级为漏洞结论。

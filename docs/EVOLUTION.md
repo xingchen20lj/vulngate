@@ -293,6 +293,19 @@ bounded cohort snapshot in S8 only when configured, and all cohort state remains
 `not-a-finding` scheduling metadata with no effect on candidate conclusions,
 CVSS, G4, or G5.
 
+The following replay layer is `research-replay-pack-v1`. S8 and
+`agent_cli.py replay-pack` now package only an allowlisted set of workspace-local
+round/target artifacts as relative names, schema versions, sizes, SHA-256
+fingerprints, and bounded lane/comparison summaries. The pack embeds the
+normalized calibration and checks its history digest against the round
+artifacts. Complete, self-consistent provenance is required for a pack to enter
+cohort calibration; missing, malformed, changed, and environment-gap inputs
+remain distinct states. `verify_replay_pack` can re-hash the original workspace
+without emitting its contents. Pack and cohort artifacts remain
+`claim_status=not-a-finding`, contain no raw source, payload, command, output,
+credential, or finding conclusion, and cannot change candidate status, CVSS,
+G4, or G5.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

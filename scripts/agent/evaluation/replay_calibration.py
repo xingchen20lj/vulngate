@@ -255,6 +255,35 @@ def _normalize_guidance(raw: Any) -> Dict[str, Any]:
     }
 
 
+def _normalize_guidance_snapshot(raw: Any) -> Dict[str, Any]:
+    """Keep an already-normalized history snapshot idempotent.
+
+    ``load_replay_history`` returns bounded guidance rows without the original
+    producer schema marker.  ``calibrate_replay_history`` also accepts those
+    rows, so a filesystem build must not erase them on its second normalization
+    pass.
+    """
+    if not isinstance(raw, Mapping):
+        return {}
+    items: List[Dict[str, Any]] = []
+    seen = set()
+    for row in raw.get("items") or []:
+        item = _normal_guidance_item(row)
+        if not item or item["strategy_id"] in seen:
+            continue
+        existing_digest = _text(row.get("variant_digest"), 40)
+        if existing_digest:
+            item["variant_digest"] = existing_digest
+        seen.add(item["strategy_id"])
+        items.append(item)
+        if len(items) >= MAX_GUIDANCE_ITEMS:
+            break
+    return {
+        "round": _round_no(raw.get("round")),
+        "items": items,
+    }
+
+
 def _normal_feedback_observation(value: Any) -> Dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
@@ -281,6 +310,36 @@ def _normalize_feedback(raw: Any) -> Dict[str, Any]:
     if not isinstance(raw, Mapping):
         return {}
     if _text(raw.get("schema_version"), 64) != "research-strategy-feedback-v1":
+        return {}
+    items: List[Dict[str, Any]] = []
+    seen = set()
+    for row in raw.get("items") or []:
+        if not isinstance(row, Mapping):
+            continue
+        strategy_id = _text(row.get("strategy_id"), 80)
+        if not _STRATEGY_ID_RE.fullmatch(strategy_id) or strategy_id in seen:
+            continue
+        observation = _normal_feedback_observation(row.get("observation"))
+        if not observation:
+            continue
+        seen.add(strategy_id)
+        items.append({
+            "strategy_id": strategy_id,
+            "research_key": _text(row.get("research_key"), 80),
+            "candidate_id": _text(row.get("candidate_id"), 120),
+            "observation": observation,
+        })
+        if len(items) >= MAX_FEEDBACK_ITEMS:
+            break
+    return {
+        "round": _round_no(raw.get("round")),
+        "items": items,
+    }
+
+
+def _normalize_feedback_snapshot(raw: Any) -> Dict[str, Any]:
+    """Keep an already-normalized feedback snapshot idempotent."""
+    if not isinstance(raw, Mapping):
         return {}
     items: List[Dict[str, Any]] = []
     seen = set()
@@ -357,8 +416,16 @@ def _normalize_round(raw: Any, fallback_round: int = 0) -> Dict[str, Any]:
     if not isinstance(raw, Mapping):
         return {}
     round_no = _round_no(raw.get("round", fallback_round))
-    guidance = _normalize_guidance(raw.get("guidance"))
-    feedback = _normalize_feedback(raw.get("feedback"))
+    guidance_raw = raw.get("guidance")
+    feedback_raw = raw.get("feedback")
+    guidance = (_normalize_guidance_snapshot(guidance_raw)
+                if isinstance(guidance_raw, Mapping)
+                and not guidance_raw.get("schema_version")
+                else _normalize_guidance(guidance_raw))
+    feedback = (_normalize_feedback_snapshot(feedback_raw)
+                if isinstance(feedback_raw, Mapping)
+                and not feedback_raw.get("schema_version")
+                else _normalize_feedback(feedback_raw))
     runtime = _runtime_view(raw.get("runtime_lab"))
     if not (round_no or guidance or feedback or runtime):
         return {}

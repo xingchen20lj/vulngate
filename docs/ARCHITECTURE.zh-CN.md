@@ -92,18 +92,31 @@ S8 还会从目标的有界轮次快照生成 `research-replay-calibration-v1`�
 将后续 guidance 的零增益阈值在一轮与两轮之间选择；样本不足时保持默认值。校准产物不包含原始 payload、命令、
 输出、凭据或漏洞证据，只影响 S2/S8 的研究调度。
 
+为了让“真实项目回放”可审计而不只是可复制，S8 还会生成
+`research-replay-pack-v1`。也可以单独运行：
+
+```bash
+python3 scripts/agent_cli.py replay-pack <target> \
+  --workspace <audit-dir> --json
+```
+
+pack 只扫描 allowlist 内的 workspace-local 轮次/目标 artifact，保存相对名称、schema version、大小、SHA-256
+指纹和有界的每轮 lane/comparison 摘要；不会保存源码、payload、命令、stdout/stderr、凭据或漏洞结论。它区分
+complete、partial、environment-gap、not-executed 和 invalid，并校验 pack 内 calibration 与轮次历史的 digest
+一致性；本地 `verify_replay_pack` 可以在之后重新哈希核验。只有来源完整且自洽的 pack 才有资格进入 cohort。
+
 当多个独立目标都积累了这类有界 artifact 后，操作者可以显式汇聚为
 `research-replay-cohort-v1`：
 
 ```bash
 python3 scripts/agent_cli.py replay-cohort-calibrate \
-  --artifact /path/to/project-a/research-replay-calibration.json \
-  --artifact /path/to/project-b/research-replay-calibration.json \
-  --artifact /path/to/project-c/research-replay-calibration.json \
+  --pack /path/to/project-a/research-replay-pack.json \
+  --pack /path/to/project-b/research-replay-pack.json \
+  --pack /path/to/project-c/research-replay-pack.json \
   --out state/research-replay-cohort.json --json
 ```
 
-cohort 会从不透明的 project row 重新计算策略，并保留按研究面的样本充分性；只有至少三个不同项目都有足够回放历史，且项目级低收益信号一致时，才会启用已有的两轮 zero-gain replacement threshold。项目数不足时保持默认，并生成 `collect-more-projects` 建议。目标可以显式设置 `replay_cohort_calibration_path`；目标本地校准优先，cohort 不会被隐式发现。管线只把有界 cohort 快照复制到 S8，并在目标本地历史不足时把它用作调度 fallback；不会复制输入路径、原始回放数据或目标漏洞证据，也不会改变 candidate status、CVSS、G4 或 G5。
+cohort 会从不透明的 project row 重新计算策略，并保留按研究面的样本充分性；pack 输入必须拥有完整且 digest 自洽的 provenance，缺失或不一致的 pack 会被拒绝，不会成为策略样本。旧的 `--artifact` 仍为兼容入口，但会与 pack provenance 分开统计。只有至少三个不同项目都有足够回放历史，且项目级低收益信号一致时，才会启用已有的两轮 zero-gain replacement threshold。项目数不足时保持默认，并生成 `collect-more-projects` 建议。目标可以显式设置 `replay_cohort_calibration_path`；目标本地校准优先，cohort 不会被隐式发现。管线只保存有界研究元数据，不会复制输入路径、原始回放数据或目标漏洞证据，也不会改变 candidate status、CVSS、G4 或 G5。
 
 S1 中包含授权边界和危险 Sink 的启发式 Source→Sink 路径会写入
 `composite-chain-candidates.json`，并在 S2 进入与模型候选、控制图候选、同族差分候选相同的调度池。它们始终保留

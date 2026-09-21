@@ -1936,6 +1936,9 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
     from ..evaluation.replay_cohort import (
         select_effective_replay_calibration,
     )
+    from ..evaluation.replay_pack import (
+        build_replay_pack, write_replay_pack,
+    )
     prior_replay_calibration = load_replay_calibration(
         ctx.root, ctx.cfg.name)
     replay_cohort = ctx.replay_cohort_calibration()
@@ -1995,6 +1998,10 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
     ctx.write_artifact(round_no, "S8", "research-memory-summary.json", memory["summary"])
     ctx.write_artifact(round_no, "S8", "review-feedback.json", review_feedback)
     ctx.write_artifact(round_no, "S8", "research-portfolio.json", portfolio)
+    replay_pack = build_replay_pack(ctx.root, ctx.cfg.name)
+    replay_pack_file = write_replay_pack(
+        ctx.root, ctx.cfg.name, replay_pack)
+    ctx.write_artifact(round_no, "S8", "research-replay-pack.json", replay_pack)
     research_memory_info = {
         "artifact": str(memory_file.relative_to(ctx.root.resolve())),
         "round_entries": len(memory_delta.get("entries", [])),
@@ -2029,6 +2036,17 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             "metrics", {}).get("replayed_guidance_items", 0),
         "replacement_hit_rate": replay_calibration.get(
             "metrics", {}).get("replacement_hit_rate"),
+        "claim_status": "not-a-finding",
+    }
+    research_replay_pack_info = {
+        "artifact": str(replay_pack_file.relative_to(ctx.root.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-replay-pack.json"
+                          % (ctx.cfg.name, round_no),
+        "status": (replay_pack.get("provenance") or {}).get(
+            "status", "not-executed"),
+        "valid_for_cohort": (replay_pack.get("provenance") or {}).get(
+            "valid_for_cohort", False),
+        "pack_digest": replay_pack.get("pack_digest", ""),
         "claim_status": "not-a-finding",
     }
     research_replay_cohort_info = {
@@ -2101,6 +2119,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             "review_feedback": review_feedback_info,
             "research_portfolio": research_portfolio_info,
             "research_replay_calibration": research_replay_calibration_info,
+            "research_replay_pack": research_replay_pack_info,
             "research_replay_cohort": research_replay_cohort_info,
             "research_strategy": research_strategy_info,
         }
@@ -2126,6 +2145,8 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                                 "research_portfolio": research_portfolio_info,
                                 "research_replay_calibration":
                                 research_replay_calibration_info,
+                                "research_replay_pack":
+                                research_replay_pack_info,
                                 "research_replay_cohort":
                                 research_replay_cohort_info,
                                 "research_strategy": research_strategy_info})
@@ -2135,6 +2156,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             "review_feedback": review_feedback_info,
             "research_portfolio": research_portfolio_info,
             "research_replay_calibration": research_replay_calibration_info,
+            "research_replay_pack": research_replay_pack_info,
             "research_replay_cohort": research_replay_cohort_info,
             "research_strategy": research_strategy_info}
 
