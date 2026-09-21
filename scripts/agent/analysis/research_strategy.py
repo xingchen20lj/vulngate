@@ -24,6 +24,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from ..evaluation.benchmark import normalize_benchmark_feedback
+from ..evaluation.research_consistency_actions import (
+    normalize_research_consistency_action,
+)
 from ..tools.redaction import redact_text
 from ..memory.portfolio import normalize_research_portfolio
 from ..memory.research import research_key, residual_meta
@@ -463,6 +466,8 @@ def _normalize_guidance(value: Any) -> Dict[str, Any]:
         DEFAULT_REPLACEMENT_ZERO_GAIN_ROUNDS, 1, 2)
     surface_variant_plan = normalize_surface_variant_plan(
         value.get("surface_variant_plan"))
+    consistency_action = normalize_research_consistency_action(
+        value.get("consistency_action"))
     return {
         "next_action": action,
         "priority_delta": _int(value.get("priority_delta"), 0, 0, 3),
@@ -477,6 +482,7 @@ def _normalize_guidance(value: Any) -> Dict[str, Any]:
         "replacement_zero_gain_rounds": replacement_rounds,
         "last_round": _int(value.get("last_round"), 0, 0, 1000000),
         "surface_variant_plan": surface_variant_plan,
+        "consistency_action": consistency_action,
         "claim_status": STRATEGY_CLAIM_STATUS,
     }
 
@@ -685,6 +691,8 @@ def _item_guidance(item: Mapping[str, Any], portfolio: Mapping[str, Any],
     surface_variant_plan = build_surface_variant_plan(
         item.get("research_surface"), item.get("target_type"), action,
         item.get("attack_class"), item.get("variant"))
+    consistency_action = normalize_research_consistency_action(
+        item.get("consistency_action"))
 
     return {
         "next_action": action,
@@ -699,6 +707,7 @@ def _item_guidance(item: Mapping[str, Any], portfolio: Mapping[str, Any],
         "observation_status": status,
         "last_round": _int(round_no, 0, 0, 1000000),
         "surface_variant_plan": surface_variant_plan,
+        "consistency_action": consistency_action,
         "claim_status": STRATEGY_CLAIM_STATUS,
     }
 
@@ -1143,6 +1152,8 @@ def apply_research_guidance(
             "last_round": guidance.get("last_round", round_value),
             "surface_variant_plan": normalize_surface_variant_plan(
                 guidance.get("surface_variant_plan")),
+            "consistency_action": normalize_research_consistency_action(
+                guidance.get("consistency_action")),
             "claim_status": STRATEGY_CLAIM_STATUS,
         })
     normalized["summary"] = _summary(
@@ -1383,6 +1394,8 @@ def _add_portfolio_item(items: List[Dict[str, Any]], probe: Mapping[str, Any],
         "conflict_codes": _bounded(probe.get("conflict_codes"), 8, 64),
         "consistency_observation_count": _int(
             probe.get("consistency_observation_count"), 0, 0, 8),
+        "consistency_action": normalize_research_consistency_action(
+            probe.get("consistency_action")),
     })
     items.append(item)
 
@@ -1683,6 +1696,8 @@ def _normalize_item(raw: Mapping[str, Any]) -> Dict[str, Any]:
         "conflict_codes": _bounded(raw.get("conflict_codes"), 8, 64),
         "consistency_observation_count": _int(
             raw.get("consistency_observation_count"), 0, 0, 8),
+        "consistency_action": normalize_research_consistency_action(
+            raw.get("consistency_action")),
         "claim_status": STRATEGY_CLAIM_STATUS,
     }
     observation = _normalize_observation(raw.get("observation"))
@@ -1792,6 +1807,7 @@ def normalize_research_guidance(raw: Any) -> Dict[str, Any]:
                 "replacement_zero_gain_rounds"),
             "last_round": row.get("last_round"),
             "surface_variant_plan": row.get("surface_variant_plan"),
+            "consistency_action": row.get("consistency_action"),
         })
         items.append({
             "strategy_id": strategy_id,

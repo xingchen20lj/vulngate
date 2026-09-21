@@ -320,6 +320,21 @@ strategy consume this view for scheduling only; S8 and replay packs persist it
 as provenance-carrying metadata, always `claim_status=not-a-finding`, without
 changing candidate status, CVSS, G4, or G5.
 
+The next step is `research-consistency-action-v1`. Detection alone does not
+guarantee that the next run will use the same fixture, reset state, or execute
+an independent comparison arm. `agent_cli.py research-consistency-actions`
+therefore materializes each non-consistent history as a bounded recheck
+contract: fixed isolation axes, positive/negative or environment-gap lanes,
+repeat count, required observation codes, and falsifier codes. S2 matches the
+contract by stable research key and emits a `consistency-recheck` plan. S4
+passes the normalized contract through MatrixCell metadata,
+`VULNGATE_CONSISTENCY_ACTION`, ordinary runtime-lab fixtures, and replay/
+differential cells. Missing replay, fixture/context mismatch, unreset state,
+or signature drift keeps the research item pending; it cannot become a
+finding, change CVSS, or satisfy G4/G5. The action artifact, portfolio,
+strategy, and replay-pack entries remain `claim_status=not-a-finding` and
+contain no raw source, payload, command, output, credential, or conclusion.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

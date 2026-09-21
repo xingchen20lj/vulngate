@@ -28,6 +28,13 @@ class S4RuntimeLabTests(unittest.TestCase):
             version="1.1", safe_mode=False,
             args=["--body", "token=super-secret-value"],
             authz={"case_id": "owner", "role": "user"},
+            consistency_action={
+                "research_key": "rk-recheck",
+                "candidate_id": "C1",
+                "status": "conflicted",
+                "next_action": "repeat-with-controlled-context",
+                "conflict_codes": ["effect-presence-drift"],
+            },
         )
         spec = POCSpec(
             candidate_id="C1", class_name="Probe", src="Probe.java",
@@ -42,6 +49,11 @@ class S4RuntimeLabTests(unittest.TestCase):
         self.assertNotIn("super-secret-value", encoded)
         self.assertNotIn("token=", encoded)
         self.assertEqual(first["claim_status"], "not-a-finding")
+        self.assertEqual("conflicted",
+                         first["consistency_action"]["status"])
+        self.assertEqual("conflicted",
+                         json.loads(_cell_experiment_env(cell)[
+                             "VULNGATE_CONSISTENCY_ACTION"])["status"])
 
     def test_matrix_adapter_runs_replay_and_version_safe_mode_cells(self):
         class FakeJavaRunner:

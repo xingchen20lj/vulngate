@@ -21,6 +21,9 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
 from .authz import authz_fixture_id, normalize_authz_case, normalize_authz_cases
+from ..evaluation.research_consistency_actions import (
+    normalize_research_consistency_action,
+)
 from .build import (JavaMatrixRunner, MatrixCell, POCSpec, ShellMatrixRunner,
                     ShellPOCSpec)
 from .redaction import redact_text
@@ -99,6 +102,8 @@ def _safe_cell_context(cell: MatrixCell) -> Dict[str, Any]:
         "capability_digest": _digest(cell.capability_contract),
         "variant_fixture_key": normalize_variant_fixture_context(
             cell.variant_context).get("fixture_key", ""),
+        "consistency_action_digest": _digest(
+            normalize_research_consistency_action(cell.consistency_action)),
     }
 
 
@@ -124,7 +129,8 @@ def build_s4_fixture(candidate: Dict[str, Any], spec: Any, cell: MatrixCell,
                      kind: str, spec_index: int,
                      template_key: Optional[str] = None,
                      variant_context: Optional[Dict[str, Any]] = None,
-                     comparison_contract: Optional[Dict[str, Any]] = None
+                     comparison_contract: Optional[Dict[str, Any]] = None,
+                     consistency_action: Optional[Dict[str, Any]] = None
                      ) -> Dict[str, Any]:
     """Build a stable ordinary-S4 fixture without persisting raw arguments."""
     candidate_id = str(candidate.get("candidate_id", ""))
@@ -133,6 +139,9 @@ def build_s4_fixture(candidate: Dict[str, Any], spec: Any, cell: MatrixCell,
     variant = normalize_variant_fixture_context(
         variant_context if variant_context is not None else cell.variant_context)
     comparison = normalize_comparison_contract(comparison_contract)
+    recheck = normalize_research_consistency_action(
+        consistency_action if consistency_action is not None
+        else cell.consistency_action)
     identity = {
         "kind": kind,
         "candidate_id": candidate_id,
@@ -144,6 +153,7 @@ def build_s4_fixture(candidate: Dict[str, Any], spec: Any, cell: MatrixCell,
                             candidate.get("input_shape", "")),
         "cell_context": context,
         "comparison_id": comparison.get("comparison_id", ""),
+        "consistency_action": recheck,
     }
     digest = _digest(identity)
     fixture = {
@@ -172,6 +182,7 @@ def build_s4_fixture(candidate: Dict[str, Any], spec: Any, cell: MatrixCell,
         "availability_probe": context["availability_probe"],
         "variant_context": variant,
         "comparison_contract": comparison,
+        "consistency_action": recheck,
         "claim_status": "not-a-finding",
     }
     return fixture
@@ -356,6 +367,7 @@ def _clone_cell(cell: MatrixCell, version: str, safe_mode: bool,
         residual_contracts=list(cell.residual_contracts),
         variant_context=(dict(cell.variant_context)
                          if variant_context is None else variant_context),
+        consistency_action=dict(cell.consistency_action),
     )
 
 
@@ -805,7 +817,9 @@ def _run_s4_runtime_lab_core(
         fixture = build_s4_fixture(
             candidate, spec, variant_base, kind, spec_index, template_key,
             variant_context=variant_context,
-            comparison_contract=comparison_contract)
+            comparison_contract=comparison_contract,
+            consistency_action=(candidate.get("experiment_plan") or {}).get(
+                "consistency_action", {}))
         fixture_id = fixture["fixture_id"]
         candidate_id = str(candidate.get("candidate_id", ""))
         selected_versions = versions or [str(base.version)]

@@ -43,6 +43,7 @@ GUIDANCE_ACTIONS = frozenset({
     "reframe-scope", "add-negative-control", "trace-capability-transition",
     "review-source-dataflow", "add-typed-effect", "replay-new-variant",
     "continue-path-closure", "hold-for-new-evidence",
+    "repeat-with-controlled-context",
 })
 MAX_VARIANTS = 3
 MAX_LANES = MAX_VARIANTS * len(LANES)

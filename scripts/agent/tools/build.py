@@ -21,6 +21,9 @@ from typing import Any, Dict, List, Optional
 
 from ..sandbox.approval import ApprovalGate
 from ..sandbox.runner import CommandRunner, RunResult, minimal_poc_env
+from ..evaluation.research_consistency_actions import (
+    normalize_research_consistency_action,
+)
 from .authz import (assert_authz_observations, authz_env, authz_fixture_id,
                     authz_jvm_props, normalize_authz_case)
 from .experiment import (experiment_metadata, normalize_capability_contract,
@@ -106,6 +109,9 @@ class MatrixCell:
     # Surface-specific fixture/state-machine context.  This is a bounded
     # experiment identity, never a payload or a runtime observation.
     variant_context: Dict[str, Any] = field(default_factory=dict)
+    # Cross-round contradiction recheck contract.  This is scheduling
+    # metadata only; it is not an observation or a finding.
+    consistency_action: Dict[str, Any] = field(default_factory=dict)
     experiment_warnings: List[str] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
@@ -118,6 +124,8 @@ class MatrixCell:
             self.residual_contracts)
         self.variant_context = normalize_variant_fixture_context(
             self.variant_context)
+        self.consistency_action = normalize_research_consistency_action(
+            self.consistency_action)
 
 
 def _cell_experiment_env(cell: MatrixCell) -> Dict[str, str]:
@@ -145,6 +153,9 @@ def _cell_experiment_env(cell: MatrixCell) -> Dict[str, str]:
             row["residual_id"] for row in
             normalize_residual_contracts(cell.residual_contracts)
         ], ensure_ascii=False),
+        "VULNGATE_CONSISTENCY_ACTION": json.dumps(
+            normalize_research_consistency_action(cell.consistency_action),
+            ensure_ascii=False, separators=(",", ":")),
     }
     variant = normalize_variant_fixture_context(cell.variant_context)
     if variant:
@@ -176,6 +187,8 @@ def _cell_metadata(cell: MatrixCell) -> Dict[str, Any]:
         "residual_contracts": meta["residual_contracts"],
         "variant_context": normalize_variant_fixture_context(
             cell.variant_context),
+        "consistency_action": normalize_research_consistency_action(
+            cell.consistency_action),
         "experiment": meta,
     }
 

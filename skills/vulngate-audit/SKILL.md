@@ -618,6 +618,20 @@ strategy consume these actions only for scheduling. Environment gaps never
 count as no-effect observations, and the target/round artifacts remain
 `claim_status=not-a-finding` without changing candidate status, CVSS, G4, or G5.
 
+S8 materializes `research-consistency-action-v1` for every non-consistent
+history. Use `python3 scripts/agent_cli.py research-consistency-actions <target> --workspace <dir> [--rebuild] [--json]`
+to inspect or rebuild the bounded recheck artifact. Each action contains only
+allowlisted isolation axes, positive/negative or environment-gap lanes, a
+bounded repeat shape, required observation codes, and falsifier codes. S2
+matches it by stable `research_key` and emits a `consistency-recheck` plan;
+S4 carries the normalized contract through MatrixCell metadata,
+`VULNGATE_CONSISTENCY_ACTION`, runtime-lab fixtures, and replay/differential
+cells. Missing independent replay, fixture/context mismatch, unreset state,
+or signature drift keeps the item pending. Action, portfolio, strategy, and
+replay-pack artifacts remain `claim_status=not-a-finding` and cannot change
+candidate status, CVSS, G4, or G5. Do not persist source prose, payloads,
+commands, stdout/stderr, credentials, or finding conclusions in the contract.
+
 S3 residuals are carried across the same boundary as pending research debt.
 Memory stores only controlled kind/reason codes, bounded source locations, a
 probe digest, and whether a bounded probe plan exists. The portfolio emits one
@@ -1478,6 +1492,10 @@ cohort 会从不透明的 project row 重新计算策略，同时检查不同项
 
 S8 还会从有界、归一化的 `research-memory` 事件生成
 `research-consistency-v1`。可用 `python3 scripts/agent_cli.py research-consistency <target> --workspace <dir> [--rebuild] [--json]` 查看或重建。对同一 research key，它只比较 effect 是否出现、是否可复现、comparison、运行状态和 context digest，区分 `consistent`、`conflicted`、`unstable`、`insufficient` 与 `environment-gap`。冲突会生成 `repeat-with-controlled-context`、`isolate-state`、`collect-independent-observation` 或 `repair-environment` 等有界动作，portfolio 和 strategy 只用它调度下一轮；环境缺口不会被算作无 effect，target/round artifact 继续保持 `claim_status=not-a-finding`，不能改变 candidate status、CVSS、G4 或 G5。
+
+S8 还会为每个非一致历史生成 `research-consistency-action-v1`。可用
+`python3 scripts/agent_cli.py research-consistency-actions <target> --workspace <dir> [--rebuild] [--json]`
+查看或重建。每个 action 只包含 allowlist 隔离轴、正/负向或环境缺口 lane、有界重复形状、required observation code 和 falsifier code。S2 按稳定 `research_key` 匹配并生成 `consistency-recheck` 计划；S4 将归一化契约传入 MatrixCell、`VULNGATE_CONSISTENCY_ACTION`、runtime-lab fixture 和 replay/differential cell。缺少独立重放、fixture/context 不一致、状态未重置或签名漂移时，研究项继续 pending。action、portfolio、strategy 和 replay pack 都保持 `claim_status=not-a-finding`，不能改变 candidate status、CVSS、G4 或 G5；契约不得保存源码原文、payload、命令、stdout/stderr、凭据或漏洞结论。
 
 S2 还会写出有界的 `research-strategy-v1`：目标级为
 `state/<target>/coverage/research-strategy.json`，轮次快照为 `S2/research-strategy.json`。它将

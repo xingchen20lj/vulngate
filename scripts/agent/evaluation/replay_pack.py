@@ -95,6 +95,8 @@ _ROUND_SPECS: Tuple[Tuple[str, str, str], ...] = (
     ("S8", "research-guidance.json", "research-strategy-guidance-v1"),
     ("S8", "research-strategy-feedback.json", "research-strategy-feedback-v1"),
     ("S8", "research-consistency.json", "research-consistency-v1"),
+    ("S8", "research-consistency-actions.json",
+     "research-consistency-action-v1"),
     ("S8", "research-portfolio.json", "research-portfolio-v1"),
     ("S8", "research-replay-calibration.json",
      "research-replay-calibration-v1"),
@@ -105,6 +107,8 @@ _TARGET_SPECS: Tuple[Tuple[str, str], ...] = (
     ("research-strategy.json", "research-strategy-v1"),
     ("coverage/research-guidance.json", "research-strategy-guidance-v1"),
     ("coverage/research-consistency.json", "research-consistency-v1"),
+    ("coverage/research-consistency-actions.json",
+     "research-consistency-action-v1"),
     ("coverage/research-replay-calibration.json",
      "research-replay-calibration-v1"),
 )

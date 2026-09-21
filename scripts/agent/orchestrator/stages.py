@@ -13,12 +13,18 @@ from ..memory.ledger import render_finding_md, write_round_artifacts
 from ..memory.research import (build_residual_closure_report,
                                 build_round_memory, load_research_memory,
                                 load_review_feedback, merge_research_memory,
-                                write_research_memory)
+                                research_key, write_research_memory)
 from ..memory.portfolio import (build_research_portfolio,
                                 write_research_portfolio)
 from ..evaluation.research_consistency import (
     build_research_consistency,
     write_research_consistency,
+)
+from ..evaluation.research_consistency_actions import (
+    action_for_research_key,
+    build_research_consistency_actions,
+    load_research_consistency_actions,
+    write_research_consistency_actions,
 )
 from ..analysis.research_strategy import (apply_strategy_observations,
                                            apply_research_guidance,
@@ -470,11 +476,16 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
                                  benchmark_feedback)
     experiment_plans = []
     scheduled_strategy = plan.research_strategy if plan is not None else {}
+    consistency_actions = load_research_consistency_actions(
+        ctx.workspace, ctx.target)
     for cand in pool:
+        candidate_action = action_for_research_key(
+            consistency_actions, research_key(cand), cand.get("candidate_id"))
         research_plan = plan_candidate_experiments(
             cand, versions, benchmark_feedback=benchmark_feedback,
             research_guidance=strategy_guidance_for_candidate(
                 scheduled_strategy, cand),
+            consistency_action=candidate_action,
             target_type=ctx.config.target_type)
         cand["experiment_plan"] = research_plan
         plan_row = dict(research_plan)
@@ -509,6 +520,8 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
                 "variant_fixture_plan", {}),
             "comparison_contract": research_plan.get(
                 "comparison_contract", {}),
+            "consistency_action": research_plan.get(
+                "consistency_action", {}),
             "research_strategy": research_plan.get("strategy_tags", []),
         })
     ctx.store.write_artifact("S2", "candidate-matrix.json", matrix)
@@ -674,6 +687,8 @@ def _poc_specs(ctx: StageContext) -> List[POCSpec]:
                                     or poc.get("residual_contracts")
                                     or (cand.get("experiment_plan") or {}).get(
                                         "residual_contracts", [])),
+                consistency_action=(cand.get("experiment_plan") or {}).get(
+                    "consistency_action", {}),
             ) for c in poc.get("cells", [])]
             specs.append(POCSpec(
                 candidate_id=cand["candidate_id"],
@@ -719,6 +734,8 @@ def _shell_poc_specs(ctx: StageContext) -> List[ShellPOCSpec]:
                                     or poc.get("residual_contracts")
                                     or (cand.get("experiment_plan") or {}).get(
                                         "residual_contracts", [])),
+                consistency_action=(cand.get("experiment_plan") or {}).get(
+                    "consistency_action", {}),
             ) for c in poc.get("cells", [])]
             specs.append(ShellPOCSpec(
                 candidate_id=cand["candidate_id"],
@@ -1253,9 +1270,13 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
     research_consistency = build_research_consistency(memory)
     research_consistency_file = write_research_consistency(
         ctx.workspace, ctx.target, research_consistency)
+    research_consistency_actions = build_research_consistency_actions(
+        research_consistency)
+    research_consistency_actions_file = write_research_consistency_actions(
+        ctx.workspace, ctx.target, research_consistency_actions)
     portfolio = build_research_portfolio(
         memory, review_feedback, ctx.benchmark_feedback(),
-        research_consistency)
+        research_consistency, research_consistency_actions)
     portfolio_file = write_research_portfolio(
         ctx.workspace, ctx.target, portfolio)
     strategy = load_research_strategy(ctx.workspace, ctx.target)
@@ -1295,6 +1316,9 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
     ctx.store.write_artifact("S8", "review-feedback.json", review_feedback)
     ctx.store.write_artifact(
         "S8", "research-consistency.json", research_consistency)
+    ctx.store.write_artifact(
+        "S8", "research-consistency-actions.json",
+        research_consistency_actions)
     ctx.store.write_artifact("S8", "research-portfolio.json", portfolio)
     replay_pack = build_replay_pack(ctx.workspace, ctx.target)
     replay_pack_file = write_replay_pack(
@@ -1349,6 +1373,17 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
                                ).get("conflicted_entries", 0),
         "unstable_entries": (research_consistency.get("summary") or {}
                              ).get("unstable_entries", 0),
+        "claim_status": "not-a-finding",
+    }
+    summary["research_consistency_actions"] = {
+        "artifact": str(research_consistency_actions_file.relative_to(
+            ctx.workspace.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-consistency-actions.json"
+                          % (ctx.target, ctx.round_no),
+        "action_count": (research_consistency_actions.get("summary") or {}
+                          ).get("action_count", 0),
+        "action_counts": (research_consistency_actions.get("summary") or {}
+                           ).get("action_counts", {}),
         "claim_status": "not-a-finding",
     }
     if strategy_file:
@@ -1414,6 +1449,8 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
             "excluded": len(excluded), "metrics": metrics,
             "research_memory": summary["research_memory"],
             "research_consistency": summary["research_consistency"],
+            "research_consistency_actions": summary[
+                "research_consistency_actions"],
             "research_portfolio": summary["research_portfolio"],
             "research_replay_calibration": summary[
             "research_replay_calibration"],

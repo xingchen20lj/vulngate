@@ -24,6 +24,11 @@ from ..evaluation.research_consistency import (
     build_research_consistency,
     normalize_research_consistency,
 )
+from ..evaluation.research_consistency_actions import (
+    ACTION_SCHEMA_VERSION,
+    build_research_consistency_actions,
+    normalize_research_consistency_actions,
+)
 from ..tools.redaction import redact_text
 from .research import (
     MEMORY_CLAIM_STATUS,
@@ -273,6 +278,7 @@ def _empty_portfolio() -> Dict[str, Any]:
         "variant_coverage": [],
         "surface_lane_coverage": empty_surface_lane_coverage(),
         "consistency": build_research_consistency({}),
+        "consistency_actions": build_research_consistency_actions({}),
         "next_probes": [],
         "benchmark": {},
         "claim_status": PORTFOLIO_CLAIM_STATUS,
@@ -335,6 +341,7 @@ def build_research_portfolio(
         review_feedback: Optional[Dict[str, Any]] = None,
         benchmark_feedback: Optional[Dict[str, Any]] = None,
         consistency: Optional[Dict[str, Any]] = None,
+        consistency_actions: Optional[Dict[str, Any]] = None,
         ) -> Dict[str, Any]:
     """Build a deterministic, bounded project view from research artifacts."""
     if not isinstance(memory, dict):
@@ -346,6 +353,12 @@ def build_research_portfolio(
     consistency = normalize_research_consistency(consistency)
     if not consistency:
         consistency = build_research_consistency(memory)
+    if consistency_actions is None:
+        consistency_actions = build_research_consistency_actions(consistency)
+    consistency_actions = normalize_research_consistency_actions(
+        consistency_actions)
+    if not consistency_actions:
+        consistency_actions = build_research_consistency_actions(consistency)
     reviews = _review_index(review_feedback)
     states = Counter()
     latest_states = Counter()
@@ -538,6 +551,11 @@ def build_research_portfolio(
 
     consistency_entries = [row for row in consistency.get("entries") or []
                            if isinstance(row, dict)]
+    action_entries = {
+        _text(row.get("research_key"), MAX_KEY): row
+        for row in consistency_actions.get("entries") or []
+        if isinstance(row, dict) and _text(row.get("research_key"), MAX_KEY)
+    }
     consistency_probe_keys = set()
     for row in consistency_entries:
         key = _text(row.get("research_key"), MAX_KEY)
@@ -586,6 +604,8 @@ def build_research_portfolio(
                 row.get("conflict_codes"), 8, 64),
             "consistency_observation_count": _safe_int(
                 row.get("observation_count"), 0, 0, 8),
+            "consistency_action": dict(
+                action_entries.get(key) or {}),
             "next_probe_hints": _consistency_probe_hints(row),
             "claim_status": PORTFOLIO_CLAIM_STATUS,
         })
@@ -662,6 +682,7 @@ def build_research_portfolio(
         "variant_coverage": variant_coverage,
         "surface_lane_coverage": surface_lane_coverage,
         "consistency": consistency,
+        "consistency_actions": consistency_actions,
         "next_probes": next_candidates[:MAX_NEXT_PROBES],
         "benchmark": benchmark,
         "claim_status": PORTFOLIO_CLAIM_STATUS,
@@ -695,6 +716,10 @@ def normalize_research_portfolio(raw: Any) -> Dict[str, Any]:
     consistency = normalize_research_consistency(raw.get("consistency"))
     if consistency:
         result["consistency"] = consistency
+    consistency_actions = normalize_research_consistency_actions(
+        raw.get("consistency_actions"))
+    if consistency_actions:
+        result["consistency_actions"] = consistency_actions
     for dimension in DIMENSIONS:
         rows = []
         for raw_row in (raw.get("dimensions") or {}).get(dimension, []) \
@@ -781,6 +806,12 @@ def normalize_research_portfolio(raw: Any) -> Dict[str, Any]:
                 raw_probe.get("conflict_codes"), 8, 64)
             probe["consistency_observation_count"] = _safe_int(
                 raw_probe.get("consistency_observation_count"), 0, 0, 8)
+            action = normalize_research_consistency_actions({
+                "schema_version": ACTION_SCHEMA_VERSION,
+                "entries": [raw_probe.get("consistency_action")],
+            })
+            if action.get("entries"):
+                probe["consistency_action"] = action["entries"][0]
         if probe["research_key"] and probe["state"]:
             probes.append(probe)
     result["next_probes"] = probes[:MAX_NEXT_PROBES]

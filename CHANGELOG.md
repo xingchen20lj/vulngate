@@ -15,6 +15,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   S8 and replay packs persist the target/round artifact; all metadata remains
   `not-a-finding` and cannot affect candidate status, CVSS, G4, or G5.
 
+- Added `research-consistency-action-v1` controlled recheck contracts.
+  `agent_cli.py research-consistency-actions` materializes fixed isolation axes,
+  paired lanes, required observations, and falsifiers; S2 emits a bounded
+  `consistency-recheck` plan and S4 carries the normalized contract through
+  MatrixCell, PoC environment, and runtime-lab fixtures. Action artifacts and
+  replay-pack provenance remain `not-a-finding` and cannot affect candidate
+  status, CVSS, G4, or G5.
+
 - Added `research-replay-pack-v1` provenance packs. S8 and
   `agent_cli.py replay-pack` retain only allowlisted workspace-local artifact
   names, schema versions, sizes, SHA-256 fingerprints, and bounded lane/

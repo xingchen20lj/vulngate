@@ -41,12 +41,18 @@ from ..memory.ledger import render_finding_md, write_round_artifacts
 from ..memory.research import (build_residual_closure_report,
                                 build_round_memory, load_research_memory,
                                 load_review_feedback, merge_research_memory,
-                                write_research_memory)
+                                research_key, write_research_memory)
 from ..memory.portfolio import (build_research_portfolio,
                                 write_research_portfolio)
 from ..evaluation.research_consistency import (
     build_research_consistency,
     write_research_consistency,
+)
+from ..evaluation.research_consistency_actions import (
+    action_for_research_key,
+    build_research_consistency_actions,
+    load_research_consistency_actions,
+    write_research_consistency_actions,
 )
 from ..analysis.research_strategy import (apply_strategy_observations,
                                            apply_research_guidance,
@@ -648,15 +654,21 @@ def _attach_experiment_plans(ctx: AutoCtx, round_no: int,
     plan_candidates = pool if pool is not None else candidates
     benchmark_feedback = ctx.benchmark_feedback()
     strategy = load_research_strategy(ctx.root, ctx.cfg.name)
+    consistency_actions = load_research_consistency_actions(
+        ctx.root, ctx.cfg.name)
     if benchmark_feedback:
         ctx.write_artifact(round_no, "S2", "benchmark-feedback.json",
                            benchmark_feedback)
     plans = []
     for candidate in plan_candidates:
+        candidate_action = action_for_research_key(
+            consistency_actions, research_key(candidate),
+            candidate.get("candidate_id"))
         research_plan = plan_candidate_experiments(
             candidate, versions, benchmark_feedback=benchmark_feedback,
             research_guidance=strategy_guidance_for_candidate(
                 strategy, candidate),
+            consistency_action=candidate_action,
             target_type=ctx.cfg.target_type)
         candidate["experiment_plan"] = research_plan
         plan_row = dict(research_plan)
@@ -1118,7 +1130,9 @@ def _verify_web_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
                         availability_probe=cand.get("availability_probe", False),
                         capability_contract=capability_contract_from_candidate(cand),
                         residual_contracts=(cand.get("experiment_plan") or {}).get(
-                            "residual_contracts", []))
+                            "residual_contracts", []),
+                        consistency_action=(cand.get("experiment_plan") or {}).get(
+                            "consistency_action", {}))
              for v in sorted(urls) for case in authz_cases]
     spec = ShellPOCSpec(candidate_id=cid, script=script_name, cells=cells,
                         urls=urls, entry=cand.get("entry", ""),
@@ -1234,6 +1248,8 @@ def build_cells(ctx: AutoCtx, cand: Dict[str, Any]) -> List[MatrixCell]:
                                         capability_contract=capability_contract_from_candidate(cand),
                                         residual_contracts=(cand.get("experiment_plan") or {}).get(
                                             "residual_contracts", []),
+                                        consistency_action=(cand.get("experiment_plan") or {}).get(
+                                            "consistency_action", {}),
                                         required_runtime=required_runtime,
                                         java_bin=java_bin, java_home=java_home))
     return cells
@@ -1409,7 +1425,9 @@ def _verify_fuzz_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
         availability_probe=cand.get("availability_probe", False),
         capability_contract=capability_contract_from_candidate(cand),
         residual_contracts=(cand.get("experiment_plan") or {}).get(
-            "residual_contracts", []))
+            "residual_contracts", []),
+        consistency_action=(cand.get("experiment_plan") or {}).get(
+            "consistency_action", {}))
         for v in versions for s in (True, False)]
     spec = POCSpec(
         candidate_id=cid, class_name=class_name, src="FuzzProbe.java",
@@ -1692,7 +1710,10 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                                             "variant_fixture_plan", {})),
                                        ("comparison_contract",
                                         (c.get("experiment_plan") or {}).get(
-                                            "comparison_contract", {}))]
+                                            "comparison_contract", {})),
+                                       ("consistency_action",
+                                        (c.get("experiment_plan") or {}).get(
+                                            "consistency_action", {}))]
                                 )
                                 for c in candidates
                             ]})
@@ -1958,9 +1979,13 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
     research_consistency = build_research_consistency(memory)
     research_consistency_file = write_research_consistency(
         ctx.root, ctx.cfg.name, research_consistency)
+    research_consistency_actions = build_research_consistency_actions(
+        research_consistency)
+    research_consistency_actions_file = write_research_consistency_actions(
+        ctx.root, ctx.cfg.name, research_consistency_actions)
     portfolio = build_research_portfolio(
         memory, review_feedback, ctx.benchmark_feedback(),
-        research_consistency)
+        research_consistency, research_consistency_actions)
     portfolio_file = write_research_portfolio(ctx.root, ctx.cfg.name, portfolio)
     strategy = load_research_strategy(ctx.root, ctx.cfg.name)
     if not strategy:
@@ -2007,6 +2032,9 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
     ctx.write_artifact(round_no, "S8", "review-feedback.json", review_feedback)
     ctx.write_artifact(
         round_no, "S8", "research-consistency.json", research_consistency)
+    ctx.write_artifact(
+        round_no, "S8", "research-consistency-actions.json",
+        research_consistency_actions)
     ctx.write_artifact(round_no, "S8", "research-portfolio.json", portfolio)
     replay_pack = build_replay_pack(ctx.root, ctx.cfg.name)
     replay_pack_file = write_replay_pack(
@@ -2047,6 +2075,17 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                                ).get("conflicted_entries", 0),
         "unstable_entries": (research_consistency.get("summary") or {}
                              ).get("unstable_entries", 0),
+        "claim_status": "not-a-finding",
+    }
+    research_consistency_actions_info = {
+        "artifact": str(research_consistency_actions_file.relative_to(
+            ctx.root.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-consistency-actions.json"
+                          % (ctx.cfg.name, round_no),
+        "action_count": (research_consistency_actions.get("summary") or {}
+                          ).get("action_count", 0),
+        "action_counts": (research_consistency_actions.get("summary") or {}
+                           ).get("action_counts", {}),
         "claim_status": "not-a-finding",
     }
     research_replay_calibration_info = {
@@ -2139,6 +2178,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             "next_round": [],
             "research_memory": research_memory_info,
             "research_consistency": research_consistency_info,
+            "research_consistency_actions": research_consistency_actions_info,
             "review_feedback": review_feedback_info,
             "research_portfolio": research_portfolio_info,
             "research_replay_calibration": research_replay_calibration_info,
@@ -2165,6 +2205,8 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         store.save_stage("S8", {"ledger_rows": len(ledger_rows), "excluded": len(excluded),
                                 "research_memory": research_memory_info,
                                 "research_consistency": research_consistency_info,
+                                "research_consistency_actions":
+                                research_consistency_actions_info,
                                 "review_feedback": review_feedback_info,
                                 "research_portfolio": research_portfolio_info,
                                 "research_replay_calibration":
@@ -2178,6 +2220,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
     return {"next_candidates": _propose_next(ctx, candidates, rows),
             "research_memory": research_memory_info,
             "research_consistency": research_consistency_info,
+            "research_consistency_actions": research_consistency_actions_info,
             "review_feedback": review_feedback_info,
             "research_portfolio": research_portfolio_info,
             "research_replay_calibration": research_replay_calibration_info,

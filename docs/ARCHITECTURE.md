@@ -182,6 +182,26 @@ not count as no-effect observations, and every row remains
 schedule controlled re-observation; S8 writes both target and round artifacts,
 and replay-pack provenance covers them as well.
 
+The next boundary is `research-consistency-action-v1`. S8 materializes each
+non-consistent row as a bounded recheck contract with fixed isolation axes,
+positive/negative or environment-gap lanes, a two-run repeat shape, required
+observation codes, and falsifier codes. Inspect or rebuild it with:
+
+```bash
+python3 scripts/agent_cli.py research-consistency-actions <target> \
+  --workspace <audit-dir> --json
+```
+
+S2 matches the contract by stable `research_key` and adds a
+`consistency-recheck` experiment. S4 carries the normalized contract through
+MatrixCell metadata, `VULNGATE_CONSISTENCY_ACTION`, ordinary runtime-lab
+fixtures, and replay/differential cells. The contract is still a checklist,
+not an observation: missing independent replay, mismatched fixture/context,
+unreset state, and signature drift keep the research item pending. The action
+artifact, portfolio, strategy, and replay pack remain
+`claim_status=not-a-finding` and cannot change candidate status, CVSS, G4, or
+G5.
+
 ## Two operating modes
 
 | Mode | Reasoning | Setup | Typical use |

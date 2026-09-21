@@ -129,6 +129,15 @@ python3 scripts/agent_cli.py research-consistency <target> \
 
 它是矛盾检测器，不是漏洞检测器：环境缺口不会被算作“无 effect”，每条记录保持 `claim_status=not-a-finding`。portfolio 和 strategy 只用它安排受控复核；S8 同时写入 target/round artifact，replay pack 也会覆盖这些 provenance。
 
+阶段 29 将矛盾动作具体化为 `research-consistency-action-v1`。S8 为每个非一致条目生成固定的隔离轴、正/负向或环境缺口 lane、两次独立重复形状、required observation code 和 falsifier code。可用下面命令查看或重建：
+
+```bash
+python3 scripts/agent_cli.py research-consistency-actions <target> \
+  --workspace <audit-dir> --json
+```
+
+S2 按稳定 `research_key` 匹配 action，生成 `consistency-recheck` 计划；S4 将归一化契约传入 MatrixCell、`VULNGATE_CONSISTENCY_ACTION`、普通 runtime-lab fixture 以及 replay/differential cell。它仍只是检查清单，不是观测：缺少独立重放、fixture/context 不一致、状态未重置或只有签名漂移时，研究项继续保持 pending。action、portfolio、strategy 和 replay pack 都保持 `claim_status=not-a-finding`，不能改变 candidate status、CVSS、G4 或 G5。
+
 S1 中包含授权边界和危险 Sink 的启发式 Source→Sink 路径会写入
 `composite-chain-candidates.json`，并在 S2 进入与模型候选、控制图候选、同族差分候选相同的调度池。它们始终保留
 `heuristic-nearby` / `requires_manual_dataflow=true`，只能作为审计和 PoC

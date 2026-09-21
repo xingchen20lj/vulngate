@@ -24,6 +24,11 @@ from agent.evaluation.research_consistency import (  # noqa: E402
     build_research_consistency,
     normalize_research_consistency,
 )
+from agent.evaluation.research_consistency_actions import (  # noqa: E402
+    ACTION_SCHEMA_VERSION,
+    build_research_consistency_actions,
+    normalize_research_consistency_actions,
+)
 from agent.memory.portfolio import build_research_portfolio  # noqa: E402
 from agent.memory.research import (  # noqa: E402
     build_round_memory,
@@ -159,6 +164,34 @@ class ResearchConsistencyTests(unittest.TestCase):
         self.assertIn("evidence-inconsistent", item["reason_codes"])
         self.assertEqual("not-a-finding", guidance["claim_status"])
 
+        action = item["consistency_action"]
+        self.assertEqual("conflicted", action["status"])
+        self.assertIn("effect-observation", action["isolation_axes"])
+        self.assertEqual(["positive", "negative"],
+                         action["matrix_shape"]["paired_lanes"])
+        self.assertIn("independent-replay", action["required_observations"])
+        self.assertEqual("not-a-finding", action["claim_status"])
+
+    def test_action_artifact_is_bounded_and_recomputed(self):
+        consistency = build_research_consistency(
+            self._memory_with_two_observations())
+        actions = build_research_consistency_actions(consistency)
+        self.assertEqual(ACTION_SCHEMA_VERSION,
+                         actions["schema_version"])
+        row = actions["entries"][0]
+        self.assertEqual("conflicted", row["status"])
+        self.assertIn("state-reset-observed", row["required_observations"])
+        self.assertEqual("not-a-finding", actions["claim_status"])
+        raw = dict(actions)
+        raw["raw_stdout"] = "secret=must-not-persist"
+        raw["entries"] = [dict(row, isolation_axes=["raw-axis"],
+                                matrix_shape={"repeat_count": 999})]
+        normalized = normalize_research_consistency_actions(raw)
+        self.assertNotIn("raw_stdout", json.dumps(normalized))
+        self.assertNotIn("raw-axis", json.dumps(normalized))
+        self.assertEqual(2, normalized["entries"][0]["matrix_shape"]
+                         ["repeat_count"])
+
     def test_normalization_recomputes_summary_and_discards_raw_fields(self):
         raw = {
             "schema_version": CONSISTENCY_SCHEMA_VERSION,
@@ -210,6 +243,19 @@ class ResearchConsistencyTests(unittest.TestCase):
                          payload["consistency"]["schema_version"])
         self.assertTrue((self.root / "state" / "demo" / "coverage"
                          / "research-consistency.json").exists())
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = agent_cli.main([
+                "research-consistency-actions", "demo",
+                "--workspace", str(self.root), "--rebuild", "--json",
+            ])
+        self.assertEqual(0, status)
+        action_payload = json.loads(output.getvalue())
+        self.assertEqual(ACTION_SCHEMA_VERSION,
+                         action_payload["actions"]["schema_version"])
+        self.assertTrue((self.root / "state" / "demo" / "coverage"
+                         / "research-consistency-actions.json").exists())
 
 
 if __name__ == "__main__":

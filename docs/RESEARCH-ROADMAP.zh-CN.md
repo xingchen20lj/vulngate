@@ -43,6 +43,7 @@
 | 26 | 跨项目回放 cohort 校准 | 已实现（bounded cross-project replay cohort） | `research-replay-cohort-v1`、distinct-project/per-surface sufficiency、`replay-cohort-calibrate`、显式 config fallback | 只从多个目标的 bounded calibration 汇聚可重复的调度信号；样本不足保持默认，本地校准优先；不改变候选、CVSS、G4/G5 |
 | 27 | 可验证的真实项目回放 pack | 已实现（bounded provenance replay pack） | `research-replay-pack-v1`、文件 SHA-256 provenance、轮次 lane/comparison 摘要、`replay-pack` CLI、S8 自动产物 | 只消费 workspace-local allowlist 文件指纹和有界摘要；完整且自洽的 pack 才能进入 cohort；篡改、缺失和环境缺口保持可区分，不改变候选、CVSS、G4/G5 |
 | 28 | 跨轮证据一致性与矛盾复核 | 已实现（bounded evidence consistency） | `research-consistency-v1`、`research-consistency` CLI、portfolio/strategy controlled follow-up、S8 自动产物 | 只从有界 research-memory 事件识别 effect/reproduction/comparison/context 漂移；冲突只生成受控复核动作，环境缺口不变成负证据，不改变候选、CVSS、G4/G5 |
+| 29 | 一致性矛盾的受控复核契约 | 已实现（bounded S2→S4 recheck contract） | `research-consistency-action-v1`、`research-consistency-actions` CLI、S2 `consistency-recheck`、S4 MatrixCell/fixture/env、replay pack | 每个非一致条目生成固定隔离轴、正/负向 lane、重复次数、required observations 与 falsifiers；契约可进入 S2→S4 但仍是 `not-a-finding`，不改变候选、CVSS、G4/G5 |
 
 ## 已实现基础：可证伪实验规划
 
@@ -472,3 +473,13 @@ S2→S4→S8 的单向契约：
 - 对同一 `research_key` 识别 `effect-presence-drift`、`reproduction-drift`、`comparison-drift`、`state-drift` 和 `context-drift`，区分 `conflicted`、`unstable`、`insufficient`、`environment-gap` 与 `consistent`；环境缺口不参加“无 effect”比较；
 - project portfolio 会为非一致条目生成有界 next probe，strategy 将其转成 `repeat-with-controlled-context`，并可继续细化为隔离状态、收集独立观测或修复环境；它只改变下一轮研究优先级，不替代 S4 真实观测；
 - S8 的 config-driven 与 autonomous 管线自动写入 target/round consistency artifact，replay pack 也把它纳入 provenance allowlist，确保“矛盾已经被发现”本身可复核；所有状态保持 `claim_status=not-a-finding`，不改变 candidate status、CVSS、G4 或 G5。
+
+## 阶段 29 初步实现：一致性矛盾的受控复核契约
+
+阶段 28 能发现跨轮矛盾，但仅有 `next_action` 仍可能让下一轮重新退化为一次没有对照、没有状态重置或没有独立重复的 best-effort 运行。阶段 29 将动作具体化为 `research-consistency-action-v1`：
+
+- S8 为每个 `conflicted`、`unstable`、`insufficient` 或 `environment-gap` 条目生成一个有界 action entry，固定 `isolation_axes`、`matrix_shape`、`required_observations` 和 `falsifiers`；环境缺口只生成 `environment-repair` 轴和 `environment-status`，不伪造正/负向结果；
+- `agent_cli.py research-consistency-actions <target> --workspace <dir> [--rebuild] [--json]` 可查看或重建 action artifact。target/round artifact 与 portfolio 都只保存 allowlist 元数据、状态码和 `claim_status=not-a-finding`，不复制源码、payload、命令、stdout/stderr、凭据或 finding 结论；
+- S2 通过稳定 `research_key` 将 action 注入 `experiment-plans.json`，新增 `consistency-recheck` 计划并保留 surface variant 的 positive/negative/environment-gap lane；S4 MatrixCell、PoC 环境变量、普通 runtime-lab fixture 和 replay/differential cell 都携带同一份归一化契约；
+- 复核契约把“签名漂移不是 effect”“fixture identity 不一致”“context digest 不一致”“状态未重置”“缺少独立重放”等证伪条件显式化。契约未满足时只保持 pending/环境缺口，不改变 candidate status、CVSS、G4 或 G5；
+- replay pack 将 action schema 纳入 round/target provenance allowlist，回归测试验证 action 的重算、脱敏、CLI、portfolio/strategy 传递以及 S2→S4 fixture 环节。

@@ -12,6 +12,9 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from ..evaluation.benchmark import normalize_benchmark_feedback
+from ..evaluation.research_consistency_actions import (
+    normalize_research_consistency_action,
+)
 from ..memory.research import residual_meta
 from .authz import normalize_authz_case, normalize_authz_cases
 from .experiment import capability_contract_from_candidate
@@ -249,6 +252,7 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
                                versions: Sequence[Any] = (),
                                benchmark_feedback: Optional[Dict[str, Any]] = None,
                                research_guidance: Optional[Dict[str, Any]] = None,
+                               consistency_action: Optional[Dict[str, Any]] = None,
                                target_type: str = ""
                                ) -> Dict[str, Any]:
     """Return a stable, bounded experiment plan for one candidate.
@@ -277,6 +281,8 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
     residual_contracts = _residual_contracts(candidate)
     guidance = research_guidance if isinstance(research_guidance, dict) else {}
     action = _text(guidance.get("next_action"), 48).lower()
+    controlled_recheck = normalize_research_consistency_action(
+        consistency_action or guidance.get("consistency_action"))
     surface_variant_plan = normalize_surface_variant_plan(
         guidance.get("surface_variant_plan"))
     if not surface_variant_plan:
@@ -329,6 +335,30 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
             "RESIDUAL_ID/RESIDUAL_STATUS/RESIDUAL_FALSIFIER for each declared residual")
         baseline["falsifiers"].append(
             "an unexecuted or effect-producing residual cell remains pending")
+
+    if controlled_recheck:
+        tags.append("consistency-recheck")
+        recheck = _plan(
+            candidate_id,
+            "consistency-recheck",
+            "在固定上下文、fixture、状态生命周期和正/负向对照中重复矛盾观测；复核契约未满足前保持待定。",
+            list(controlled_recheck.get("required_observations") or []),
+            list(controlled_recheck.get("falsifiers") or []),
+            consistency_action={
+                "status": controlled_recheck.get("status"),
+                "next_action": controlled_recheck.get("next_action"),
+                "conflict_codes": list(
+                    controlled_recheck.get("conflict_codes") or []),
+                "isolation_axes": list(
+                    controlled_recheck.get("isolation_axes") or []),
+                "matrix_shape": dict(
+                    controlled_recheck.get("matrix_shape") or {}),
+                "claim_status": "not-a-finding",
+            },
+        )
+        # Put this immediately after baseline so an important consistency
+        # recheck is not truncated by the bounded MAX_PLANS budget.
+        plans.insert(1, recheck)
 
     if capability_chain:
         capability_observations = [
@@ -442,6 +472,7 @@ def plan_candidate_experiments(candidate: Dict[str, Any],
         "surface_variant_plan": surface_variant_plan,
         "variant_fixture_plan": variant_fixture_plan,
         "comparison_contract": comparison_contract,
+        "consistency_action": controlled_recheck,
         "plans": plans,
         "provenance": {
             "producer": "experiment-planner",

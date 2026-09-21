@@ -17,6 +17,30 @@ from agent.orchestrator.config import TargetConfig  # noqa: E402
 
 
 class ExperimentPlannerTests(unittest.TestCase):
+    def test_consistency_action_becomes_bounded_recheck_plan(self):
+        result = plan_candidate_experiments(
+            {"candidate_id": "CONS-1", "surface": "protocol"},
+            consistency_action={
+                "research_key": "rk-consistency",
+                "candidate_id": "CONS-1",
+                "status": "conflicted",
+                "next_action": "repeat-with-controlled-context",
+                "conflict_codes": ["effect-presence-drift", "raw-code"],
+            })
+        recheck = next(item for item in result["plans"]
+                       if item["kind"] == "consistency-recheck")
+        self.assertIn("consistency-recheck", result["strategy_tags"])
+        self.assertEqual("conflicted",
+                         result["consistency_action"]["status"])
+        self.assertEqual(["positive", "negative"],
+                         recheck["consistency_action"]["matrix_shape"]
+                         ["paired_lanes"])
+        self.assertIn("positive-effect-or-safe-equivalent",
+                      recheck["required_observations"])
+        self.assertNotIn("raw-code", json.dumps(result))
+        self.assertEqual("not-a-finding", recheck["consistency_action"]
+                         ["claim_status"])
+
     def test_benchmark_feedback_adds_bounded_observation_without_changing_claims(self):
         feedback = {
             "schema_version": BENCHMARK_FEEDBACK_SCHEMA_VERSION,

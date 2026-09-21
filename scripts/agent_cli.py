@@ -32,6 +32,7 @@ Usage:
   agent_cli.py portfolio <target> --workspace <dir> [--rebuild]
                               [--benchmark-feedback <json>] [--json]
   agent_cli.py research-consistency <target> --workspace <dir> [--rebuild] [--json]
+  agent_cli.py research-consistency-actions <target> --workspace <dir> [--rebuild] [--json]
   agent_cli.py research-strategy <target> --workspace <dir> [--rebuild]
                                [--benchmark-feedback <json>] [--json]
   agent_cli.py coverage <target> [--workspace <dir>] [--rebuild] [--show-uncovered]
@@ -164,6 +165,7 @@ def _matrix_cell(c: Dict[str, Any]) -> MatrixCell:
         concurrency=c.get("concurrency", 1),
         availability_probe=c.get("availability_probe", False),
         capability_contract=c.get("capability_contract", {}),
+        consistency_action=c.get("consistency_action", {}),
         required_runtime=str(c.get("required_runtime", c.get("requested_runtime", ""))),
         java_bin=str(c.get("java_bin", "")),
         java_home=str(c.get("java_home", "")),
@@ -958,6 +960,67 @@ def cmd_research_consistency(args: argparse.Namespace) -> int:
                 row.get("candidate_id") or row.get("research_key"),
                 row.get("status"), row.get("next_action"),
                 ",".join(row.get("conflict_codes") or []) or "-"))
+    return 0
+
+
+def cmd_research_consistency_actions(args: argparse.Namespace) -> int:
+    """Show or rebuild bounded controlled recheck contracts."""
+    from agent.evaluation.research_consistency import (
+        build_research_consistency,
+        load_research_consistency,
+        write_research_consistency,
+    )
+    from agent.evaluation.research_consistency_actions import (
+        build_research_consistency_actions,
+        consistency_actions_path,
+        load_research_consistency_actions,
+        write_research_consistency_actions,
+    )
+    from agent.memory.research import load_research_memory
+
+    workspace = Path(args.workspace).resolve()
+    consistency = load_research_consistency(workspace, args.target)
+    if args.rebuild or not consistency:
+        consistency = build_research_consistency(
+            load_research_memory(workspace, args.target))
+        write_research_consistency(workspace, args.target, consistency)
+    actions = load_research_consistency_actions(workspace, args.target)
+    if args.rebuild or not actions:
+        actions = build_research_consistency_actions(consistency)
+        write_research_consistency_actions(workspace, args.target, actions)
+    if not actions:
+        _out({"error": "research consistency actions artifact not found",
+              "hint": "run an S8 round or pass --rebuild",
+              "artifact": str(consistency_actions_path(
+                  workspace, args.target))})
+        return 2
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "artifact": str(consistency_actions_path(
+            workspace, args.target).relative_to(workspace)),
+        "actions": actions,
+    }
+    if args.json:
+        _out(payload)
+    else:
+        summary = actions.get("summary", {})
+        print("research consistency actions: %s" % payload["artifact"])
+        print("  actions=%s conflicted=%s unstable=%s environment_gap=%s "
+              "insufficient=%s claim_status=%s" % (
+                  summary.get("action_count", 0),
+                  summary.get("conflicted_entries", 0),
+                  summary.get("unstable_entries", 0),
+                  summary.get("environment_gap_entries", 0),
+                  summary.get("insufficient_entries", 0),
+                  actions.get("claim_status", "not-a-finding")))
+        for row in actions.get("entries") or []:
+            if not isinstance(row, dict):
+                continue
+            print("  action: %s [%s] next=%s axes=%s" % (
+                row.get("candidate_id") or row.get("research_key"),
+                row.get("status"), row.get("next_action"),
+                ",".join(row.get("isolation_axes") or []) or "-"))
     return 0
 
 
@@ -1840,6 +1903,19 @@ def build_parser() -> argparse.ArgumentParser:
     rc.add_argument("--json", action="store_true",
                     help="machine-readable output")
     rc.set_defaults(fn=cmd_research_consistency)
+
+    rca = sub.add_parser(
+        "research-consistency-actions",
+        help="show or rebuild bounded controlled consistency recheck contracts",
+    )
+    rca.add_argument("target", help="target name (state/<target>/...)")
+    rca.add_argument("--workspace", required=True,
+                     help="workspace root containing state/<target>/")
+    rca.add_argument("--rebuild", action="store_true",
+                     help="rebuild consistency and controlled recheck actions")
+    rca.add_argument("--json", action="store_true",
+                     help="machine-readable output")
+    rca.set_defaults(fn=cmd_research_consistency_actions)
 
     rs = sub.add_parser(
         "research-strategy",
