@@ -126,6 +126,22 @@ python3 scripts/agent_cli.py semantic-transforms <target> \
   --workspace <audit-dir> --show-candidates --json
 ```
 
+`semantic-python-binding-evidence-v1` is the next language-aware adapter. For
+Python files it parses one bounded AST and explores simple assignments,
+aliases, guards, exception handlers, and finite loop/branch paths. It records
+whether a transformed value is bound to the sink, whether the sink still sees
+the raw value, whether paths merge, or whether the adapter cannot resolve the
+expression. Java, Go, JavaScript and other unsupported languages are emitted as
+explicit adapter gaps rather than being treated as safe. This is still an
+abstract syntax witness, not a complete CFG/SSA/type/runtime proof; its rows
+and `semantic-python-binding-candidates.json` remain
+`claim_status=not-a-finding` with `requires_manual_dataflow=true`.
+
+```bash
+python3 scripts/agent_cli.py semantic-bindings <target> \
+  --workspace <audit-dir> --show-candidates --json
+```
+
 S8 also emits a bounded `research-strategy-guidance-v1` view. It joins only
 strategy observation metadata, the latest review status, and explicit variant
 coverage, then maps them to finite next-action classes. Guidance can adjust

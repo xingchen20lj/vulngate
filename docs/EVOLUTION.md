@@ -33,6 +33,27 @@ python3 scripts/agent_cli.py semantic-transforms <target> \
   --workspace <audit-dir> --show-candidates --json
 ```
 
+## Unreleased language-aware Python value binding
+
+`semantic-python-binding-evidence-v1` adds a syntax-aware companion to the
+lexical transform layer. It parses bounded Python files once, follows simple
+name assignments and aliases, and explores finite branch, exception, and loop
+shapes. The result distinguishes `ast-bound`, `ast-raw-at-sink`,
+`ast-guard-condition`, `ast-branch-merged`, `ast-derived-value`, unresolved
+states, and explicit unsupported-language gaps. It does not claim complete CFG,
+SSA, type identity, path feasibility, sanitizer semantics, or runtime effect;
+all rows and `pybind-*` candidates remain `not-a-finding` research leads.
+
+```bash
+python3 scripts/agent_cli.py semantic-bindings <target> \
+  --workspace <audit-dir> --show-candidates --json
+```
+
+The adapter is persisted in S1, the coverage index, the config-driven and
+autonomous pipelines, and the deterministic S2 candidate pool. Its purpose is
+to make the most dangerous lexical false positive visible: a nearby sanitizer
+may exist while another branch or the original input still reaches the sink.
+
 The layer is merged into the deterministic S2 static candidate pool and is
 also mirrored into config-driven and autonomous S1 artifacts. A bound result
 does not close G4/G5; an unresolved or discarded result is a review task, not

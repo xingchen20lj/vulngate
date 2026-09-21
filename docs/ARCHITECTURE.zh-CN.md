@@ -279,6 +279,18 @@ python3 scripts/agent_cli.py semantic-transforms <target> \
   --workspace <audit-dir> --show-candidates --json
 ```
 
+`semantic-python-binding-evidence-v1` 是下一层语言感知适配器：对 Python 文件只解析一次有界 AST，探索简单赋值、
+别名、守卫、异常处理以及有限分支/循环路径，记录变换后的值是否绑定到 sink、sink 是否仍使用原始值、路径是否
+合并，或表达式是否未解析。Java、Go、JavaScript 等未实现适配器的语言会明确记录 adapter gap，不会被当成安全。
+它仍然是抽象语法见证，不是完整 CFG/SSA/类型/运行时证明；记录和
+`semantic-python-binding-candidates.json` 始终保持 `claim_status=not-a-finding` 与
+`requires_manual_dataflow=true`。
+
+```bash
+python3 scripts/agent_cli.py semantic-bindings <target> \
+  --workspace <audit-dir> --show-candidates --json
+```
+
 ## 两种运行模式
 
 | 模式 | 推理方 | 配置 | 典型用途 |

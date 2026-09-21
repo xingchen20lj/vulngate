@@ -102,6 +102,7 @@ Evidence Gates
 - **控制流证据** —— S1 增加 `semantic-controlflow-evidence-v1`，记录可能支配 sink 的守卫、`else`/`except` 备用路径和同块普通检查；完整 CFG、异常、循环和路径可行性仍明确保留为研究缺口。
 - **Python AST 结构证据** —— S1 增加 `semantic-ast-evidence-v1`，对 Python 文件确认语法树作用域、终止守卫形状、`else`/异常备用路径和解析缺口；它仍是有界结构见证，不是完整 CFG 或漏洞结论。
 - **语义变换绑定证据** —— S1 增加 `semantic-transform-evidence-v1`，对校验/清洗调用的结果做有界绑定追踪，区分结果真正到达 sink、被丢弃、被覆盖和未解析；它是研究线索，不是 sanitizer 语义证明或漏洞结论。
+- **语言感知值绑定证据** —— S1 增加 `semantic-python-binding-evidence-v1`，用有界 Python AST 适配器探索简单赋值及有限分支/异常/循环路径，明确保留 sink 使用原值、混合路径、派生值、未解析和不支持语言状态；它仍是静态研究证据，不是 SSA、类型、运行时或漏洞证明。
 - **能力链运行时契约** —— 能力候选会把有界 `capability_contract` 传入 S4 cell；`CAPABILITY`/`TRANSITION` 轨迹会被分类为 `no-trace`、`partial` 或 `complete`，终点 typed effect 仍单独要求真实证据。
 - **运行时研究实验室** —— 定向 fuzz 输入会固化为 corpus fixture 和缩减 reproducer；有界重放与版本 × SafeMode 对照会保留稳定性、差分、签名漂移和前置缺口证据，但不会直接升级为漏洞结论。
 - **普通 S4 fixture 适配器** —— Java 与 Shell PoC cell 可固化为脱敏执行 fixture 并有界重放；`S4/runtime-lab.json` 将稳定性、版本/SafeMode 差异和 harness 缺口与 G4/G5 结论分开。
@@ -153,6 +154,7 @@ python3 scripts/agent_cli.py semantic-calls demo --workspace /path/to/audit --sh
 python3 scripts/agent_cli.py semantic-controlflow demo --workspace /path/to/audit --show-candidates
 python3 scripts/agent_cli.py semantic-ast demo --workspace /path/to/audit --show-candidates
 python3 scripts/agent_cli.py semantic-transforms demo --workspace /path/to/audit --show-candidates
+python3 scripts/agent_cli.py semantic-bindings demo --workspace /path/to/audit --show-candidates
 python3 scripts/agent_cli.py benchmark --manifest benchmarks/research-benchmark-v1.json \
   --run benchmarks/research-benchmark-sample-run.json \
   --feedback-out state/research-benchmark-feedback.json --json
@@ -222,7 +224,7 @@ npm install -g @openai/codex
 
 | 阶段 | 目的 | 代表性输出 | 闸门 |
 |---|---|---|---|
-| S1 | 攻击面、入口、危险调用点、修复历史/变体、项目画像、目标类型规则、复合攻击链、能力原语、语义路径/守卫/调用/控制流/AST/变换绑定证据与攻击路径威胁模型 | `S1/entry-inventory.json`、`S1/security-fix-history.json`、`S1/patch-variants.json`、`S1/project-profile.json`、`S1/target-rules.json`、`S1/composite-chain-candidates.json`、`S1/capability-graph.json`、`S1/capability-candidates.json`、`S1/semantic-path-evidence.json`、`S1/semantic-path-candidates.json`、`S1/semantic-guard-evidence.json`、`S1/semantic-guard-candidates.json`、`S1/semantic-call-evidence.json`、`S1/semantic-call-candidates.json`、`S1/semantic-controlflow-evidence.json`、`S1/semantic-controlflow-candidates.json`、`S1/semantic-ast-evidence.json`、`S1/semantic-ast-candidates.json`、`S1/semantic-transform-evidence.json`、`S1/semantic-transform-candidates.json`、`S1/threat-model.json` | G0 死代码、G1 可达性 |
+| S1 | 攻击面、入口、危险调用点、修复历史/变体、项目画像、目标类型规则、复合攻击链、能力原语、语义路径/守卫/调用/控制流/AST/变换绑定/语言感知值绑定证据与攻击路径威胁模型 | `S1/entry-inventory.json`、`S1/security-fix-history.json`、`S1/patch-variants.json`、`S1/project-profile.json`、`S1/target-rules.json`、`S1/composite-chain-candidates.json`、`S1/capability-graph.json`、`S1/capability-candidates.json`、`S1/semantic-path-evidence.json`、`S1/semantic-path-candidates.json`、`S1/semantic-guard-evidence.json`、`S1/semantic-guard-candidates.json`、`S1/semantic-call-evidence.json`、`S1/semantic-call-candidates.json`、`S1/semantic-controlflow-evidence.json`、`S1/semantic-controlflow-candidates.json`、`S1/semantic-ast-evidence.json`、`S1/semantic-ast-candidates.json`、`S1/semantic-transform-evidence.json`、`S1/semantic-transform-candidates.json`、`S1/semantic-python-binding-evidence.json`、`S1/semantic-python-binding-candidates.json`、`S1/threat-model.json` | G0 死代码、G1 可达性 |
 | S2 | 候选矩阵、可证伪研究计划、受控一致性复核与跨产物研究策略：surface × entry × input × mechanism | `S2/candidate-matrix.json`、`S2/experiment-plans.json`、`S2/research-strategy.json` | — |
 | S3 | 带 file:line 证据的源码审计、Source→Sink hints、residuals | `S3/audit-notes.json`、`S3/residuals.json` | G1b 默认配置门控 |
 | S4 | PoC 矩阵：版本 × safe mode × 前置条件；可选 authz、有界状态/并发、能力 transition、一致性复核契约与重放/差分实验室 | `S4/matrix-runs/<c>/cells.json`、`S4/execution-status.json`、`S4/authz-matrix.json`、`S4/runtime-lab.json` | G4 运行时证据 |

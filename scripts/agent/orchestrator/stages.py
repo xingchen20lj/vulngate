@@ -207,6 +207,7 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
     from ..analysis import semantic_controlflow as semantic_controlflow
     from ..analysis import semantic_ast as semantic_ast
     from ..analysis import semantic_transforms as semantic_transform
+    from ..analysis import semantic_bindings as semantic_binding
     from ..analysis import semantic_paths as semantic
     from ..analysis import threat_model as threat_model_analysis
     from ..analysis.inventory import CoverageStore, build_inventory, persist_inventory
@@ -221,6 +222,7 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
                 semantic_controlflow.SEMANTIC_CONTROLFLOW_INDEX,
                 semantic_ast.SEMANTIC_AST_INDEX,
                 semantic_transform.SEMANTIC_TRANSFORM_INDEX,
+                semantic_binding.SEMANTIC_BINDING_INDEX,
                 threat_model_analysis.THREAT_MODEL_INDEX)
     missing = [name for name in required if not store.path(name).exists()]
     built = False
@@ -250,6 +252,8 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
         semantic_ast.SEMANTIC_AST_INDEX) or {}).get("summary") or {}
     semantic_transform_summary = (store.read(
         semantic_transform.SEMANTIC_TRANSFORM_INDEX) or {}).get("summary") or {}
+    semantic_binding_summary = (store.read(
+        semantic_binding.SEMANTIC_BINDING_INDEX) or {}).get("summary") or {}
     threat_model_summary = (store.read(
         threat_model_analysis.THREAT_MODEL_INDEX) or {}).get("summary") or {}
     if control_summary:
@@ -351,6 +355,18 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
             "verdicts": semantic_transform_summary.get("verdicts"),
             "candidates": semantic_transform_summary.get("candidates"),
             "claim_status": semantic_transform_summary.get(
+                "claim_status", "not-a-finding"),
+        }
+    if semantic_binding_summary:
+        info["semantic_bindings"] = {
+            "flows": semantic_binding_summary.get("flows"),
+            "controls": semantic_binding_summary.get("controls"),
+            "files": semantic_binding_summary.get("files"),
+            "parsed_files": semantic_binding_summary.get("parsed_files"),
+            "parser_status": semantic_binding_summary.get("parser_status"),
+            "relations": semantic_binding_summary.get("relations"),
+            "candidates": semantic_binding_summary.get("candidates"),
+            "claim_status": semantic_binding_summary.get(
                 "claim_status", "not-a-finding"),
         }
     if threat_model_summary:
@@ -520,6 +536,7 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
         from ..analysis import semantic_controlflow as semantic_controlflow
         from ..analysis import semantic_ast as semantic_ast
         from ..analysis import semantic_transforms as semantic_transform
+        from ..analysis import semantic_bindings as semantic_binding
         from ..analysis import semantic_paths as semantic
         from ..analysis.inventory import CoverageStore
         coverage_store = CoverageStore(ctx.workspace, ctx.target)
@@ -568,6 +585,12 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
         ctx.store.write_artifact(
             "S1", "semantic-transform-candidates.json",
             semantic_transform.load_semantic_transform_candidates(coverage_store))
+        ctx.store.write_artifact(
+            "S1", "semantic-python-binding-evidence.json",
+            semantic_binding.load_semantic_binding_evidence(coverage_store))
+        ctx.store.write_artifact(
+            "S1", "semantic-python-binding-candidates.json",
+            semantic_binding.load_semantic_binding_candidates(coverage_store))
     except Exception as exc:  # pragma: no cover - evidence mirror is best-effort
         ctx.store.write_artifact("S1", "capability-graph-error.json", {
             "error": "%s: %s" % (type(exc).__name__, exc)})

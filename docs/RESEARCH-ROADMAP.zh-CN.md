@@ -54,6 +54,7 @@
 | 37 | 有界控制流关系与备用路径 | 已实现（bounded control-flow relation evidence） | `semantic-controlflow-evidence-v1`、`semantic-controlflow-evidence.json`、`semantic-controlflow-candidates.json`、`semantic-controlflow` CLI | 区分可能支配、终止拒绝分支之后、`else`/`except` alternate path 和同块未验证检查；不声称完整 CFG、路径可行性或授权绕过 |
 | 38 | Python AST 结构见证与解析缺口 | 已实现（bounded Python-AST structural evidence） | `semantic-ast-evidence-v1`、`semantic-ast-evidence.json`、`semantic-ast-candidates.json`、`semantic-ast` CLI | 以语法树确认 Python 作用域、终止守卫、`else`/异常备用路径和解析状态；不声称完整 CFG、SSA、类型/运行时证明，其他语言保留显式降级 |
 | 39 | 变换结果绑定与清洗失效线索 | 已实现（bounded transform binding evidence） | `semantic-transform-evidence-v1`、`semantic-transform-evidence.json`、`semantic-transform-candidates.json`、`semantic-transforms` CLI | 区分校验/清洗结果真正绑定、被丢弃、被覆盖、未绑定和跨符号缺口；不声称 sanitizer 语义、SSA、完整别名或漏洞结论 |
+| 40 | 语言感知值绑定与混合路径 | 已实现（bounded Python AST value-flow adapter） | `semantic-python-binding-evidence-v1`、`semantic-python-binding-evidence.json`、`semantic-python-binding-candidates.json`、`semantic-bindings` CLI | 对 Python 简单赋值/别名/守卫/异常/有限循环路径区分变换值、原值、派生值、混合路径和未解析状态；其他语言明确 adapter gap，不声称完整 CFG/SSA/类型/运行时或漏洞结论 |
 
 ## 已实现基础：可证伪实验规划
 
@@ -587,3 +588,13 @@ S2→S4→S8 的单向契约：
 - 对 static control map 已判为 guarded/partial 且变换绑定未闭合的路径生成稳定 `xform-*` 候选，候选包含 entry/control/sink 位置、变换关系、需要确认的 API 返回/原地修改/异常语义以及 typed-effect/运行时验证要求，并加入完整 S2 静态候选池；
 - S1 coverage、config-driven 和 autonomous 管线共用同一 artifact，`semantic-transforms` CLI 可单独查看或触发覆盖索引重建。记录和候选始终保持 `claim_status=not-a-finding`、`confidence=heuristic-nearby`、`requires_manual_dataflow=true`，不会改变候选状态、CVSS、G4/G5；
 - 该层的后续升级顺序是：先用真实项目回放校准误报/漏报，再增加语言 AST/类型/SSA 适配，最后才允许把某些 API 的语义作为显式、可审计的 allowlist 知识输入；绝不把函数名本身当成“已安全”。
+
+## 阶段 40 实现：语言感知值绑定与混合路径
+
+阶段 39 的词法绑定可以指出“清洗结果似乎被丢弃或覆盖”，但它无法可靠处理 Python 的嵌套分支、异常处理、循环和语法作用域。阶段 40 增加 `semantic-python-binding-evidence-v1`，把这一层升级为可审计的语言适配器：
+
+- Python 文件只在有界字节数和 AST 节点数内解析一次；根据已有 transform flow 的 control/sink 位置选择函数作用域，跟踪参数、简单别名、直接赋值、表达式派生和有限分支/异常/循环路径；不保存源码原文、AST dump、payload 或运行时输出；
+- 对每条控制记录区分 `ast-bound`、`ast-raw-at-sink`、`ast-guard-condition`、`ast-branch-merged`、`ast-derived-value`、`ast-unresolved`、sink 未到达、解析失败和 `unsupported-language`。路径合并保留原值与变换值的差异，不把某一条安全路径覆盖成整体安全；
+- 对 static control map 已判为 guarded/partial 且值流未闭合的路径生成稳定 `pybind-*` 候选，加入完整 S2 静态池；候选保持 `claim_status=not-a-finding`、`confidence=heuristic-nearby`、`requires_manual_dataflow=true`，不改变候选状态、CVSS、G4/G5；
+- S1 coverage、config-driven、autonomous 与 `semantic-bindings` CLI 共用同一 artifact。Java、Go、JavaScript 等未实现 AST backend 的语言保留明确 adapter gap，下一步再按语言增加后端；
+- 适配器不是完整 CFG、SSA、类型系统或 sanitizer allowlist。下一阶段应先用真实项目/固定样例的正向、负向、混合路径 replay 校准，再增加类型与显式 API 语义证据，不能把函数名直接当作安全证明。

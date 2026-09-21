@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added `semantic-python-binding-evidence-v1` and
+  `semantic-python-binding-candidates.json`. The bounded Python AST adapter
+  follows simple assignments, aliases, guards, exceptions, and finite branch /
+  loop paths, preserving raw-at-sink, mixed, derived, unresolved, and
+  unsupported-language states as `not-a-finding` research evidence.
+- Added `agent_cli.py semantic-bindings` and merged language-aware value-flow
+  gaps into the static S2 candidate pool. The adapter does not claim complete
+  CFG/SSA, type identity, runtime effect, sanitizer semantics, or safety.
 - Added `semantic-transform-evidence-v1` and
   `semantic-transform-candidates.json`. S1 now records bounded evidence for
   whether validation/sanitization results are bound to the same sink input,

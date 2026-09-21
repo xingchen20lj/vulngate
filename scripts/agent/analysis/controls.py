@@ -847,6 +847,12 @@ def static_candidates(store: Any) -> List[Dict[str, Any]]:
     from . import semantic_transforms as semantic_transform_analysis
     candidates.extend(
         semantic_transform_analysis.load_semantic_transform_candidates(store))
+    # The Python AST value-flow adapter is a stronger, syntax-aware companion
+    # to the lexical transform layer.  It remains a separate source so a
+    # future language backend can replace it without changing pool semantics.
+    from . import semantic_bindings as semantic_binding_analysis
+    candidates.extend(
+        semantic_binding_analysis.load_semantic_binding_candidates(store))
     return candidates
 
 

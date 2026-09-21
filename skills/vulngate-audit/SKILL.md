@@ -167,7 +167,7 @@ Run stages in order unless a hard gate or explicit scope rule ends a candidate.
   python3 "$PLUGIN_ROOT/scripts/agent_cli.py" coverage <target> --workspace <audit-dir> --root <source-root> --rebuild --json
   ```
 
-  Keep `<audit-dir>` outside the plugin cache. In S2, merge all candidates from `control-candidates.json`, `differential-candidates.json`, `capability-candidates.json`, `semantic-path-candidates.json`, `semantic-guard-candidates.json`, `semantic-call-candidates.json`, `semantic-controlflow-candidates.json`, `semantic-ast-candidates.json`, and `semantic-transform-candidates.json` into the host's candidate pool before calling `schedule`; use `selected_ids` for this round and preserve the full pool for later rounds. After writing the S8 ledger, run `coverage` again with the same workspace to refresh review status. The config-driven pipeline performs S1 indexing and S2 merging automatically.
+  Keep `<audit-dir>` outside the plugin cache. In S2, merge all candidates from `control-candidates.json`, `differential-candidates.json`, `capability-candidates.json`, `semantic-path-candidates.json`, `semantic-guard-candidates.json`, `semantic-call-candidates.json`, `semantic-controlflow-candidates.json`, `semantic-ast-candidates.json`, `semantic-transform-candidates.json`, and `semantic-python-binding-candidates.json` into the host's candidate pool before calling `schedule`; use `selected_ids` for this round and preserve the full pool for later rounds. After writing the S8 ledger, run `coverage` again with the same workspace to refresh review status. The config-driven pipeline performs S1 indexing and S2 merging automatically.
 - **Coverage ledger:** S1 also builds the target-scoped `state/<target>/coverage/` index (source universe, entries, sinks, security controls) and writes the coverage summary. Every production source file is either `indexed` or carries an explicit `skip_reason`; excluded directories are recorded with a file count instead of being dropped silently. Query it at any time:
 
   ```bash
@@ -175,7 +175,7 @@ Run stages in order unless a hard gate or explicit scope rule ends a candidate.
   ```
 
   The audit's stop condition is `HIGH-risk uncovered == 0`, not "no new candidates". A zero denominator renders `n/a`, never `100%`.
-- **Cross-procedural layer:** the same index also carries `symbol-index.json`, `call-graph.json`, `flow-index.json`, `sink-reachability.json`, `control-map.json`, `sibling-groups.json`, `differential-index.json`, the bounded `capability-graph.json` / `capability-candidates.json`, `semantic-path-evidence.json` / `semantic-path-candidates.json`, `semantic-guard-evidence.json` / `semantic-guard-candidates.json`, bounded `semantic-call-evidence.json` / `semantic-call-candidates.json`, bounded `semantic-controlflow-evidence.json` / `semantic-controlflow-candidates.json`, bounded Python `semantic-ast-evidence.json` / `semantic-ast-candidates.json`, and bounded `semantic-transform-evidence.json` / `semantic-transform-candidates.json`. Sinks are analysed in both directions — forward from every external entry, and backward from every sink — so a path only the sink scan can see is either a confirmed flow or a recorded `coverage_gap`. Flow paths are `heuristic-callgraph`: they are leads, never proofs, and nothing in this layer may set `runtime-verified`. `FlowRecord.direction` states the path *shape*:
+- **Cross-procedural layer:** the same index also carries `symbol-index.json`, `call-graph.json`, `flow-index.json`, `sink-reachability.json`, `control-map.json`, `sibling-groups.json`, `differential-index.json`, the bounded `capability-graph.json` / `capability-candidates.json`, `semantic-path-evidence.json` / `semantic-path-candidates.json`, `semantic-guard-evidence.json` / `semantic-guard-candidates.json`, bounded `semantic-call-evidence.json` / `semantic-call-candidates.json`, bounded `semantic-controlflow-evidence.json` / `semantic-controlflow-candidates.json`, bounded Python `semantic-ast-evidence.json` / `semantic-ast-candidates.json`, bounded `semantic-transform-evidence.json` / `semantic-transform-candidates.json`, and bounded Python `semantic-python-binding-evidence.json` / `semantic-python-binding-candidates.json`. Sinks are analysed in both directions — forward from every external entry, and backward from every sink — so a path only the sink scan can see is either a confirmed flow or a recorded `coverage_gap`. Flow paths are `heuristic-callgraph`: they are leads, never proofs, and nothing in this layer may set `runtime-verified`. `FlowRecord.direction` states the path *shape*:
   - `cross-procedural` — at least one call edge (the useful case);
   - `intra-symbol` — entry and sink in the same method; this is the archetypal "handler does the dangerous thing" finding and keeps full priority;
   - `module-scope` — entry and sink both at module level in one file. Reported, but ranked below real call chains, because a file is not a handler.
@@ -237,6 +237,13 @@ Run stages in order unless a hard gate or explicit scope rule ends a candidate.
 
   ```bash
   python3 scripts/agent_cli.py semantic-transforms <target> \
+    --workspace <audit-dir> --show-candidates --json
+  ```
+
+- **Language-aware value binding evidence:** `semantic-python-binding-evidence-v1` adds a bounded Python AST adapter over transform flows. It follows simple assignments and aliases and explores finite branch, exception, loop, and match paths, keeping `ast-bound`, `ast-raw-at-sink`, `ast-branch-merged`, `ast-derived-value`, `ast-guard-condition`, unresolved states, and `unsupported-language` explicit. It is an abstract interpreter, not complete CFG/SSA, type, alias, runtime, API-semantic, or path-feasibility proof; no row or candidate is a finding or proof of safety. Rows and `pybind-*` candidates remain `claim_status=not-a-finding`, `heuristic-nearby`, and `requires_manual_dataflow=true`.
+
+  ```bash
+  python3 scripts/agent_cli.py semantic-bindings <target> \
     --workspace <audit-dir> --show-candidates --json
   ```
 
@@ -1273,7 +1280,7 @@ reports/<target>/round-NN/...
   python3 "$PLUGIN_ROOT/scripts/agent_cli.py" coverage <target> --workspace <audit-dir> --root <source-root> --rebuild --json
   ```
 
-  `<audit-dir>` 必须在插件缓存之外。S2 先把 `control-candidates.json`、`differential-candidates.json`、`capability-candidates.json`、`semantic-path-candidates.json`、`semantic-guard-candidates.json`、`semantic-call-candidates.json`、`semantic-controlflow-candidates.json`、`semantic-ast-candidates.json` 和 `semantic-transform-candidates.json` 的完整候选与宿主候选合并，再调用 `schedule`；本轮按 `selected_ids` 执行，完整池保留到后续轮次。S8 账本落盘后使用同一 workspace 再运行 `coverage` 刷新审计状态。配置驱动的管线会自动完成 S1 索引和 S2 合并。
+  `<audit-dir>` 必须在插件缓存之外。S2 先把 `control-candidates.json`、`differential-candidates.json`、`capability-candidates.json`、`semantic-path-candidates.json`、`semantic-guard-candidates.json`、`semantic-call-candidates.json`、`semantic-controlflow-candidates.json`、`semantic-ast-candidates.json`、`semantic-transform-candidates.json` 和 `semantic-python-binding-candidates.json` 的完整候选与宿主候选合并，再调用 `schedule`；本轮按 `selected_ids` 执行，完整池保留到后续轮次。S8 账本落盘后使用同一 workspace 再运行 `coverage` 刷新审计状态。配置驱动的管线会自动完成 S1 索引和 S2 合并。
 - **覆盖率账本：** S1 同时构建目标级 `state/<target>/coverage/` 索引（源码全集、入口、sink、安全控制），并写出覆盖率摘要。每个生产源码文件要么 `indexed`，要么带明确 `skip_reason`；被排除的目录会记录文件数，而不是被静默丢弃。随时可查：
 
   ```bash
@@ -1281,7 +1288,7 @@ reports/<target>/round-NN/...
   ```
 
   审计的停止条件是 `高风险未审计 == 0`，不是“没有新候选”。分母为 0 时渲染 `n/a`，绝不显示 `100%`。
-- **跨过程层：** 同一份索引还包含 `symbol-index.json`、`call-graph.json`、`flow-index.json`、`sink-reachability.json`、`control-map.json`、`sibling-groups.json`、`differential-index.json`、有界的 `capability-graph.json` / `capability-candidates.json`，以及 `semantic-path-evidence.json` / `semantic-path-candidates.json`、`semantic-guard-evidence.json` / `semantic-guard-candidates.json`、`semantic-call-evidence.json` / `semantic-call-candidates.json`、`semantic-controlflow-evidence.json` / `semantic-controlflow-candidates.json`、Python 专用的 `semantic-ast-evidence.json` / `semantic-ast-candidates.json`、`semantic-transform-evidence.json` / `semantic-transform-candidates.json`。sink 做双向分析——从每个外部入口正向、从每个 sink 反向——只有 sink 扫描能看见的路径会成为有效 flow 或记录在案的 `coverage_gap`。flow 路径置信度是 `heuristic-callgraph`：它是线索，不是证明，本层任何结论都不得置为 `runtime-verified`。`FlowRecord.direction` 表示路径**形态**：
+- **跨过程层：** 同一份索引还包含 `symbol-index.json`、`call-graph.json`、`flow-index.json`、`sink-reachability.json`、`control-map.json`、`sibling-groups.json`、`differential-index.json`、有界的 `capability-graph.json` / `capability-candidates.json`，以及 `semantic-path-evidence.json` / `semantic-path-candidates.json`、`semantic-guard-evidence.json` / `semantic-guard-candidates.json`、`semantic-call-evidence.json` / `semantic-call-candidates.json`、`semantic-controlflow-evidence.json` / `semantic-controlflow-candidates.json`、Python 专用的 `semantic-ast-evidence.json` / `semantic-ast-candidates.json`、`semantic-transform-evidence.json` / `semantic-transform-candidates.json`、Python 专用的 `semantic-python-binding-evidence.json` / `semantic-python-binding-candidates.json`。sink 做双向分析——从每个外部入口正向、从每个 sink 反向——只有 sink 扫描能看见的路径会成为有效 flow 或记录在案的 `coverage_gap`。flow 路径置信度是 `heuristic-callgraph`：它是线索，不是证明，本层任何结论都不得置为 `runtime-verified`。`FlowRecord.direction` 表示路径**形态**：
   - `cross-procedural`：至少含一条调用边（有价值的一类）；
   - `intra-symbol`：入口与 sink 在同一个方法内——这正是「handler 直接做危险操作」的典型 finding，保留完整优先级；
   - `module-scope`：入口与 sink 都在同一文件的模块作用域。仍会记录，但排在真实调用链之后，因为文件不是 handler。
@@ -1336,6 +1343,13 @@ reports/<target>/round-NN/...
 
   ```bash
   python3 scripts/agent_cli.py semantic-transforms <target> \
+    --workspace <audit-dir> --show-candidates --json
+  ```
+
+- **语言感知值绑定证据：** `semantic-python-binding-evidence-v1` 在变换路径之上增加有界 Python AST 适配器，跟踪简单赋值/别名并探索有限的分支、异常、循环和 match 路径，明确保留 `ast-bound`、`ast-raw-at-sink`、`ast-branch-merged`、`ast-derived-value`、`ast-guard-condition`、未解析状态和 `unsupported-language`。它是抽象解释器，不是完整 CFG/SSA、类型、别名、运行时、API 语义或路径可行性证明；记录与候选都不是漏洞或安全证明。记录和 `pybind-*` 候选始终保持 `claim_status=not-a-finding`、`heuristic-nearby` 与 `requires_manual_dataflow=true`。
+
+  ```bash
+  python3 scripts/agent_cli.py semantic-bindings <target> \
     --workspace <audit-dir> --show-candidates --json
   ```
 
