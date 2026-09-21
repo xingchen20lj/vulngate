@@ -42,6 +42,7 @@
 | 25 | 跨轮研究面 lane coverage 与闭环调度 | 已实现（bounded surface coverage view） | `surface-variant-coverage-v1`、`research-portfolio-v1.surface_lane_coverage`、lane-specific `next_probes` | 跨轮合并历史/最新 lane 状态，保留信号、序列状态、环境缺口和 research key；未闭合 lane 生成精确下一步 probe，仍不升级为漏洞结论 |
 | 26 | 跨项目回放 cohort 校准 | 已实现（bounded cross-project replay cohort） | `research-replay-cohort-v1`、distinct-project/per-surface sufficiency、`replay-cohort-calibrate`、显式 config fallback | 只从多个目标的 bounded calibration 汇聚可重复的调度信号；样本不足保持默认，本地校准优先；不改变候选、CVSS、G4/G5 |
 | 27 | 可验证的真实项目回放 pack | 已实现（bounded provenance replay pack） | `research-replay-pack-v1`、文件 SHA-256 provenance、轮次 lane/comparison 摘要、`replay-pack` CLI、S8 自动产物 | 只消费 workspace-local allowlist 文件指纹和有界摘要；完整且自洽的 pack 才能进入 cohort；篡改、缺失和环境缺口保持可区分，不改变候选、CVSS、G4/G5 |
+| 28 | 跨轮证据一致性与矛盾复核 | 已实现（bounded evidence consistency） | `research-consistency-v1`、`research-consistency` CLI、portfolio/strategy controlled follow-up、S8 自动产物 | 只从有界 research-memory 事件识别 effect/reproduction/comparison/context 漂移；冲突只生成受控复核动作，环境缺口不变成负证据，不改变候选、CVSS、G4/G5 |
 
 ## 已实现基础：可证伪实验规划
 
@@ -436,7 +437,7 @@ S2→S4→S8 的单向契约：
 
 ## 后续优先级
 
-1. 用更多真实项目 lane witness 和细粒度 fixture/state-machine 回放样例校准五类研究面的状态步骤、负向基线和 typed-effect 覆盖，
+1. 用更多真实项目 lane witness 和细粒度 fixture/state-machine 回放样例校准五类研究面的状态步骤、负向基线、typed-effect 覆盖和一致性冲突阈值，
    保留 runner 的回环、审批和资源上限。
 2. 增加更多受控历史产物格式与 project replay 样本，但继续禁止自动 checkout、构建和远程执行，把 artifact provenance 与
    comparison gap 分开统计。
@@ -462,3 +463,12 @@ S2→S4→S8 的单向契约：
 - pack 内嵌归一化的 `research-replay-calibration-v1`，并把 target-level calibration 的 history digest 与轮次历史做一致性校验；缺失、篡改、schema 不匹配或 digest 不一致分别保留为 partial/invalid，不静默降级为可信样本；
 - S8 的 config-driven 与 autonomous 管线自动写入 `state/<target>/coverage/research-replay-pack.json` 和 round snapshot。`replay-cohort-calibrate --pack ...` 只接受 provenance 完整、自洽且 `valid_for_cohort=true` 的 pack；旧的 `--artifact` 输入仍保留兼容，但不会被伪装成 pack provenance；
 - pack/cohort 始终是 `claim_status=not-a-finding` 的研究元数据。它只影响研究调度样本是否可进入 cohort，不改变 candidate status、CVSS、G4 或 G5；文件被修改后可用 `verify_replay_pack` 重新做本地哈希核验。
+
+## 阶段 28 初步实现：跨轮证据一致性与矛盾复核
+
+顶级研究员不会只看同一机制“最新一次”的状态：如果一次回放观察到 typed effect，另一轮却只得到安全等价或不可复现，正确动作是固定上下文、隔离状态并重新观察，而不是把最新结果覆盖历史。阶段 28 增加 `research-consistency-v1`：
+
+- `agent_cli.py research-consistency <target> --workspace <dir> --json` 从已经归一化的 `research-memory` 事件生成有界一致性视图；只保留轮次、状态、effect/reproduction/comparison/context 分类和摘要指纹，不读取或保存源码、payload、命令、stdout/stderr、凭据或漏洞结论；
+- 对同一 `research_key` 识别 `effect-presence-drift`、`reproduction-drift`、`comparison-drift`、`state-drift` 和 `context-drift`，区分 `conflicted`、`unstable`、`insufficient`、`environment-gap` 与 `consistent`；环境缺口不参加“无 effect”比较；
+- project portfolio 会为非一致条目生成有界 next probe，strategy 将其转成 `repeat-with-controlled-context`，并可继续细化为隔离状态、收集独立观测或修复环境；它只改变下一轮研究优先级，不替代 S4 真实观测；
+- S8 的 config-driven 与 autonomous 管线自动写入 target/round consistency artifact，replay pack 也把它纳入 provenance allowlist，确保“矛盾已经被发现”本身可复核；所有状态保持 `claim_status=not-a-finding`，不改变 candidate status、CVSS、G4 或 G5。

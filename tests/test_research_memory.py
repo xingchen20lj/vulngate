@@ -571,7 +571,11 @@ class ResearchMemoryTests(unittest.TestCase):
                              / "research-replay-calibration.json")
         round_pack = (self.root / "state" / "target" / "round-01" / "S8"
                       / "research-replay-pack.json")
+        round_consistency = (self.root / "state" / "target" / "round-01" / "S8"
+                             / "research-consistency.json")
         target_portfolio = self.root / "state" / "target" / "research-portfolio.json"
+        target_consistency = (self.root / "state" / "target" / "coverage"
+                              / "research-consistency.json")
         target_pack = (self.root / "state" / "target" / "coverage"
                        / "research-replay-pack.json")
         target_strategy = (self.root / "state" / "target" / "coverage"
@@ -586,7 +590,9 @@ class ResearchMemoryTests(unittest.TestCase):
         self.assertTrue(round_guidance.exists())
         self.assertTrue(round_calibration.exists())
         self.assertTrue(round_pack.exists())
+        self.assertTrue(round_consistency.exists())
         self.assertTrue(target_pack.exists())
+        self.assertTrue(target_consistency.exists())
         self.assertTrue(target_portfolio.exists())
         self.assertTrue(target_strategy.exists())
         self.assertTrue(target_guidance.exists())
@@ -594,6 +600,8 @@ class ResearchMemoryTests(unittest.TestCase):
                          result["research_memory"]["artifact"])
         self.assertEqual("state/target/research-portfolio.json",
                          result["research_portfolio"]["artifact"])
+        self.assertEqual("state/target/coverage/research-consistency.json",
+                         result["research_consistency"]["artifact"])
         self.assertEqual("state/target/coverage/research-replay-calibration.json",
                          result["research_replay_calibration"]["artifact"])
         self.assertEqual("state/target/coverage/research-strategy.json",
@@ -609,6 +617,9 @@ class ResearchMemoryTests(unittest.TestCase):
                              encoding="utf-8"))["schema_version"])
         self.assertEqual("research-replay-pack-v1",
                          json.loads(round_pack.read_text(
+                             encoding="utf-8"))["schema_version"])
+        self.assertEqual("research-consistency-v1",
+                         json.loads(round_consistency.read_text(
                              encoding="utf-8"))["schema_version"])
         self.assertEqual("research-replay-pack-v1",
                          json.loads(target_pack.read_text(

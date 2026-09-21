@@ -118,6 +118,17 @@ python3 scripts/agent_cli.py replay-cohort-calibrate \
 
 cohort 会从不透明的 project row 重新计算策略，并保留按研究面的样本充分性；pack 输入必须拥有完整且 digest 自洽的 provenance，缺失或不一致的 pack 会被拒绝，不会成为策略样本。旧的 `--artifact` 仍为兼容入口，但会与 pack provenance 分开统计。只有至少三个不同项目都有足够回放历史，且项目级低收益信号一致时，才会启用已有的两轮 zero-gain replacement threshold。项目数不足时保持默认，并生成 `collect-more-projects` 建议。目标可以显式设置 `replay_cohort_calibration_path`；目标本地校准优先，cohort 不会被隐式发现。管线只保存有界研究元数据，不会复制输入路径、原始回放数据或目标漏洞证据，也不会改变 candidate status、CVSS、G4 或 G5。
 
+### 跨轮证据一致性
+
+S8 还会从有界、归一化的 `research-memory` 事件生成 `research-consistency-v1`。它只比较同一 research key 的固定状态分类：effect 是否出现、是否可复现、comparison 结果、运行状态和 context digest，并区分 `conflicted`、`unstable`、`insufficient`、`environment-gap` 与 `consistent`。独立命令为：
+
+```bash
+python3 scripts/agent_cli.py research-consistency <target> \
+  --workspace <audit-dir> --json
+```
+
+它是矛盾检测器，不是漏洞检测器：环境缺口不会被算作“无 effect”，每条记录保持 `claim_status=not-a-finding`。portfolio 和 strategy 只用它安排受控复核；S8 同时写入 target/round artifact，replay pack 也会覆盖这些 provenance。
+
 S1 中包含授权边界和危险 Sink 的启发式 Source→Sink 路径会写入
 `composite-chain-candidates.json`，并在 S2 进入与模型候选、控制图候选、同族差分候选相同的调度池。它们始终保留
 `heuristic-nearby` / `requires_manual_dataflow=true`，只能作为审计和 PoC

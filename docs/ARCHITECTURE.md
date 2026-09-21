@@ -161,6 +161,27 @@ remains available for backwards compatibility and is tracked separately from
 pack provenance. The pipeline copies only bounded research metadata into S8
 and cannot alter candidate status, CVSS, G4, or G5.
 
+### Cross-round evidence consistency
+
+S8 also derives `research-consistency-v1` from bounded, normalized
+`research-memory` events. It compares only allowlisted state classes for the
+same research key: effect presence, reproduction, comparison outcome, runtime
+state, and context digest. It distinguishes `conflicted`, `unstable`,
+`insufficient`, `environment-gap`, and `consistent`, and emits a bounded next
+action such as `repeat-with-controlled-context`, `isolate-state`, or
+`repair-environment`. The standalone command is:
+
+```bash
+python3 scripts/agent_cli.py research-consistency <target> \
+  --workspace <audit-dir> --json
+```
+
+This is a contradiction detector, not a finding detector: environment gaps do
+not count as no-effect observations, and every row remains
+`claim_status=not-a-finding`. The portfolio and strategy use it only to
+schedule controlled re-observation; S8 writes both target and round artifacts,
+and replay-pack provenance covers them as well.
+
 ## Two operating modes
 
 | Mode | Reasoning | Setup | Typical use |

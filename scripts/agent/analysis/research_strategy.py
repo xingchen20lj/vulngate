@@ -89,6 +89,7 @@ STRATEGY_GUIDANCE_ACTIONS = frozenset({
     "review-source-dataflow",
     "add-typed-effect",
     "replay-new-variant",
+    "repeat-with-controlled-context",
     "continue-path-closure",
     "hold-for-new-evidence",
 })
@@ -115,6 +116,7 @@ STRATEGY_GUIDANCE_REASON_CODES = frozenset({
     "partial-observation",
     "complete-observation",
     "falsifier-observed",
+    "evidence-inconsistent",
 })
 STRATEGY_REASON_CODES = frozenset({
     "threat-path",
@@ -128,6 +130,7 @@ STRATEGY_REASON_CODES = frozenset({
     "actionable-difference",
     "unstable-replay",
     "inconclusive",
+    "evidence-consistency",
     "review-needs-evidence",
     "portfolio-followup",
 })
@@ -638,6 +641,11 @@ def _item_guidance(item: Mapping[str, Any], portfolio: Mapping[str, Any],
         action = "reframe-scope"
         add_reason("review-%s" % review_status)
         add_source("human-review")
+    elif "evidence-consistency" in (item.get("reason_codes") or []):
+        action = "repeat-with-controlled-context"
+        priority_delta = 3
+        add_reason("evidence-inconsistent")
+        add_source("project-portfolio")
     elif variant_gaps:
         action = "replay-new-variant"
         priority_delta = 2
@@ -1346,7 +1354,8 @@ def _add_portfolio_item(items: List[Dict[str, Any]], probe: Mapping[str, Any],
         raw_reason = _code(
             probe.get("reason_code"),
             {"actionable-difference", "unstable-replay", "inconclusive",
-             "review-needs-evidence"}, "portfolio-followup")
+             "review-needs-evidence", "evidence-consistency"},
+            "portfolio-followup")
         reason_codes = [raw_reason]
         priority = _int(probe.get("priority"), 2)
     key = _text(probe.get("research_key"), 80)
@@ -1370,6 +1379,10 @@ def _add_portfolio_item(items: List[Dict[str, Any]], probe: Mapping[str, Any],
         "variant": _bounded(probe.get("variant"), 4, 100),
         "precondition_class": _text(probe.get("precondition_class"), 60).lower(),
         "reason_codes": reason_codes,
+        "consistency_status": _text(probe.get("consistency_status"), 32),
+        "conflict_codes": _bounded(probe.get("conflict_codes"), 8, 64),
+        "consistency_observation_count": _int(
+            probe.get("consistency_observation_count"), 0, 0, 8),
     })
     items.append(item)
 
@@ -1663,6 +1676,13 @@ def _normalize_item(raw: Mapping[str, Any]) -> Dict[str, Any]:
             "unmapped"),
         "capability_candidate_ids": _bounded(
             raw.get("capability_candidate_ids"), 8, 160),
+        "consistency_status": _code(
+            raw.get("consistency_status"),
+            {"conflicted", "unstable", "insufficient", "environment-gap"},
+            ""),
+        "conflict_codes": _bounded(raw.get("conflict_codes"), 8, 64),
+        "consistency_observation_count": _int(
+            raw.get("consistency_observation_count"), 0, 0, 8),
         "claim_status": STRATEGY_CLAIM_STATUS,
     }
     observation = _normalize_observation(raw.get("observation"))

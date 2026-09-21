@@ -20,6 +20,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..evaluation.benchmark import normalize_benchmark_feedback
+from ..evaluation.research_consistency import (
+    build_research_consistency,
+    normalize_research_consistency,
+)
 from ..tools.redaction import redact_text
 from .research import (
     MEMORY_CLAIM_STATUS,
@@ -226,6 +230,25 @@ def _surface_lane_probe_hints(row: Dict[str, Any]) -> List[str]:
     return _bounded_strings(hints, MAX_HINTS, 220)
 
 
+def _consistency_probe_hints(row: Dict[str, Any]) -> List[str]:
+    """Turn an observation conflict into a bounded controlled replay action."""
+    status = _text(row.get("status"), 32).lower()
+    codes = set(row.get("conflict_codes") or [])
+    if status == "environment-gap":
+        return ["先修复 runtime/harness 缺口；环境缺口不是负向证据"]
+    if "context-drift" in codes:
+        return ["固定版本、SafeMode、fixture 和服务配置后重放，避免上下文漂移"]
+    if "effect-presence-drift" in codes:
+        return ["在同一受控上下文重复正/负向对照，区分 typed effect 与安全等价结果"]
+    if "reproduction-drift" in codes:
+        return ["固定输入和状态生命周期做独立重复，记录可复现性而非采用最新一次"]
+    if "comparison-drift" in codes:
+        return ["固定版本对照和历史构建，再复核 comparison 差异的语义影响"]
+    if status == "insufficient":
+        return ["补一次独立可比观测；单次运行不足以校准该机制"]
+    return ["隔离状态、配置和 fixture 后重放，保留每次结果的差异摘要"]
+
+
 def _empty_portfolio() -> Dict[str, Any]:
     return {
         "schema_version": PORTFOLIO_SCHEMA_VERSION,
@@ -239,12 +262,17 @@ def _empty_portfolio() -> Dict[str, Any]:
             "reviewed_mechanisms": 0,
             "pending_residuals": 0,
             "resolved_residuals": 0,
+            "consistency_conflicted": 0,
+            "consistency_unstable": 0,
+            "consistency_environment_gaps": 0,
+            "consistency_insufficient": 0,
             "states": {},
             "review_statuses": {},
         },
         "dimensions": {dimension: [] for dimension in DIMENSIONS},
         "variant_coverage": [],
         "surface_lane_coverage": empty_surface_lane_coverage(),
+        "consistency": build_research_consistency({}),
         "next_probes": [],
         "benchmark": {},
         "claim_status": PORTFOLIO_CLAIM_STATUS,
@@ -306,12 +334,18 @@ def build_research_portfolio(
         memory: Optional[Dict[str, Any]],
         review_feedback: Optional[Dict[str, Any]] = None,
         benchmark_feedback: Optional[Dict[str, Any]] = None,
+        consistency: Optional[Dict[str, Any]] = None,
         ) -> Dict[str, Any]:
     """Build a deterministic, bounded project view from research artifacts."""
     if not isinstance(memory, dict):
         memory = _empty_portfolio()
     entries = [entry for entry in memory.get("entries") or []
                if isinstance(entry, dict) and _text(entry.get("research_key"), MAX_KEY)]
+    if consistency is None:
+        consistency = build_research_consistency(memory)
+    consistency = normalize_research_consistency(consistency)
+    if not consistency:
+        consistency = build_research_consistency(memory)
     reviews = _review_index(review_feedback)
     states = Counter()
     latest_states = Counter()
@@ -502,6 +536,60 @@ def build_research_portfolio(
                 "claim_status": PORTFOLIO_CLAIM_STATUS,
             })
 
+    consistency_entries = [row for row in consistency.get("entries") or []
+                           if isinstance(row, dict)]
+    consistency_probe_keys = set()
+    for row in consistency_entries:
+        key = _text(row.get("research_key"), MAX_KEY)
+        status = _text(row.get("status"), 32).lower()
+        if not key or status in {"consistent", ""}:
+            continue
+        if key in consistency_probe_keys:
+            continue
+        consistency_probe_keys.add(key)
+        entry = next((item for item in entries
+                      if _text(item.get("research_key"), MAX_KEY) == key), {})
+        if status == "environment-gap":
+            state = STATE_ENVIRONMENT_GAP
+            priority = 5
+        elif status == "conflicted":
+            state = STATE_UNSTABLE_REPLAY
+            priority = 5
+        elif status == "unstable":
+            state = STATE_UNSTABLE_REPLAY
+            priority = 4
+        else:
+            state = STATE_INCONCLUSIVE
+            priority = 3
+        next_candidates.append({
+            "research_key": key,
+            "candidate_id": _text(entry.get("candidate_id"), 120),
+            "residual_id": "",
+            "residual_kind": "",
+            "residual_reason_code": "",
+            "research_surface": _dimension_values(
+                entry, "research_surface")[0] if entry else "",
+            "target_type": _dimension_values(
+                entry, "target_type")[0] if entry else "",
+            "attack_class": _dimension_values(
+                entry, "attack_class")[0] if entry else "",
+            "variant": _dimension_values(entry, "variant")[:4] if entry else [],
+            "precondition_class": _dimension_values(
+                entry, "precondition_class")[0] if entry else "",
+            "state": state,
+            "round": _safe_int((row.get("rounds") or [0])[-1], 0),
+            "priority": priority,
+            "review_status": "",
+            "reason_code": "evidence-consistency",
+            "consistency_status": status,
+            "conflict_codes": _bounded_strings(
+                row.get("conflict_codes"), 8, 64),
+            "consistency_observation_count": _safe_int(
+                row.get("observation_count"), 0, 0, 8),
+            "next_probe_hints": _consistency_probe_hints(row),
+            "claim_status": PORTFOLIO_CLAIM_STATUS,
+        })
+
     def dimension_rows(dimension: str) -> List[Dict[str, Any]]:
         rows = []
         for value, bucket in dimensions[dimension].items():
@@ -542,6 +630,7 @@ def build_research_portfolio(
         str(item.get("residual_id", "")),
     ))
     benchmark = _benchmark_view(benchmark_feedback)
+    consistency_summary = consistency.get("summary") or {}
     return {
         "schema_version": PORTFOLIO_SCHEMA_VERSION,
         "round": _safe_int(memory.get("round"), 0),
@@ -555,6 +644,14 @@ def build_research_portfolio(
                 _text(entry.get("research_key"), MAX_KEY) == key for entry in entries)),
             "pending_residuals": pending_residual_count,
             "resolved_residuals": resolved_residual_count,
+            "consistency_conflicted": _safe_int(
+                consistency_summary.get("conflicted_entries"), 0, 0, 1000000),
+            "consistency_unstable": _safe_int(
+                consistency_summary.get("unstable_entries"), 0, 0, 1000000),
+            "consistency_environment_gaps": _safe_int(
+                consistency_summary.get("environment_gap_entries"), 0, 0, 1000000),
+            "consistency_insufficient": _safe_int(
+                consistency_summary.get("insufficient_entries"), 0, 0, 1000000),
             "states": dict(sorted(states.items())),
             "latest_states": dict(sorted(latest_states.items())),
             "review_statuses": dict(sorted(review_statuses.items())),
@@ -564,6 +661,7 @@ def build_research_portfolio(
         "dimensions": dimension_output,
         "variant_coverage": variant_coverage,
         "surface_lane_coverage": surface_lane_coverage,
+        "consistency": consistency,
         "next_probes": next_candidates[:MAX_NEXT_PROBES],
         "benchmark": benchmark,
         "claim_status": PORTFOLIO_CLAIM_STATUS,
@@ -581,6 +679,8 @@ def normalize_research_portfolio(raw: Any) -> Dict[str, Any]:
         "mechanism_count", "event_count", "unresolved_mechanisms",
         "stable_mechanisms", "actionable_differences", "reviewed_mechanisms",
         "pending_residuals", "resolved_residuals",
+        "consistency_conflicted", "consistency_unstable",
+        "consistency_environment_gaps", "consistency_insufficient",
     ):
         result["summary"][key] = _safe_int(summary.get(key), 0, 0, 1000000)
     for key in ("states", "latest_states", "review_statuses"):
@@ -592,6 +692,9 @@ def normalize_research_portfolio(raw: Any) -> Dict[str, Any]:
         }
     result["summary"]["benchmark_regressed"] = bool(
         summary.get("benchmark_regressed"))
+    consistency = normalize_research_consistency(raw.get("consistency"))
+    if consistency:
+        result["consistency"] = consistency
     for dimension in DIMENSIONS:
         rows = []
         for raw_row in (raw.get("dimensions") or {}).get(dimension, []) \
@@ -670,6 +773,14 @@ def normalize_research_portfolio(raw: Any) -> Dict[str, Any]:
                 "surface_lane": surface_lane,
                 "lane_status": lane_status,
             })
+        consistency_status = _text(raw_probe.get("consistency_status"), 32).lower()
+        if consistency_status in {"conflicted", "unstable", "insufficient",
+                                  "environment-gap"}:
+            probe["consistency_status"] = consistency_status
+            probe["conflict_codes"] = _bounded_strings(
+                raw_probe.get("conflict_codes"), 8, 64)
+            probe["consistency_observation_count"] = _safe_int(
+                raw_probe.get("consistency_observation_count"), 0, 0, 8)
         if probe["research_key"] and probe["state"]:
             probes.append(probe)
     result["next_probes"] = probes[:MAX_NEXT_PROBES]

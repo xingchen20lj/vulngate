@@ -306,6 +306,20 @@ without emitting its contents. Pack and cohort artifacts remain
 credential, or finding conclusion, and cannot change candidate status, CVSS,
 G4, or G5.
 
+The next layer is `research-consistency-v1`. A latest-state view can hide an
+expert-level warning when the same research key produces a typed effect in one
+round and a safe-equivalent, reproduction failure, comparison change, or
+different runtime context in another. `agent_cli.py research-consistency`
+derives a bounded view from normalized `research-memory` events and classifies
+the key as `consistent`, `conflicted`, `unstable`, `insufficient`, or
+`environment-gap`. It retains only state classes, round references, booleans,
+and digests, and turns conflicts into controlled follow-up actions such as
+`repeat-with-controlled-context`, `isolate-state`,
+`collect-independent-observation`, or `repair-environment`. Portfolio and
+strategy consume this view for scheduling only; S8 and replay packs persist it
+as provenance-carrying metadata, always `claim_status=not-a-finding`, without
+changing candidate status, CVSS, G4, or G5.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

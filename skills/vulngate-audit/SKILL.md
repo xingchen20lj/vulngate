@@ -606,6 +606,18 @@ fallback. Cohort state is `claim_status=not-a-finding`, contains no input
 paths, raw replay data, payloads, commands, output, credentials, or finding
 evidence, and cannot alter candidate status, CVSS, G4, or G5.
 
+S8 also derives `research-consistency-v1` from bounded, normalized
+`research-memory` events. Use `python3 scripts/agent_cli.py research-consistency <target> --workspace <dir> [--rebuild] [--json]`
+to inspect or rebuild it. For the same research key it compares only
+effect-presence, reproduction, comparison, runtime-state, and context-digest
+classes, then classifies the history as `consistent`, `conflicted`,
+`unstable`, `insufficient`, or `environment-gap`. Conflicts produce bounded
+follow-up actions such as `repeat-with-controlled-context`, `isolate-state`,
+`collect-independent-observation`, or `repair-environment`; the portfolio and
+strategy consume these actions only for scheduling. Environment gaps never
+count as no-effect observations, and the target/round artifacts remain
+`claim_status=not-a-finding` without changing candidate status, CVSS, G4, or G5.
+
 S3 residuals are carried across the same boundary as pending research debt.
 Memory stores only controlled kind/reason codes, bounded source locations, a
 probe digest, and whether a bounded probe plan exists. The portfolio emits one
@@ -1463,6 +1475,9 @@ python3 scripts/agent_cli.py replay-cohort-calibrate \
 ```
 
 cohort 会从不透明的 project row 重新计算策略，同时检查不同项目数与按研究面的样本充分性；只有至少三个 eligible 项目时才允许影响调度。只有项目级低收益 replacement signal 满足有界多数条件时，才可选择已有的一轮或两轮 zero-information threshold；否则生成 `collect-more-projects` 并保留默认值。目标可以显式配置 `replay_cohort_calibration_path`；目标本地校准充分时始终优先，cohort 不会被隐式发现。来源不完整或 digest 不一致的 pack 会被拒绝；旧的 `--artifact` 入口仍保留兼容，但会与 pack provenance 分开统计。S8 只可保存归一化快照并将其用作 research-guidance fallback。cohort 仍是 `claim_status=not-a-finding`，不得携带输入路径、原始回放、payload、命令、输出、凭据或漏洞证据，也不能改变 candidate status、CVSS、G4 或 G5。
+
+S8 还会从有界、归一化的 `research-memory` 事件生成
+`research-consistency-v1`。可用 `python3 scripts/agent_cli.py research-consistency <target> --workspace <dir> [--rebuild] [--json]` 查看或重建。对同一 research key，它只比较 effect 是否出现、是否可复现、comparison、运行状态和 context digest，区分 `consistent`、`conflicted`、`unstable`、`insufficient` 与 `environment-gap`。冲突会生成 `repeat-with-controlled-context`、`isolate-state`、`collect-independent-observation` 或 `repair-environment` 等有界动作，portfolio 和 strategy 只用它调度下一轮；环境缺口不会被算作无 effect，target/round artifact 继续保持 `claim_status=not-a-finding`，不能改变 candidate status、CVSS、G4 或 G5。
 
 S2 还会写出有界的 `research-strategy-v1`：目标级为
 `state/<target>/coverage/research-strategy.json`，轮次快照为 `S2/research-strategy.json`。它将

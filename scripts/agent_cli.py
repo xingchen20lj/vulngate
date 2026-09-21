@@ -31,6 +31,7 @@ Usage:
                            [--next-probe <hint>] [--round <N>] [--json]
   agent_cli.py portfolio <target> --workspace <dir> [--rebuild]
                               [--benchmark-feedback <json>] [--json]
+  agent_cli.py research-consistency <target> --workspace <dir> [--rebuild] [--json]
   agent_cli.py research-strategy <target> --workspace <dir> [--rebuild]
                                [--benchmark-feedback <json>] [--json]
   agent_cli.py coverage <target> [--workspace <dir>] [--rebuild] [--show-uncovered]
@@ -909,6 +910,57 @@ def cmd_portfolio(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_research_consistency(args: argparse.Namespace) -> int:
+    """Show or rebuild bounded cross-round evidence consistency metadata."""
+    from agent.evaluation.research_consistency import (
+        build_research_consistency,
+        consistency_path,
+        load_research_consistency,
+        write_research_consistency,
+    )
+    from agent.memory.research import load_research_memory
+
+    workspace = Path(args.workspace).resolve()
+    consistency = load_research_consistency(workspace, args.target)
+    if args.rebuild or not consistency:
+        consistency = build_research_consistency(
+            load_research_memory(workspace, args.target))
+        write_research_consistency(workspace, args.target, consistency)
+    if not consistency:
+        _out({"error": "research consistency artifact not found",
+              "hint": "run an S8 round or pass --rebuild",
+              "artifact": str(consistency_path(workspace, args.target))})
+        return 2
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "artifact": str(consistency_path(
+            workspace, args.target).relative_to(workspace)),
+        "consistency": consistency,
+    }
+    if args.json:
+        _out(payload)
+    else:
+        summary = consistency.get("summary", {})
+        print("research consistency: %s" % payload["artifact"])
+        print("  entries=%s conflicted=%s unstable=%s environment_gap=%s "
+              "insufficient=%s claim_status=%s" % (
+                  summary.get("entry_count", 0),
+                  summary.get("conflicted_entries", 0),
+                  summary.get("unstable_entries", 0),
+                  summary.get("environment_gap_entries", 0),
+                  summary.get("insufficient_entries", 0),
+                  consistency.get("claim_status", "not-a-finding")))
+        for row in consistency.get("entries") or []:
+            if not isinstance(row, dict) or row.get("status") == "consistent":
+                continue
+            print("  next: %s [%s] action=%s codes=%s" % (
+                row.get("candidate_id") or row.get("research_key"),
+                row.get("status"), row.get("next_action"),
+                ",".join(row.get("conflict_codes") or []) or "-"))
+    return 0
+
+
 def cmd_coverage(args: argparse.Namespace) -> int:
     """Security audit coverage report (spec §16).
 
@@ -1775,6 +1827,19 @@ def build_parser() -> argparse.ArgumentParser:
     po.add_argument("--json", action="store_true",
                     help="machine-readable output")
     po.set_defaults(fn=cmd_portfolio)
+
+    rc = sub.add_parser(
+        "research-consistency",
+        help="show or rebuild bounded cross-round evidence consistency metadata",
+    )
+    rc.add_argument("target", help="target name (state/<target>/...)")
+    rc.add_argument("--workspace", required=True,
+                    help="workspace root containing state/<target>/")
+    rc.add_argument("--rebuild", action="store_true",
+                    help="rebuild from current research memory")
+    rc.add_argument("--json", action="store_true",
+                    help="machine-readable output")
+    rc.set_defaults(fn=cmd_research_consistency)
 
     rs = sub.add_parser(
         "research-strategy",

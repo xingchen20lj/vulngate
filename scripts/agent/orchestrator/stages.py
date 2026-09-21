@@ -16,6 +16,10 @@ from ..memory.research import (build_residual_closure_report,
                                 write_research_memory)
 from ..memory.portfolio import (build_research_portfolio,
                                 write_research_portfolio)
+from ..evaluation.research_consistency import (
+    build_research_consistency,
+    write_research_consistency,
+)
 from ..analysis.research_strategy import (apply_strategy_observations,
                                            apply_research_guidance,
                                            load_research_strategy,
@@ -1246,8 +1250,12 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
         load_research_memory(ctx.workspace, ctx.target), memory_delta)
     memory_file = write_research_memory(ctx.workspace, ctx.target, memory)
     review_feedback = load_review_feedback(ctx.workspace, ctx.target)
+    research_consistency = build_research_consistency(memory)
+    research_consistency_file = write_research_consistency(
+        ctx.workspace, ctx.target, research_consistency)
     portfolio = build_research_portfolio(
-        memory, review_feedback, ctx.benchmark_feedback())
+        memory, review_feedback, ctx.benchmark_feedback(),
+        research_consistency)
     portfolio_file = write_research_portfolio(
         ctx.workspace, ctx.target, portfolio)
     strategy = load_research_strategy(ctx.workspace, ctx.target)
@@ -1285,6 +1293,8 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
     ctx.store.write_artifact("S8", "research-memory.json", memory_delta)
     ctx.store.write_artifact("S8", "research-memory-summary.json", memory["summary"])
     ctx.store.write_artifact("S8", "review-feedback.json", review_feedback)
+    ctx.store.write_artifact(
+        "S8", "research-consistency.json", research_consistency)
     ctx.store.write_artifact("S8", "research-portfolio.json", portfolio)
     replay_pack = build_replay_pack(ctx.workspace, ctx.target)
     replay_pack_file = write_replay_pack(
@@ -1326,6 +1336,19 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
         "next_probe_count": len(portfolio.get("next_probes") or []),
         "surface_lane_coverage": (portfolio.get("surface_lane_coverage") or {}
                                   ).get("summary", {}),
+        "claim_status": "not-a-finding",
+    }
+    summary["research_consistency"] = {
+        "artifact": str(research_consistency_file.relative_to(
+            ctx.workspace.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-consistency.json"
+                          % (ctx.target, ctx.round_no),
+        "status_counts": (research_consistency.get("summary") or {}
+                           ).get("statuses", {}),
+        "conflicted_entries": (research_consistency.get("summary") or {}
+                               ).get("conflicted_entries", 0),
+        "unstable_entries": (research_consistency.get("summary") or {}
+                             ).get("unstable_entries", 0),
         "claim_status": "not-a-finding",
     }
     if strategy_file:
@@ -1390,6 +1413,7 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
     return {"ledger_dir": str(out_dir.relative_to(ctx.workspace)), "rows": len(rows),
             "excluded": len(excluded), "metrics": metrics,
             "research_memory": summary["research_memory"],
+            "research_consistency": summary["research_consistency"],
             "research_portfolio": summary["research_portfolio"],
             "research_replay_calibration": summary[
             "research_replay_calibration"],

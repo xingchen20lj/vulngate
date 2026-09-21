@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added `research-consistency-v1` for bounded cross-round evidence checks.
+  `agent_cli.py research-consistency` compares effect, reproduction, comparison,
+  runtime-state, and context classifications from `research-memory`, while
+  portfolio and strategy convert conflicts into controlled follow-up actions.
+  S8 and replay packs persist the target/round artifact; all metadata remains
+  `not-a-finding` and cannot affect candidate status, CVSS, G4, or G5.
+
 - Added `research-replay-pack-v1` provenance packs. S8 and
   `agent_cli.py replay-pack` retain only allowlisted workspace-local artifact
   names, schema versions, sizes, SHA-256 fingerprints, and bounded lane/

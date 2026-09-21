@@ -44,6 +44,10 @@ from ..memory.research import (build_residual_closure_report,
                                 write_research_memory)
 from ..memory.portfolio import (build_research_portfolio,
                                 write_research_portfolio)
+from ..evaluation.research_consistency import (
+    build_research_consistency,
+    write_research_consistency,
+)
 from ..analysis.research_strategy import (apply_strategy_observations,
                                            apply_research_guidance,
                                            load_research_strategy,
@@ -1951,8 +1955,12 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         load_research_memory(ctx.root, ctx.cfg.name), memory_delta)
     memory_file = write_research_memory(ctx.root, ctx.cfg.name, memory)
     review_feedback = load_review_feedback(ctx.root, ctx.cfg.name)
+    research_consistency = build_research_consistency(memory)
+    research_consistency_file = write_research_consistency(
+        ctx.root, ctx.cfg.name, research_consistency)
     portfolio = build_research_portfolio(
-        memory, review_feedback, ctx.benchmark_feedback())
+        memory, review_feedback, ctx.benchmark_feedback(),
+        research_consistency)
     portfolio_file = write_research_portfolio(ctx.root, ctx.cfg.name, portfolio)
     strategy = load_research_strategy(ctx.root, ctx.cfg.name)
     if not strategy:
@@ -1997,6 +2005,8 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
     ctx.write_artifact(round_no, "S8", "research-memory.json", memory_delta)
     ctx.write_artifact(round_no, "S8", "research-memory-summary.json", memory["summary"])
     ctx.write_artifact(round_no, "S8", "review-feedback.json", review_feedback)
+    ctx.write_artifact(
+        round_no, "S8", "research-consistency.json", research_consistency)
     ctx.write_artifact(round_no, "S8", "research-portfolio.json", portfolio)
     replay_pack = build_replay_pack(ctx.root, ctx.cfg.name)
     replay_pack_file = write_replay_pack(
@@ -2025,6 +2035,18 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         "next_probe_count": len(portfolio.get("next_probes") or []),
         "surface_lane_coverage": (portfolio.get("surface_lane_coverage") or {}
                                   ).get("summary", {}),
+        "claim_status": "not-a-finding",
+    }
+    research_consistency_info = {
+        "artifact": str(research_consistency_file.relative_to(ctx.root.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-consistency.json"
+                          % (ctx.cfg.name, round_no),
+        "status_counts": (research_consistency.get("summary") or {}
+                           ).get("statuses", {}),
+        "conflicted_entries": (research_consistency.get("summary") or {}
+                               ).get("conflicted_entries", 0),
+        "unstable_entries": (research_consistency.get("summary") or {}
+                             ).get("unstable_entries", 0),
         "claim_status": "not-a-finding",
     }
     research_replay_calibration_info = {
@@ -2116,6 +2138,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             },
             "next_round": [],
             "research_memory": research_memory_info,
+            "research_consistency": research_consistency_info,
             "review_feedback": review_feedback_info,
             "research_portfolio": research_portfolio_info,
             "research_replay_calibration": research_replay_calibration_info,
@@ -2141,6 +2164,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         ctx.write_artifact(round_no, "S8", "llm-usage.json", ctx.llm.usage.to_dict())
         store.save_stage("S8", {"ledger_rows": len(ledger_rows), "excluded": len(excluded),
                                 "research_memory": research_memory_info,
+                                "research_consistency": research_consistency_info,
                                 "review_feedback": review_feedback_info,
                                 "research_portfolio": research_portfolio_info,
                                 "research_replay_calibration":
@@ -2153,6 +2177,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
     print("[round-%02d] done: 确认=%d 排除=%d" % (round_no, len(rows), len(excluded)))
     return {"next_candidates": _propose_next(ctx, candidates, rows),
             "research_memory": research_memory_info,
+            "research_consistency": research_consistency_info,
             "review_feedback": review_feedback_info,
             "research_portfolio": research_portfolio_info,
             "research_replay_calibration": research_replay_calibration_info,

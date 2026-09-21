@@ -150,6 +150,9 @@ def _history_workspace(root: Path, target: str = "demo") -> Path:
             json.dumps(guidance_artifact), encoding="utf-8")
         (round_root / "S8" / "research-strategy-feedback.json").write_text(
             json.dumps(feedback_artifact), encoding="utf-8")
+        (round_root / "S8" / "research-consistency.json").write_text(
+            json.dumps({"schema_version": "research-consistency-v1"}),
+            encoding="utf-8")
         (round_root / "S8" / "research-portfolio.json").write_text(
             json.dumps({"schema_version": "research-portfolio-v1"}),
             encoding="utf-8")
@@ -171,6 +174,9 @@ def _history_workspace(root: Path, target: str = "demo") -> Path:
         json.dumps({"schema_version": "research-strategy-v1"}), encoding="utf-8")
     (coverage / "research-guidance.json").write_text(
         json.dumps({"schema_version": "research-strategy-guidance-v1"}),
+        encoding="utf-8")
+    (coverage / "research-consistency.json").write_text(
+        json.dumps({"schema_version": "research-consistency-v1"}),
         encoding="utf-8")
     return target_root
 
