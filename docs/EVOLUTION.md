@@ -25,9 +25,11 @@ benchmark, **not** historical-CVE candidate precision or recall evidence.
 A frontend-only smoke on six local analysis modules additionally measures time
 and Python allocation peak without invoking the whole call/flow pipeline. Shared
 retention is bounded by both file and node counts; consumer indices are also
-file-bounded. Java/JS/TS/Go adapters, resolved Python call binding, minimal CFG and
-historical vulnerable/fixed/safe/environment-gap CVE comparisons remain future
-work. Nothing here proves runtime effects or changes S4/G4/G5.
+file-bounded. Java/JS/TS/Go adapters and broader CFG/type resolution remain
+future work. The first revision-pinned Historical CVE Benchmark now lives
+under `benchmarks/historical/`; it measures static candidate calibration across
+vulnerable/fixed/safe-sibling/environment-gap arms without turning a static
+match into a finding. Nothing here proves runtime effects or changes S4/G4/G5.
 
 ## Unreleased evidence provenance and correlation
 
@@ -370,6 +372,18 @@ same guidance. Config-driven and autonomous runs can opt in with the explicit
 feedback is `not-a-finding`: it cannot confirm/exclude a candidate, synthesize
 runtime evidence, change CVSS, or bypass G4/G5. With no feedback, the default
 schedule and plan remain byte-for-byte compatible.
+
+The benchmark suite now also includes a revision-pinned
+`historical-cve-benchmark-v1` fixture with PyYAML CVE-2017-18342, Apache
+Commons Text CVE-2022-42889, and Lodash CVE-2021-23337. Each case expands into
+vulnerable, fixed, safe-sibling and environment-gap arms and records official
+HTTPS provenance, exact revision commits, entry/sink locations, preconditions,
+effect class, severity range and a four-point version matrix. Its evaluator
+reports candidate precision/recall, explicit candidate counts,
+time-to-first-useful-candidate and time-to-confirm alongside the existing
+confirmed metrics. The checked-in run is a static calibration sample: all
+vulnerable rows remain candidates, all environment gaps remain typed gaps, and
+the whole artifact remains `claim_status=not-a-finding`.
 
 The benchmark suite now also includes a cross-surface synthetic manifest and
 sample run covering web, protocol, cloud, mobile and native research. Each

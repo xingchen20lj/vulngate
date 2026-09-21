@@ -19,11 +19,13 @@ from agent.evaluation.benchmark import (  # noqa: E402
     BENCHMARK_FEEDBACK_CLAIM_STATUS,
     BENCHMARK_FEEDBACK_FACTORS,
     BENCHMARK_FEEDBACK_SCHEMA_VERSION,
+    HISTORICAL_CVE_BENCHMARK_SCHEMA_VERSION,
     compare_benchmark_results,
     derive_benchmark_feedback,
     evaluate_benchmark,
     load_benchmark_json,
     normalize_benchmark_feedback,
+    normalize_manifest,
     normalize_benchmark_trend,
     validate_manifest,
 )
@@ -362,6 +364,56 @@ class BenchmarkTests(unittest.TestCase):
             result["case_results"][0]["variant"],
         )
         self.assertEqual(BENCHMARK_CLAIM_STATUS, result["claim_status"])
+
+    def test_historical_cve_benchmark_preserves_four_arm_and_candidate_contract(self):
+        manifest_path = ROOT / "benchmarks" / "historical" / "historical-cve-v1.json"
+        run_path = ROOT / "benchmarks" / "historical" / "historical-cve-sample-run.json"
+        gold = load_benchmark_json(manifest_path)
+        run = load_benchmark_json(run_path)
+        self.assertEqual([], validate_manifest(gold))
+        normalized = normalize_manifest(gold)
+        self.assertEqual(HISTORICAL_CVE_BENCHMARK_SCHEMA_VERSION,
+                         normalized["schema_version"])
+        self.assertEqual(12, len(normalized["cases"]))
+        self.assertTrue(all("::" in case["case_id"]
+                            for case in normalized["cases"]))
+        self.assertNotIn("payload", normalized["cases"][0])
+
+        result = evaluate_benchmark(gold, [run])
+        self.assertEqual(HISTORICAL_CVE_BENCHMARK_SCHEMA_VERSION,
+                         result["schema_version"])
+        self.assertEqual("historical-cve", result["benchmark_type"])
+        self.assertEqual(BENCHMARK_CLAIM_STATUS, result["claim_status"])
+        self.assertEqual(1.0, result["metrics"]["candidate_precision"])
+        self.assertEqual(1.0, result["metrics"]["candidate_recall"])
+        self.assertEqual(1.0, result["metrics"]["environment_gap_fidelity"])
+        self.assertIsNone(result["metrics"]["confirmed_recall"])
+        self.assertTrue(all(item["claim_status"] == BENCHMARK_CLAIM_STATUS
+                            for item in result["case_results"]))
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = agent_cli.main([
+                "benchmark", "--manifest", str(manifest_path),
+                "--run", str(run_path), "--json",
+            ])
+        self.assertEqual(0, code)
+        self.assertEqual(
+            HISTORICAL_CVE_BENCHMARK_SCHEMA_VERSION,
+            json.loads(stdout.getvalue())["schema_version"],
+        )
+
+    def test_historical_cve_manifest_rejects_incomplete_provenance(self):
+        manifest_path = ROOT / "benchmarks" / "historical" / "historical-cve-v1.json"
+        gold = load_benchmark_json(manifest_path)
+        broken = json.loads(json.dumps(gold))
+        broken["cases"][0]["cve"] = "not-a-cve"
+        broken["cases"][0]["reference_evidence"] = [{"url": "http://unsafe"}]
+        broken["cases"][0]["arms"] = broken["cases"][0]["arms"][:2]
+        errors = validate_manifest(broken)
+        self.assertTrue(any("invalid cve" in error for error in errors))
+        self.assertTrue(any("HTTPS reference_evidence" in error for error in errors))
+        self.assertTrue(any("must contain vulnerable/fixed" in error
+                            for error in errors))
 
     def test_manifest_rejects_unknown_research_surface(self):
         bad = {

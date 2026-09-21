@@ -35,6 +35,7 @@ from ..tools.redaction import redact_text
 
 
 BENCHMARK_SCHEMA_VERSION = "research-benchmark-v1"
+HISTORICAL_CVE_BENCHMARK_SCHEMA_VERSION = "historical-cve-benchmark-v1"
 BENCHMARK_CLAIM_STATUS = "not-a-finding"
 MAX_CASES = 512
 MAX_RUNS = 64
@@ -44,11 +45,11 @@ MAX_ID = 160
 MAX_SURFACES = 16
 
 RESEARCH_SURFACES = frozenset({
-    "web", "protocol", "cloud", "mobile", "native",
+    "web", "protocol", "cloud", "mobile", "native", "library",
 })
 RESEARCH_TARGET_TYPES = frozenset({
     "web-app", "middleware", "message-rpc", "cloud-service",
-    "mobile-app", "native-app",
+    "mobile-app", "native-app", "library",
 })
 RESEARCH_PRECONDITION_CLASSES = frozenset({
     "default", "single-feature", "app-cooperation", "tool-gap",
@@ -101,14 +102,17 @@ SURFACE_FEEDBACK_METRICS = (
 )
 TREND_METRICS = (
     "case_observation_coverage", "confirmed_precision", "confirmed_recall",
+    "candidate_precision", "candidate_recall",
     "resolution_accuracy", "unsafe_confirmation_rate",
     "negative_result_fidelity", "environment_gap_fidelity",
     "evidence_completeness", "decision_stability", "repeat_rate",
     "unjustified_repeat_rate", "severity_overstatement_rate",
     "severity_ordinal_overstatement_rate", "severity_mean_absolute_error",
+    "time_to_first_useful_candidate", "time_to_confirm",
 )
 TREND_HIGHER_IS_BETTER = frozenset({
     "case_observation_coverage", "confirmed_precision", "confirmed_recall",
+    "candidate_precision", "candidate_recall",
     "resolution_accuracy", "negative_result_fidelity",
     "environment_gap_fidelity", "evidence_completeness", "decision_stability",
 })
@@ -481,21 +485,122 @@ def normalize_benchmark_trend(raw: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _normal_revision(value: Any) -> Dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    out: Dict[str, str] = {}
+    for name, limit in (("ref", 80), ("commit", 64), ("tag", 80)):
+        item = _text(value.get(name), limit)
+        if item:
+            out[name] = item
+    return out
+
+
+def _is_commit_sha(value: Any) -> bool:
+    return bool(re.fullmatch(r"[0-9a-fA-F]{40}", str(value or "")))
+
+
+def _normal_location(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    for name, limit in (("file", 180), ("symbol", 160), ("api", 160),
+                        ("kind", 64), ("relation", 120)):
+        item = _text(value.get(name), limit)
+        if item:
+            out[name] = item
+    line = _bounded_int(value.get("line"), 0, 1000000)
+    if line > 0:
+        out["line"] = line
+    return out
+
+
+def _normal_reference(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    url = _text(value.get("url"), 320)
+    if not url.startswith("https://"):
+        return {}
+    out: Dict[str, Any] = {"url": url}
+    for name, limit in (("kind", 64), ("location", 180), ("commit", 64)):
+        item = _text(value.get(name), limit)
+        if item:
+            out[name] = item
+    return out
+
+
+def _normal_references(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for item in value[:16]:
+        reference = _normal_reference(item)
+        url = reference.get("url")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        out.append(reference)
+    return out
+
+
+def _normal_version_matrix(value: Any) -> Dict[str, Dict[str, str]]:
+    if not isinstance(value, dict):
+        return {}
+    out: Dict[str, Dict[str, str]] = {}
+    for name in ("v1.0", "v1.1", "v1.2", "current"):
+        revision = _normal_revision(value.get(name))
+        if revision:
+            out[name] = revision
+    return out
+
+
+def _normal_arm(value: Any, parent: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    arm_id = _text(value.get("arm_id", value.get("id")), 80).lower()
+    role = _text(value.get("role"), 40).lower()
+    truth = _normal_truth(value.get("truth", value.get("label")))
+    if not arm_id or not role or truth not in TRUTH_CLASSES:
+        return {}
+    out = {
+        "arm_id": arm_id,
+        "role": role,
+        "truth": truth,
+        "expected_status": _expected_status(value, truth),
+        "revision": _normal_revision(value.get("revision")),
+        "precondition_class": _text(value.get("precondition_class"), 32).lower(),
+        "required_evidence": _bounded_strings(
+            value.get("required_evidence", parent.get("required_evidence", [])),
+            MAX_EVIDENCE_FIELDS, 80),
+        "evaluation_stage": _text(value.get("evaluation_stage", "static"), 32).lower(),
+    }
+    return out
+
+
 def normalize_case(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize a gold case without retaining free-form case prose."""
+    """Normalize a gold case without retaining free-form case prose.
+
+    Historical CVE cases keep only bounded provenance metadata and are later
+    expanded into their four explicit evaluation arms.  This keeps the
+    evaluator deterministic while preventing source snippets or payloads from
+    entering benchmark output.
+    """
     if not isinstance(raw, dict):
         return {}
     case_id = _text(raw.get("case_id", raw.get("id")), MAX_ID)
-    truth = _normal_truth(raw.get("truth", raw.get("label")))
-    if not case_id or truth not in TRUTH_CLASSES:
-        return {}
     expected = raw.get("expected") if isinstance(raw.get("expected"), dict) else {}
     evidence = raw.get("required_evidence", expected.get("required_evidence", []))
     required = _bounded_strings(evidence, MAX_EVIDENCE_FIELDS, 80)
+    truth = _normal_truth(raw.get("truth", raw.get("label")))
+    # Historical manifests describe a parent case and score each arm.  They do
+    # not need a parent-level truth label.
+    if not case_id or (truth not in TRUTH_CLASSES and not raw.get("arms")):
+        return {}
     out = {
         "case_id": case_id,
         "truth": truth,
-        "expected_status": _expected_status(raw, truth),
+        "expected_status": _expected_status(raw, truth) if truth else STATUS_CANDIDATE,
         "expected_severity": _expected_severity(raw),
         "required_evidence": required,
         "mechanism_key": _text(raw.get("mechanism_key", raw.get("research_key", "")), 80),
@@ -516,28 +621,211 @@ def normalize_case(raw: Dict[str, Any]) -> Dict[str, Any]:
         out["variant"] = variant
     if precondition_class:
         out["precondition_class"] = precondition_class
+
+    # Historical-CVE provenance is intentionally allowlisted and bounded.
+    for name, limit in (("project", 120), ("cve", 32), ("ecosystem", 40),
+                        ("vulnerable_mechanism", 240), ("expected_effect", 120)):
+        value = raw.get(name)
+        if isinstance(value, dict):
+            value = value.get("kind")
+        item = _text(value, limit)
+        if item:
+            out[name] = item
+    for name in ("vulnerable_revision", "fixed_revision"):
+        revision = _normal_revision(raw.get(name))
+        if revision:
+            out[name] = revision
+    for name in ("expected_entry", "expected_sink", "safe_sibling"):
+        location = _normal_location(raw.get(name))
+        if location:
+            out[name] = location
+    preconditions = _bounded_strings(raw.get("required_preconditions"), 16, 180)
+    if preconditions:
+        out["required_preconditions"] = preconditions
+    severity_range = raw.get("expected_severity_range")
+    if isinstance(severity_range, dict):
+        normalized_range: Dict[str, Any] = {}
+        for name in ("min", "max"):
+            number = _finite_number(severity_range.get(name))
+            if number is not None and 0.0 <= number <= 10.0:
+                normalized_range[name] = round(number, 1)
+        label = _text(severity_range.get("label"), 24).lower()
+        if label in SEVERITY_ORDER:
+            normalized_range["label"] = label.title() if label != "none" else "None"
+        if normalized_range:
+            out["expected_severity_range"] = normalized_range
+    references = _normal_references(raw.get("reference_evidence"))
+    if references:
+        out["reference_evidence"] = references
+    version_matrix = _normal_version_matrix(raw.get("version_matrix"))
+    if version_matrix:
+        out["version_matrix"] = version_matrix
+    arms = [_normal_arm(item, out) for item in (raw.get("arms") or [])]
+    out["arms"] = [item for item in arms if item]
     return out
+
+
+def _expand_historical_case(parent: Dict[str, Any]) -> List[Dict[str, Any]]:
+    cases: List[Dict[str, Any]] = []
+    for arm in parent.get("arms") or []:
+        arm_id = str(arm.get("arm_id") or "").strip()
+        if not arm_id:
+            continue
+        case = {key: value for key, value in parent.items() if key != "arms"}
+        case["case_id"] = "%s::%s" % (parent["case_id"], arm_id)
+        case["parent_case_id"] = parent["case_id"]
+        case["arm_id"] = arm_id
+        case["role"] = arm.get("role", "")
+        case["truth"] = arm.get("truth", "")
+        case["expected_status"] = arm.get("expected_status", STATUS_CANDIDATE)
+        case["precondition_class"] = arm.get(
+            "precondition_class", case.get("precondition_class", ""))
+        case["required_evidence"] = arm.get(
+            "required_evidence", case.get("required_evidence", []))
+        case["evaluation_stage"] = arm.get("evaluation_stage", "static")
+        if arm.get("revision"):
+            case["revision"] = arm["revision"]
+        cases.append(case)
+    return cases
 
 
 def normalize_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(manifest, dict):
         return {}
+    schema = manifest.get("schema_version")
+    historical = schema == HISTORICAL_CVE_BENCHMARK_SCHEMA_VERSION
     cases = []
     seen = set()
     for raw in manifest.get("cases") or []:
-        case = normalize_case(raw)
-        if not case or case["case_id"] in seen:
+        parent = normalize_case(raw)
+        if not parent:
             continue
-        seen.add(case["case_id"])
-        cases.append(case)
+        expanded = (_expand_historical_case(parent) if historical
+                    else [parent])
+        for case in expanded:
+            if not case or case["case_id"] in seen:
+                continue
+            seen.add(case["case_id"])
+            cases.append(case)
+            if len(cases) >= MAX_CASES:
+                break
         if len(cases) >= MAX_CASES:
             break
     return {
-        "schema_version": BENCHMARK_SCHEMA_VERSION,
+        "schema_version": (HISTORICAL_CVE_BENCHMARK_SCHEMA_VERSION
+                           if historical else BENCHMARK_SCHEMA_VERSION),
+        "benchmark_type": (_text(manifest.get("benchmark_type"), 64)
+                           if historical else "research"),
         "benchmark_id": _text(manifest.get("benchmark_id", manifest.get("name", "benchmark")), 120),
         "cases": cases,
         "claim_status": BENCHMARK_CLAIM_STATUS,
     }
+
+
+def _validate_historical_manifest(manifest: Dict[str, Any]) -> List[str]:
+    errors: List[str] = []
+    raw_cases = manifest.get("cases")
+    if not isinstance(raw_cases, list) or not raw_cases:
+        return ["cases must be a non-empty list"]
+    if len(raw_cases) > MAX_CASES:
+        errors.append("cases exceeds limit %d" % MAX_CASES)
+    seen = set()
+    required_roles = {"vulnerable", "fixed", "safe-sibling", "environment-gap"}
+    for index, raw in enumerate(raw_cases[:MAX_CASES]):
+        prefix = "case[%d]" % index
+        if not isinstance(raw, dict):
+            errors.append("%s must be an object" % prefix)
+            continue
+        case_id = _text(raw.get("case_id", raw.get("id")), MAX_ID)
+        if not case_id:
+            errors.append("%s has no case_id" % prefix)
+        elif case_id in seen:
+            errors.append("duplicate case_id: %s" % case_id)
+        else:
+            seen.add(case_id)
+        project = _text(raw.get("project"), 120)
+        cve = _text(raw.get("cve", raw.get("CVE")), 32).upper()
+        if not project:
+            errors.append("%s has no project" % prefix)
+        if not re.fullmatch(r"CVE-\d{4}-\d{4,}", cve):
+            errors.append("%s has invalid cve" % prefix)
+        for name in ("vulnerable_revision", "fixed_revision"):
+            commit = _normal_revision(raw.get(name)).get("commit")
+            if not _is_commit_sha(commit):
+                errors.append("%s has no %s commit" % (prefix, name))
+        if not _text(raw.get("vulnerable_mechanism"), 240):
+            errors.append("%s has no vulnerable_mechanism" % prefix)
+        for name in ("expected_entry", "expected_sink", "safe_sibling"):
+            if not _normal_location(raw.get(name)):
+                errors.append("%s has no %s" % (prefix, name))
+        if not _bounded_strings(raw.get("required_preconditions"), 16, 180):
+            errors.append("%s has no required_preconditions" % prefix)
+        if not _text((raw.get("expected_effect") or {}).get("kind")
+                     if isinstance(raw.get("expected_effect"), dict)
+                     else raw.get("expected_effect"), 120):
+            errors.append("%s has no expected_effect" % prefix)
+        severity_range = raw.get("expected_severity_range")
+        if not isinstance(severity_range, dict):
+            errors.append("%s has no expected_severity_range" % prefix)
+        else:
+            lower = _finite_number(severity_range.get("min"))
+            upper = _finite_number(severity_range.get("max"))
+            if (lower is None or upper is None or lower < 0 or upper > 10
+                    or lower > upper):
+                errors.append("%s has invalid expected_severity_range" % prefix)
+        references = _normal_references(raw.get("reference_evidence"))
+        if not references:
+            errors.append("%s has no HTTPS reference_evidence" % prefix)
+        matrix = raw.get("version_matrix")
+        if (not isinstance(matrix, dict)
+                or set(("v1.0", "v1.1", "v1.2", "current")) - set(matrix)):
+            errors.append("%s has incomplete version_matrix" % prefix)
+        elif any(not _is_commit_sha(_normal_revision(matrix.get(name)).get("commit"))
+                 for name in ("v1.0", "v1.1", "v1.2", "current")):
+            errors.append("%s has invalid version_matrix revisions" % prefix)
+        arms = raw.get("arms")
+        if not isinstance(arms, list):
+            errors.append("%s arms must be a list" % prefix)
+            continue
+        roles = set()
+        arm_ids = set()
+        for arm_index, arm in enumerate(arms[:8]):
+            arm_prefix = "%s arm[%d]" % (prefix, arm_index)
+            if not isinstance(arm, dict):
+                errors.append("%s must be an object" % arm_prefix)
+                continue
+            arm_id = _text(arm.get("arm_id", arm.get("id")), 80).lower()
+            role = _text(arm.get("role"), 40).lower()
+            truth = _normal_truth(arm.get("truth", arm.get("label")))
+            if not arm_id or arm_id in arm_ids:
+                errors.append("%s has invalid arm_id" % arm_prefix)
+            arm_ids.add(arm_id)
+            if role not in required_roles or role in roles:
+                errors.append("%s has invalid arm role" % arm_prefix)
+            roles.add(role)
+            if truth not in TRUTH_CLASSES:
+                errors.append("%s has invalid truth" % arm_prefix)
+            if not _is_commit_sha(_normal_revision(arm.get("revision")).get("commit")):
+                errors.append("%s has no revision commit" % arm_prefix)
+            status = _expected_status(arm, truth)
+            if status == STATUS_MISSING:
+                errors.append("%s has invalid expected_status" % arm_prefix)
+            expected_arm = {
+                "vulnerable": (TRUTH_VULNERABLE, STATUS_CANDIDATE),
+                "fixed": (TRUTH_NEGATIVE, STATUS_EXCLUDED),
+                "safe-sibling": (TRUTH_NEGATIVE, STATUS_EXCLUDED),
+                "environment-gap": (TRUTH_ENVIRONMENT_GAP, STATUS_CANDIDATE),
+            }.get(role)
+            if expected_arm and (truth, status) != expected_arm:
+                errors.append("%s violates arm truth/status contract" % arm_prefix)
+            precondition = _text(arm.get("precondition_class"), 32).lower()
+            if precondition not in RESEARCH_PRECONDITION_CLASSES:
+                errors.append("%s has invalid precondition_class" % arm_prefix)
+        if roles != required_roles:
+            errors.append("%s must contain vulnerable/fixed/safe-sibling/environment-gap arms" % prefix)
+        if len(arms) > 8:
+            errors.append("%s has too many arms" % prefix)
+    return errors
 
 
 def validate_manifest(manifest: Dict[str, Any]) -> List[str]:
@@ -546,8 +834,11 @@ def validate_manifest(manifest: Dict[str, Any]) -> List[str]:
     if not isinstance(manifest, dict):
         return ["manifest must be a JSON object"]
     schema = manifest.get("schema_version")
+    if schema == HISTORICAL_CVE_BENCHMARK_SCHEMA_VERSION:
+        return _validate_historical_manifest(manifest)
     if schema not in (None, BENCHMARK_SCHEMA_VERSION):
-        errors.append("schema_version must be %s" % BENCHMARK_SCHEMA_VERSION)
+        errors.append("schema_version must be %s or %s" % (
+            BENCHMARK_SCHEMA_VERSION, HISTORICAL_CVE_BENCHMARK_SCHEMA_VERSION))
     raw_cases = manifest.get("cases")
     if not isinstance(raw_cases, list) or not raw_cases:
         errors.append("cases must be a non-empty list")
@@ -697,7 +988,7 @@ def normalize_observation(raw: Dict[str, Any], fallback_case_id: str = "") -> Di
     elif isinstance(cvss, str) and cvss.lower() in SEVERITY_ORDER:
         cvss_view["severity"] = cvss.title()
     state = _text(raw.get("execution_state", raw.get("state", "")), 80).lower()
-    return {
+    out = {
         "case_id": case_id,
         "status": status,
         "evidence": evidence,
@@ -706,6 +997,16 @@ def normalize_observation(raw: Dict[str, Any], fallback_case_id: str = "") -> Di
         "execution_state": state,
         "claim_status": BENCHMARK_CLAIM_STATUS,
     }
+    for name in ("candidate_count", "time_to_first_useful_candidate",
+                 "time_to_confirm", "elapsed_seconds"):
+        value = _finite_number(raw.get(name))
+        if value is None:
+            continue
+        if name == "candidate_count":
+            out[name] = _bounded_int(value, 0, MAX_CASES)
+        else:
+            out[name] = round(max(0.0, min(86400.0, value)), 3)
+    return out
 
 
 def normalize_run(raw: Dict[str, Any], index: int = 0) -> Dict[str, Any]:
@@ -739,6 +1040,10 @@ def _merge_observations(rows: Sequence[Dict[str, Any]], case_id: str) -> Dict[st
             merged["cvss"] = dict(row["cvss"])
         if row.get("execution_state"):
             merged["execution_state"] = row["execution_state"]
+        for name in ("candidate_count", "time_to_first_useful_candidate",
+                     "time_to_confirm", "elapsed_seconds"):
+            if name in row:
+                merged[name] = row[name]
     merged["events"] = merged["events"][:MAX_EVENTS]
     merged["claim_status"] = BENCHMARK_CLAIM_STATUS
     return merged
@@ -826,6 +1131,8 @@ def _score_case(case: Dict[str, Any], row: Dict[str, Any], run_id: str) -> Dict[
         "attack_class": case.get("attack_class", ""),
         "variant": case.get("variant", ""),
         "precondition_class": case.get("precondition_class", ""),
+        "evaluation_stage": case.get("evaluation_stage", "static"),
+        "role": case.get("role", ""),
         "expected_status": case["expected_status"],
         "observed_status": observed_status,
         "classification": _case_classification(
@@ -841,6 +1148,9 @@ def _score_case(case: Dict[str, Any], row: Dict[str, Any], run_id: str) -> Dict[
                                   for event in row.get("events") or []
                                   if event.get("research_key")}),
         "attempt_count": len(row.get("events") or []),
+        "candidate_count": _bounded_int(row.get("candidate_count"), 0, MAX_CASES),
+        "time_to_first_useful_candidate": row.get("time_to_first_useful_candidate"),
+        "time_to_confirm": row.get("time_to_confirm"),
         "claim_status": BENCHMARK_CLAIM_STATUS,
     }
 
@@ -888,6 +1198,28 @@ def _aggregate_case_results(results: Sequence[Dict[str, Any]],
     vulnerable = sum(r["truth"] == TRUTH_VULNERABLE
                      and r["expected_status"] == STATUS_CONFIRMED
                      for r in results)
+    candidate_rows = [r for r in results
+                      if r["truth"] in {TRUTH_VULNERABLE, TRUTH_NEGATIVE}
+                      and r["observed_status"] in {STATUS_CANDIDATE,
+                                                     STATUS_CONFIRMED}]
+    candidate_true_positive = sum(r["truth"] == TRUTH_VULNERABLE
+                                  for r in candidate_rows)
+    vulnerable_rows = [r for r in results if r["truth"] == TRUTH_VULNERABLE]
+    candidate_times = [float(r["time_to_first_useful_candidate"])
+                       for r in results
+                       if r["truth"] == TRUTH_VULNERABLE
+                       and r["observed_status"] in {STATUS_CANDIDATE,
+                                                      STATUS_CONFIRMED}
+                       if _finite_number(r.get("time_to_first_useful_candidate"))
+                       is not None]
+    confirm_times = [float(r["time_to_confirm"])
+                     for r in results
+                     if r["truth"] == TRUTH_VULNERABLE
+                     and r["observed_status"] == STATUS_CONFIRMED
+                     if _finite_number(r.get("time_to_confirm")) is not None]
+    explicit_candidate_count = sum(
+        max(0, _bounded_int(r.get("candidate_count"), 0, MAX_CASES))
+        for r in results)
     negative = [r for r in results if r["truth"] == TRUTH_NEGATIVE]
     gaps = [r for r in results if r["truth"] == TRUTH_ENVIRONMENT_GAP]
     exact = sum(r["observed_status"] == r["expected_status"] for r in observed)
@@ -960,6 +1292,19 @@ def _aggregate_case_results(results: Sequence[Dict[str, Any]],
         "coverage_by_surface": coverage_by_surface,
         "confirmed_precision": round(tp / confirmed, 4) if confirmed else None,
         "confirmed_recall": round(tp / vulnerable, 4) if vulnerable else None,
+        "candidate_precision": round(
+            candidate_true_positive / len(candidate_rows), 4)
+        if candidate_rows else None,
+        "candidate_recall": round(
+            candidate_true_positive / len(vulnerable_rows), 4)
+        if vulnerable_rows else None,
+        "candidate_predictions": len(candidate_rows),
+        "candidate_count": explicit_candidate_count,
+        "time_to_first_useful_candidate": round(
+            sum(candidate_times) / len(candidate_times), 3)
+        if candidate_times else None,
+        "time_to_confirm": round(sum(confirm_times) / len(confirm_times), 3)
+        if confirm_times else None,
         "resolution_accuracy": round(exact / len(observed), 4) if observed else None,
         "unsafe_confirmation_rate": round(unsafe / len(negative), 4) if negative else None,
         "negative_result_fidelity": round(sum(r["classification"] in {
@@ -1036,7 +1381,8 @@ def evaluate_benchmark(manifest: Dict[str, Any],
         "claim_status": BENCHMARK_CLAIM_STATUS,
     }
     return {
-        "schema_version": BENCHMARK_SCHEMA_VERSION,
+        "schema_version": gold.get("schema_version", BENCHMARK_SCHEMA_VERSION),
+        "benchmark_type": gold.get("benchmark_type", "research"),
         "benchmark_id": gold.get("benchmark_id", "benchmark"),
         "run_count": len(normalized_runs),
         "case_count": len(gold.get("cases") or []),
@@ -1066,11 +1412,13 @@ def normalize_benchmark_feedback(raw: Dict[str, Any]) -> Dict[str, Any]:
     snapshot: Dict[str, float] = {}
     for name in (
         "case_observation_coverage", "confirmed_precision", "confirmed_recall",
+        "candidate_precision", "candidate_recall",
         "resolution_accuracy", "unsafe_confirmation_rate",
         "negative_result_fidelity", "environment_gap_fidelity",
         "evidence_completeness", "decision_stability", "repeat_rate",
         "unjustified_repeat_rate", "severity_overstatement_rate",
         "severity_ordinal_overstatement_rate", "severity_mean_absolute_error",
+        "time_to_first_useful_candidate", "time_to_confirm",
     ):
         number = _finite_number(raw_snapshot.get(name))
         if number is None:
@@ -1224,6 +1572,7 @@ def derive_benchmark_feedback(result: Dict[str, Any]) -> Dict[str, Any]:
     snapshot: Dict[str, float] = {}
     for name in (
         "case_observation_coverage", "confirmed_precision", "confirmed_recall",
+        "candidate_precision", "candidate_recall",
         "resolution_accuracy", "unsafe_confirmation_rate",
         "negative_result_fidelity", "environment_gap_fidelity",
         "evidence_completeness", "decision_stability",
@@ -1242,6 +1591,9 @@ def derive_benchmark_feedback(result: Dict[str, Any]) -> Dict[str, Any]:
         ("severity_overstatement_rate", severity_overstatement),
         ("severity_ordinal_overstatement_rate", severity_ordinal),
         ("severity_mean_absolute_error", severity_mae),
+        ("time_to_first_useful_candidate",
+         _finite_number(metrics.get("time_to_first_useful_candidate"))),
+        ("time_to_confirm", _finite_number(metrics.get("time_to_confirm"))),
     ):
         if value is not None:
             snapshot[name] = round(max(0.0, min(10.0, value)), 4)
@@ -1506,6 +1858,10 @@ def render_benchmark_text(result: Dict[str, Any]) -> str:
         "  confirmed precision: %s  recall: %s  resolution: %s" % (
             metrics.get("confirmed_precision"), metrics.get("confirmed_recall"),
             metrics.get("resolution_accuracy")),
+        "  candidate precision: %s  recall: %s  count: %s  first useful candidate: %s s" % (
+            metrics.get("candidate_precision"), metrics.get("candidate_recall"),
+            metrics.get("candidate_count"),
+            metrics.get("time_to_first_useful_candidate")),
         "  observation coverage: %s  negative safety: %s  gap fidelity: %s  evidence completeness: %s" % (
             metrics.get("case_observation_coverage"),
             metrics.get("unsafe_confirmation_rate"),

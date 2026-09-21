@@ -292,6 +292,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   unjustified research-key repeats, evidence completeness, decision stability,
   and CVSS/severity calibration; benchmark output remains
   `claim_status=not-a-finding`.
+- Added the first revision-pinned `historical-cve-benchmark-v1` fixture under
+  `benchmarks/historical/` for PyYAML CVE-2017-18342, Apache Commons Text
+  CVE-2022-42889, and Lodash CVE-2021-23337. Each case has vulnerable/fixed/
+  safe-sibling/environment-gap arms, official HTTPS provenance, exact commits,
+  entry/sink and precondition metadata, and a four-point version matrix.
+  Historical static scoring adds candidate precision/recall, candidate count,
+  time-to-first-useful-candidate and time-to-confirm; all rows remain
+  `claim_status=not-a-finding` and do not weaken S4/G4/G5.
 - Added deterministic `research-benchmark-feedback-v1`: benchmark metrics can
   produce capped alert codes, signed scheduler-factor deltas, and bounded
   experiment observations. CLI scheduling, config-driven S2, and the

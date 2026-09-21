@@ -37,6 +37,27 @@ It defines:
 - the safety model (loopback-only, approval logging, no pre-fix disclosure);
 - the precondition-tier → CVSS mapping.
 
+## Historical CVE benchmark boundary
+
+The deterministic benchmark has a revision-pinned
+`historical-cve-benchmark-v1` fixture under `benchmarks/historical/`. It
+expands each CVE into vulnerable, fixed, safe-sibling and environment-gap arms,
+retains only bounded provenance (official HTTPS references, commits,
+entry/sink locations, preconditions and a version matrix), and reports
+candidate precision/recall plus discovery-time metrics. The checked-in sample
+is static calibration data: vulnerable rows remain candidates and an unavailable
+runtime remains an environment gap. Benchmark rows and results are always
+`claim_status=not-a-finding`; they cannot satisfy S4/G4/G5 or replace runtime
+evidence.
+
+Run it with:
+
+```bash
+python3 scripts/agent_cli.py benchmark \
+  --manifest benchmarks/historical/historical-cve-v1.json \
+  --run benchmarks/historical/historical-cve-sample-run.json --json
+```
+
 The source inventory also persists a semantic path evidence layer. It checks
 whether a path control is before the sink in the same lexical scope and runs a
 bounded same-symbol parameter/alias walk. `semantic-path-evidence.json`

@@ -36,6 +36,21 @@ VulnGate 是一个围绕确定性研究框架的轻量原生插件。设计原�
 - 安全模型（仅回环、审批日志、修复前不披露）；
 - 前置分级 → CVSS 映射。
 
+## Historical CVE Benchmark 边界
+
+确定性评测器在 `benchmarks/historical/` 下提供 revision 固定的
+`historical-cve-benchmark-v1`。每个 CVE 展开为 vulnerable、fixed、safe-sibling 和
+environment-gap 四条 arm，只保留有界 provenance（官方 HTTPS 引用、commit、entry/sink、必要前置和
+版本矩阵），并输出 candidate precision/recall 与候选发现时间。仓库内 sample 是静态校准数据：
+vulnerable 行仍是 candidate，运行时不可用仍是 environment gap。所有 benchmark 行和结果都保持
+`claim_status=not-a-finding`，不能满足 S4/G4/G5，也不能替代运行时证据。
+
+```bash
+python3 scripts/agent_cli.py benchmark \
+  --manifest benchmarks/historical/historical-cve-v1.json \
+  --run benchmarks/historical/historical-cve-sample-run.json --json
+```
+
 S8 还会生成有界的 `research-strategy-guidance-v1` 视图，只汇合策略观测元数据、最新人工复核状态
 和显式变体覆盖率，并映射为有限的下一步动作类别。它可以调整研究调度或建议替换零信息增益的实验，
 但绝不是证据、漏洞结论、CVSS 输入，也不能覆盖 G4/G5。

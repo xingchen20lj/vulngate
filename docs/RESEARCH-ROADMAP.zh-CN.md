@@ -21,7 +21,7 @@
 | 4 | 能力原语与攻击路径图 | 已实现（含 S4 运行时契约） | `capability-graph.json`、`capability-candidates.json`、`capability_contract`、`CAPABILITY/TRANSITION` 证据 | 低危原语只有在链路、transition 和终点 typed effect 均有观测时才允许继续评估 |
 | 5 | 运行时研究实验室与差分验证 | 已实现（定向 fuzz + 普通 S4） | `fuzz-corpus.json`、`FUZZ/runtime-lab.json`、`S4/runtime-lab.json`、版本/安全模式差分、缩减 reproducer | 固定输入可重复重放；差分、签名漂移与前置/harness 失败分开记录 |
 | 6 | 研究记忆与反馈学习 | 已实现（上下文 + 可回放人工复核） | `state/<target>/research-memory.json`、`state/<target>/review-feedback.json`、`S8/research-memory.json`、`S8/review-feedback.json`、`S4/runtime-lab.json`、`S4/processes.json`、配置快照、authz fixture、修复变体提示 | 新轮次能利用旧证据；服务/配置/授权/修复上下文可复现；人工复核可回放；环境缺口不被当成负证据；重复实验只降权不删除 |
-| 7 | 专家级评测基准 | 已实现（核心契约 + 确定性评分器） | `benchmarks/research-benchmark-v1.json`、`benchmarks/research-benchmark-sample-run.json`、`benchmark-result.json` | 同时衡量负向安全、环境缺口保真度、重复率、证据完整度、结论解析和严重性校准 |
+| 7 | 专家级评测基准 | 已实现（合成基准 + 首版 Historical CVE Benchmark） | `benchmarks/research-benchmark-v1.json`、`benchmarks/historical/historical-cve-v1.json`、`historical-cve-sample-run.json`、`benchmark-result.json` | 同时衡量 candidate precision/recall、confirmed precision/recall、负向安全、环境缺口保真度、重复率、证据完整度、候选发现时间和严重性校准；静态结果保持 `not-a-finding` |
 | 8 | 评测驱动的自适应研究闭环 | 已实现（有界反馈接入） | `research-benchmark-feedback-v1`、调度权重快照、`benchmark-guidance` 实验提示 | 评测指标只能改变下一轮研究优先级和必需观测；默认行为可回归，且不改变 G4/G5/CVSS |
 | 9 | 跨攻击面变体基准 | 已实现（五类研究面 + 三态契约） | `benchmarks/research-benchmark-surfaces-v1.json`、`benchmarks/research-benchmark-surfaces-sample-run.json`、`research_profile`、`coverage_by_surface` | Web、协议、云、移动端、native 均覆盖 vulnerable/negative/environment-gap；环境缺口不被误判为负向，结果保持 `not-a-finding` |
 | 10 | 研究面级自适应调度与规划 | 已实现（有界 surface guidance） | `surface_guidance`、候选级面向证据调度、面级 `benchmark_guidance` | 只对显式匹配研究面的候选加小幅优先级；计划补观测/证伪条件；默认无反馈行为不变，不改变 G4/G5/CVSS |
@@ -58,9 +58,9 @@
 | 41 | 同源证据溯源与相关性 | 已实现首版 | `evidence-provenance-v1`、现有 S1/S2/CLI 消费链 | 源码版本绑定、具体上游引用、显式缺口；仅对同源同控制同问题降权，不把多层解释重复计票 |
 | 42 | 统一语法前端 | 已接入 Python，其他语言待实现 | `SemanticFrontend`、既有 symbol/AST/binding/index summary | 三个实际消费者共用有界 AST 缓存；参数、嵌套符号、回退与解析缺口可回归，语法置信度不升级为语义证明 |
 
-当前研发优先级以《VulnGate 后续研发目标（Codex）》为准。上表的已有 synthetic
-评分器与回放契约不等于 Historical CVE Benchmark 已完成；Java/JS/TS/Go AST、
-有界跨过程传播、最小 CFG、真实历史漏洞四态对照和独立运行时观测仍需逐项验证。
+当前研发优先级以《VulnGate 后续研发目标（Codex）》为准。首版 Historical CVE Benchmark 已完成最小可用闭环，
+但样本规模、语言覆盖、真实构建矩阵和独立运行时观测仍需逐项扩充；Java/JS/TS/Go AST、类型解析和更完整
+CFG 仍是后续工作。合成评分器、历史样本和回放契约都不等于漏洞确认。
 暂停新增非必要平台与 planner，优先检验研究有效性，不以产物数量作为完成标准。
 
 ## 已实现基础：可证伪实验规划
@@ -196,6 +196,25 @@ python3 scripts/agent_cli.py benchmark \
 
 所有结果标记 `claim_status=not-a-finding`。评测只约束工程改进方向：负向安全、证据完整度或
 严重性校准下降时，必须回到候选生成、实验计划、调度或结论规则修正，不能用调高阈值掩盖问题。
+
+### 阶段 7 增量：首版 Historical CVE Benchmark
+
+新增 `benchmarks/historical/historical-cve-v1.json` 与配套 sample run，覆盖三个有官方修复版本和源码引用的
+历史 CVE：PyYAML CVE-2017-18342、Apache Commons Text CVE-2022-42889、Lodash CVE-2021-23337。每个 case
+固定 vulnerable/fixed revision，并展开 vulnerable、fixed、safe-sibling、environment-gap 四条 arm；同时保存
+entry/sink、必要前置、预期 effect、严重性范围、HTTPS provenance 和 `v1.0/v1.1/v1.2/current` 版本矩阵。
+
+```bash
+python3 scripts/agent_cli.py benchmark \
+  --manifest benchmarks/historical/historical-cve-v1.json \
+  --run benchmarks/historical/historical-cve-sample-run.json \
+  --out state/historical-cve-result.json --json
+```
+
+评测器在已有 confirmed 指标之外增加 `candidate_precision`、`candidate_recall`、显式候选数、
+`time_to_first_useful_candidate` 和 `time_to_confirm`。历史静态样本只验证线索校准：vulnerable 只能是
+candidate，fixed/safe-sibling 才可按观测排除，environment-gap 必须保留为缺口；任何静态行都不能满足
+S4/G4/G5 或升级为 finding。
 
 ## 阶段 8 初步实现：评测驱动的自适应研究闭环
 
