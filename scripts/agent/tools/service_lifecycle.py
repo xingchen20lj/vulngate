@@ -14,12 +14,12 @@ from __future__ import annotations
 
 import hashlib
 import fcntl
-import http.client
 import json
 import os
 import re
 import shlex
 import signal
+import socket
 import ssl
 import subprocess
 import time
@@ -397,34 +397,42 @@ class ServiceLifecycle:
             if not info.get("valid"):
                 return {"kind": "url", "ready": False, "status": "policy-denied"}
             # A service healthcheck is explicitly loopback-only.  Use a direct
-            # HTTP client instead of urllib's environment-sensitive opener:
-            # macOS runners can expose system proxy settings that make a
-            # loopback request fail even when NO_PROXY is deliberately empty.
-            # Direct connection also keeps the policy obvious: no redirect,
-            # proxy, DNS rebinding or remote request is involved here.
+            # socket and one HTTP/1.0 request instead of urllib/http.client:
+            # macOS runners can expose system proxy and keep-alive behaviour
+            # that makes a local request time out even when the service is up.
+            # This still performs a real TCP/HTTP healthcheck and never follows
+            # redirects, uses a proxy, or contacts a non-loopback host.
             parsed = urlparse(self.health_url)
             host = parsed.hostname or ""
             port = parsed.port or (443 if parsed.scheme == "https" else 80)
             target = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
             connection = None
+            phase = "connect"
             try:
+                connection = socket.create_connection(
+                    (host, port), timeout=self.health_timeout)
                 if parsed.scheme == "https":
-                    connection = http.client.HTTPSConnection(
-                        host, port, timeout=self.health_timeout,
-                        context=ssl.create_default_context())
-                else:
-                    connection = http.client.HTTPConnection(
-                        host, port, timeout=self.health_timeout)
-                connection.request(
-                    "GET", target,
-                    headers={"User-Agent": "VulnGate-HealthCheck/1"})
-                response = connection.getresponse()
-                code = int(response.status or 0)
+                    phase = "tls"
+                    connection = ssl.create_default_context().wrap_socket(
+                        connection, server_hostname=host)
+                connection.settimeout(self.health_timeout)
+                phase = "request"
+                request = (
+                    "GET %s HTTP/1.0\r\n"
+                    "Host: %s\r\n"
+                    "User-Agent: VulnGate-HealthCheck/1\r\n"
+                    "Connection: close\r\n\r\n"
+                ) % (target, host)
+                connection.sendall(request.encode("ascii", "ignore"))
+                phase = "response"
+                status_line = connection.recv(4096).split(b"\r\n", 1)[0]
+                match = re.match(rb"HTTP/\d(?:\.\d)?\s+(\d{3})", status_line)
+                code = int(match.group(1)) if match else 0
                 return {"kind": "url", "ready": code in self.expected_status,
                         "http_status": code}
-            except (http.client.HTTPException, OSError, TimeoutError) as exc:
+            except (OSError, TimeoutError) as exc:
                 return {"kind": "url", "ready": False,
-                        "error": type(exc).__name__}
+                        "error": type(exc).__name__, "phase": phase}
             finally:
                 if connection is not None:
                     connection.close()
