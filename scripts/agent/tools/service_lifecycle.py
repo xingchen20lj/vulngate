@@ -14,19 +14,18 @@ from __future__ import annotations
 
 import hashlib
 import fcntl
+import http.client
 import json
 import os
 import re
 import shlex
 import signal
+import ssl
 import subprocess
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
-from urllib.request import (HTTPRedirectHandler, ProxyHandler, Request,
-                            build_opener)
+from urllib.parse import urlparse, urlunsplit
 import ipaddress
 
 from ..sandbox.approval import ApprovalGate
@@ -141,11 +140,6 @@ def _health_config(raw: Dict[str, Any]) -> Tuple[str, List[str], int]:
         if 100 <= code <= 599 and str(code) not in codes:
             codes.append(str(code))
     return _text(url, 500), command, int(codes[0]) if len(codes) == 1 else 0
-
-
-class _NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise HTTPError(req.full_url, code, "redirect denied", headers, None)
 
 
 class ServiceLifecycle:
@@ -402,23 +396,39 @@ class ServiceLifecycle:
             info = self._health_url_info()
             if not info.get("valid"):
                 return {"kind": "url", "ready": False, "status": "policy-denied"}
-            request = Request(self.health_url, headers={"User-Agent": "VulnGate-HealthCheck/1"})
-            # A PoC/service healthcheck is explicitly loopback-only.  Do not
-            # let the host's proxy environment turn a local probe into an
-            # outbound proxy request (or make a healthy local service look
-            # unavailable on CI/macOS hosts with forced proxies).
-            opener = build_opener(_NoRedirect(), ProxyHandler({}))
+            # A service healthcheck is explicitly loopback-only.  Use a direct
+            # HTTP client instead of urllib's environment-sensitive opener:
+            # macOS runners can expose system proxy settings that make a
+            # loopback request fail even when NO_PROXY is deliberately empty.
+            # Direct connection also keeps the policy obvious: no redirect,
+            # proxy, DNS rebinding or remote request is involved here.
+            parsed = urlparse(self.health_url)
+            host = parsed.hostname or ""
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            target = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+            connection = None
             try:
-                with opener.open(request, timeout=self.health_timeout) as response:
-                    code = int(response.getcode() or 0)
-                    return {"kind": "url", "ready": code in self.expected_status,
-                            "http_status": code}
-            except HTTPError as exc:
-                return {"kind": "url", "ready": int(exc.code) in self.expected_status,
-                        "http_status": int(exc.code)}
-            except (URLError, OSError, TimeoutError) as exc:
+                if parsed.scheme == "https":
+                    connection = http.client.HTTPSConnection(
+                        host, port, timeout=self.health_timeout,
+                        context=ssl.create_default_context())
+                else:
+                    connection = http.client.HTTPConnection(
+                        host, port, timeout=self.health_timeout)
+                connection.request(
+                    "GET", target,
+                    headers={"User-Agent": "VulnGate-HealthCheck/1"})
+                response = connection.getresponse()
+                code = int(response.status or 0)
+                response.read(1)
+                return {"kind": "url", "ready": code in self.expected_status,
+                        "http_status": code}
+            except (http.client.HTTPException, OSError, TimeoutError) as exc:
                 return {"kind": "url", "ready": False,
                         "error": type(exc).__name__}
+            finally:
+                if connection is not None:
+                    connection.close()
         if self.health_command:
             command = self._resolve_command_paths(self.health_command)
             error = self._validate_command(command)
