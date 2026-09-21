@@ -40,6 +40,7 @@
 | 23 | 受控历史构建产物与 source-revision arm 执行 | 已实现（bounded artifact adapter） | `source-revision-artifacts-v1`、`source_revision_artifacts`、S4 source arm records/comparison、S8 research memory | 操作者显式提供 workspace 内匹配 commit ref 的 JAR/WAR/ZIP；校验路径、大小、类型和 digest 后复用隔离 Java runner；不 checkout/构建/远程执行；缺失或损坏产物保持 environment gap/inconclusive，不改变 G4/G5/CVSS |
 | 24 | Surface lane 的真实观测见证 | 已实现（bounded lane witness） | `surface-variant-evidence-v1`、S4 lane evidence、S8/S2 bounded signals | 只从真实 runner row 提取 observed/partial/environment-gap/not-executed、state sequence 和 typed effect 信号；计划不等于观测，不改变 G4/G5/CVSS |
 | 25 | 跨轮研究面 lane coverage 与闭环调度 | 已实现（bounded surface coverage view） | `surface-variant-coverage-v1`、`research-portfolio-v1.surface_lane_coverage`、lane-specific `next_probes` | 跨轮合并历史/最新 lane 状态，保留信号、序列状态、环境缺口和 research key；未闭合 lane 生成精确下一步 probe，仍不升级为漏洞结论 |
+| 26 | 跨项目回放 cohort 校准 | 已实现（bounded cross-project replay cohort） | `research-replay-cohort-v1`、distinct-project/per-surface sufficiency、`replay-cohort-calibrate`、显式 config fallback | 只从多个目标的 bounded calibration 汇聚可重复的调度信号；样本不足保持默认，本地校准优先；不改变候选、CVSS、G4/G5 |
 
 ## 已实现基础：可证伪实验规划
 
@@ -438,6 +439,15 @@ S2→S4→S8 的单向契约：
    保留 runner 的回环、审批和资源上限。
 2. 增加更多受控历史产物格式与 project replay 样本，但继续禁止自动 checkout、构建和远程执行，把 artifact provenance 与
    comparison gap 分开统计。
-3. 继续积累跨项目回放样本，分别校准 environment recovery、comparison gap 和 fixture budget 的告警边界，避免把样本偏差固化为调度规则。
+3. 继续积累跨项目回放样本，分别校准 environment recovery、comparison gap 和 fixture budget 的告警边界，避免把样本偏差固化为调度规则；cohort 只有在不同项目样本足够时才应影响调度。
 
 每一阶段都必须同时更新实现、技能契约、回归测试和 CHANGELOG；只有测试、artifact schema 和安全边界一起稳定后，才适合提交为一个独立变更。
+
+## 阶段 26 初步实现：跨项目回放 cohort 校准
+
+阶段 22 的 `research-replay-calibration-v1` 只能回答单个目标上的 guidance 是否产生了新信息。把一个项目的阈值直接迁移到另一个项目，会把产品差异、研究面偏差和环境缺口误当成普遍规律。阶段 26 增加显式的 `research-replay-cohort-v1`：
+
+- `agent_cli.py replay-cohort-calibrate` 接收多个目标已经落盘的 calibration artifact；输入路径、原始回放、payload、命令、stdout/stderr 和漏洞结论不会进入 cohort；project row 只保留不透明 ID、有限计数、比率和 `not-a-finding` 状态。
+- cohort 同时检查不同项目数与每个研究面的回放充分性。至少三个独立项目拥有足够的可回放样本后，才允许 cohort policy 影响调度；项目数不足时保留默认阈值并生成 `collect-more-projects`。
+- 两轮 zero-gain threshold 只有在项目级低收益 replacement signal 达到有界多数条件时才启用；目标本地已经充分校准时优先使用本地结果，显式 `replay_cohort_calibration_path` 只作为本地历史不足时的 fallback。
+- cohort 可以在 S8 复制一份 bounded snapshot，仍只影响 research-guidance scheduling，不会确认/排除候选，不会填补运行时证据，不会改变 CVSS、G4 或 G5；默认未配置时行为保持不变。

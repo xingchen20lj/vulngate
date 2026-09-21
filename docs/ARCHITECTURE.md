@@ -120,6 +120,28 @@ future guidance; insufficient history keeps the default. The calibration
 artifact contains no raw payloads, commands, output, credentials, or finding
 evidence, and changes S2/S8 research scheduling only.
 
+When enough independent targets have produced that bounded artifact, an
+operator may aggregate them into `research-replay-cohort-v1`:
+
+```bash
+python3 scripts/agent_cli.py replay-cohort-calibrate \
+  --artifact /path/to/project-a/research-replay-calibration.json \
+  --artifact /path/to/project-b/research-replay-calibration.json \
+  --artifact /path/to/project-c/research-replay-calibration.json \
+  --out state/research-replay-cohort.json --json
+```
+
+The cohort recomputes policy from opaque project rows, preserves per-surface
+sample sufficiency, and activates the existing two-round replacement threshold
+only when at least three distinct projects have sufficient replay history and
+the project-level low-yield signal is consistent. With fewer projects it keeps
+the default and emits a `collect-more-projects` recommendation. A target may
+explicitly set `replay_cohort_calibration_path`; local target calibration wins
+over the cohort, and the cohort is never discovered implicitly. The pipeline
+copies only the bounded cohort snapshot into S8 and uses it as a scheduling
+fallback; it never copies the input paths, raw replay data, or target finding
+evidence, and it cannot alter candidate status, CVSS, G4, or G5.
+
 ## Two operating modes
 
 | Mode | Reasoning | Setup | Typical use |

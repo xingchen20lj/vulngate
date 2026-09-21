@@ -40,6 +40,11 @@ class TargetConfig:
     # workspace and must contain a benchmark result or feedback artifact.
     benchmark_feedback: Dict[str, Any] = field(default_factory=dict)
     benchmark_feedback_path: Optional[str] = None
+    # Optional, explicitly supplied cross-project replay cohort.  It only
+    # supplies a bounded research-guidance scheduling policy when the target's
+    # own replay history is insufficient; it never changes findings, CVSS, or
+    # G4/G5.
+    replay_cohort_calibration_path: Optional[str] = None
     jars: List[Dict[str, str]] = field(default_factory=list)
     deps: List[Dict[str, str]] = field(default_factory=list)
     source_dirs: List[str] = field(default_factory=list)

@@ -563,6 +563,31 @@ research key, so a stable primary replay cannot hide an unverified lane. This
 view is scheduling metadata only, remains `claim_status=not-a-finding`, and
 cannot alter candidate status, CVSS, G4, or G5.
 
+When several independent targets have produced bounded
+`research-replay-calibration-v1` artifacts, an operator may explicitly create
+`research-replay-cohort-v1`:
+
+```bash
+python3 scripts/agent_cli.py replay-cohort-calibrate \
+  --artifact /path/to/project-a/research-replay-calibration.json \
+  --artifact /path/to/project-b/research-replay-calibration.json \
+  --artifact /path/to/project-c/research-replay-calibration.json \
+  --out state/research-replay-cohort.json --json
+```
+
+The cohort recomputes policy from opaque project rows, tracks distinct-project
+and per-surface sufficiency, and requires at least three eligible projects
+before it can influence scheduling. It may select the existing one- or
+two-round zero-information replacement threshold only when the project-level
+low-yield signal meets the bounded majority rule; otherwise it emits a
+`collect-more-projects` recommendation and keeps the default. A target may
+explicitly configure `replay_cohort_calibration_path`; sufficient target-local
+calibration always wins, and the cohort is never discovered implicitly. S8
+may snapshot the normalized cohort and use it only as a research-guidance
+fallback. Cohort state is `claim_status=not-a-finding`, contains no input
+paths, raw replay data, payloads, commands, output, credentials, or finding
+evidence, and cannot alter candidate status, CVSS, G4, or G5.
+
 S3 residuals are carried across the same boundary as pending research debt.
 Memory stores only controlled kind/reason codes, bounded source locations, a
 probe digest, and whether a bounded probe plan exists. The portfolio emits one
@@ -1394,6 +1419,19 @@ research key 的最新状态，包括 state-sequence、typed-effect、safe-equiv
 environment-gap 元数据。只有最新真实状态为 `observed` 的 lane 才能闭合；partial、`not-executed` 和
 `environment-gap` 必须按精确 research key 生成有界 next probe，不能让稳定的主 replay 掩盖未验证 lane。这个视图
 只用于调度，始终是 `claim_status=not-a-finding`，不能改变 candidate status、CVSS、G4 或 G5。
+
+当多个独立目标已有有界的 `research-replay-calibration-v1` 时，操作者可以显式生成
+`research-replay-cohort-v1`：
+
+```bash
+python3 scripts/agent_cli.py replay-cohort-calibrate \
+  --artifact /path/to/project-a/research-replay-calibration.json \
+  --artifact /path/to/project-b/research-replay-calibration.json \
+  --artifact /path/to/project-c/research-replay-calibration.json \
+  --out state/research-replay-cohort.json --json
+```
+
+cohort 会从不透明的 project row 重新计算策略，同时检查不同项目数与按研究面的样本充分性；只有至少三个 eligible 项目时才允许影响调度。只有项目级低收益 replacement signal 满足有界多数条件时，才可选择已有的一轮或两轮 zero-information threshold；否则生成 `collect-more-projects` 并保留默认值。目标可以显式配置 `replay_cohort_calibration_path`；目标本地校准充分时始终优先，cohort 不会被隐式发现。S8 只可保存归一化快照并将其用作 research-guidance fallback。cohort 仍是 `claim_status=not-a-finding`，不得携带输入路径、原始回放、payload、命令、输出、凭据或漏洞证据，也不能改变 candidate status、CVSS、G4 或 G5。
 
 S2 还会写出有界的 `research-strategy-v1`：目标级为
 `state/<target>/coverage/research-strategy.json`，轮次快照为 `S2/research-strategy.json`。它将

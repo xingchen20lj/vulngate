@@ -79,6 +79,9 @@ _RECOMMENDATION_CODES = frozenset({
     "require-consecutive-zero-gain", "increase-fixture-budget-or-split-lanes",
     "prioritize-comparison-gap-recovery", "no-threshold-change",
 })
+_RESEARCH_SURFACES = frozenset({
+    "web", "protocol", "cloud", "mobile", "native",
+})
 
 
 def _text(value: Any, limit: int = MAX_TEXT) -> str:
@@ -192,6 +195,18 @@ def _variant_digest(value: Any) -> str:
     return _digest({"selected": selected, "lanes": lanes}, "sv")
 
 
+def _guidance_surface(value: Any) -> str:
+    """Keep only an explicit research surface for cohort aggregation."""
+    if not isinstance(value, Mapping):
+        return ""
+    surface = _text(value.get("research_surface", value.get("surface")), 24).lower()
+    if not surface:
+        plan = value.get("surface_variant_plan")
+        if isinstance(plan, Mapping):
+            surface = _text(plan.get("surface"), 24).lower()
+    return surface if surface in _RESEARCH_SURFACES else ""
+
+
 def _normal_guidance_item(value: Any) -> Dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
@@ -212,6 +227,7 @@ def _normal_guidance_item(value: Any) -> Dict[str, Any]:
         "replacement_recommended": bool(
             value.get("replacement_recommended")),
         "observation_status": observation_status,
+        "surface": _guidance_surface(value),
         "variant_digest": _variant_digest(value.get("surface_variant_plan")),
         "round": _round_no(value.get("last_round", value.get("round", 0))),
     }
@@ -591,6 +607,7 @@ def calibrate_replay_history(history: Sequence[Mapping[str, Any]],
                     "strategy_id": current.get("strategy_id", ""),
                     "research_key": current.get("research_key", ""),
                     "candidate_id": current.get("candidate_id", ""),
+                    "surface": current.get("surface", ""),
                     "round": _round_no(row.get("round")),
                     "next_action": current.get("next_action", ""),
                     "replacement_recommended": bool(
@@ -755,6 +772,9 @@ def normalize_replay_calibration(raw: Any) -> Dict[str, Any]:
             "strategy_id": strategy_id,
             "research_key": _text(row.get("research_key"), 80),
             "candidate_id": _text(row.get("candidate_id"), 120),
+            "surface": (_text(row.get("surface"), 24).lower()
+                        if _text(row.get("surface"), 24).lower()
+                        in _RESEARCH_SURFACES else ""),
             "round": _round_no(row.get("round")),
             "next_action": _text(row.get("next_action"), 64)
             if _text(row.get("next_action"), 64) in _ACTIONS else "",

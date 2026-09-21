@@ -68,6 +68,7 @@ class StageContext:
         self.checked_at = datetime.now().isoformat(timespec="seconds")
         self._public_scan_cache: Optional[Dict[str, Any]] = None
         self._benchmark_feedback_cache: Optional[Dict[str, Any]] = None
+        self._replay_cohort_cache: Optional[Dict[str, Any]] = None
 
     def public_disclosures(self) -> Dict[str, Any]:
         if self._public_scan_cache is None:
@@ -98,6 +99,23 @@ class StageContext:
                 value = {}
         self._benchmark_feedback_cache = benchmark_feedback_from_input(value)
         return dict(self._benchmark_feedback_cache)
+
+    def replay_cohort_calibration(self) -> Dict[str, Any]:
+        """Load only explicitly configured cross-project replay metadata."""
+        if self._replay_cohort_cache is not None:
+            return dict(self._replay_cohort_cache)
+        configured_path = getattr(
+            self.config, "replay_cohort_calibration_path", None)
+        value: Dict[str, Any] = {}
+        if configured_path:
+            from ..evaluation.replay_cohort import load_replay_cohort_file
+
+            path = Path(configured_path)
+            if not path.is_absolute():
+                path = self.workspace / path
+            value = load_replay_cohort_file(path)
+        self._replay_cohort_cache = value
+        return dict(value)
 
 
 def _gate_scan(ctx: StageContext) -> List[Dict[str, Any]]:
@@ -1209,8 +1227,14 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
         build_replay_calibration, load_replay_calibration,
         write_replay_calibration,
     )
+    from ..evaluation.replay_cohort import (
+        select_effective_replay_calibration,
+    )
     prior_replay_calibration = load_replay_calibration(
         ctx.workspace, ctx.target)
+    replay_cohort = ctx.replay_cohort_calibration()
+    effective_replay_calibration = select_effective_replay_calibration(
+        prior_replay_calibration, replay_cohort)
     memory_delta = build_round_memory(
         ctx.config.candidates, summaries,
         {r["candidate_id"]: r.get("conclusion", "") for r in rows},
@@ -1235,7 +1259,7 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
             strategy, ctx.config.candidates, summaries, ctx.round_no)
         strategy, research_guidance = apply_research_guidance(
             strategy, portfolio, review_feedback, ctx.round_no,
-            replay_calibration=prior_replay_calibration)
+            replay_calibration=effective_replay_calibration)
         if strategy:
             strategy_file = write_research_strategy(
                 ctx.workspace, ctx.target, strategy)
@@ -1252,6 +1276,9 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
         ctx.workspace, ctx.target, replay_calibration)
     ctx.store.write_artifact(
         "S8", "research-replay-calibration.json", replay_calibration)
+    if replay_cohort:
+        ctx.store.write_artifact(
+            "S8", "research-replay-cohort.json", replay_cohort)
     ctx.store.write_artifact("S8", "research-memory.json", memory_delta)
     ctx.store.write_artifact("S8", "research-memory-summary.json", memory["summary"])
     ctx.store.write_artifact("S8", "review-feedback.json", review_feedback)
@@ -1328,6 +1355,17 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
             "metrics", {}).get("replacement_hit_rate"),
         "claim_status": "not-a-finding",
     }
+    if replay_cohort:
+        summary["research_replay_cohort"] = {
+            "artifact": "configured:replay_cohort_calibration_path",
+            "schema_version": replay_cohort.get("schema_version", ""),
+            "status": replay_cohort.get("status", "no-data"),
+            "eligible_projects": replay_cohort.get("metrics", {}).get(
+                "eligible_projects", 0),
+            "policy_threshold": replay_cohort.get("policy", {}).get(
+                "replacement_zero_gain_rounds", 1),
+            "claim_status": "not-a-finding",
+        }
     out_dir = write_round_artifacts(ctx.workspace, ctx.target, ctx.round_no, rows, excluded,
                                     summary, lang=ctx.config.output_lang)
     return {"ledger_dir": str(out_dir.relative_to(ctx.workspace)), "rows": len(rows),
@@ -1336,6 +1374,9 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
             "research_portfolio": summary["research_portfolio"],
             "research_replay_calibration": summary[
                 "research_replay_calibration"],
+            "research_replay_cohort": summary.get(
+                "research_replay_cohort", {
+                    "claim_status": "not-a-finding"}),
             "research_strategy": summary.get("research_strategy", {
                 "claim_status": "not-a-finding"})}
 

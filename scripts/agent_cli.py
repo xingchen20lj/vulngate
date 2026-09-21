@@ -19,6 +19,9 @@ Usage:
   agent_cli.py benchmark --manifest <gold.json> [--run <run.json>] [--out <result.json>]
                            [--feedback-out <feedback.json>] [--json]
   agent_cli.py replay-calibrate <target> --workspace <dir> [--out <result.json>] [--json]
+  agent_cli.py replay-cohort-calibrate --artifact <calibration.json> \
+                           [--artifact <calibration.json> ...] \
+                           [--project-id <label> ...] [--out <result.json>] [--json]
   agent_cli.py review <target> --workspace <dir> (--research-key <rk>|--candidate-id <id>)
                            --status <accepted|rejected|needs-evidence|scope-corrected>
                            [--reason-code <code>] [--note <text>] [--evidence-ref <ref>]
@@ -637,6 +640,71 @@ def cmd_replay_calibrate(args: argparse.Namespace) -> int:
                  metrics.get("replayed_guidance_items", 0),
                  metrics.get("replacement_hit_rate"),
                  calibration.get("claim_status", "not-a-finding")))
+        if args.out:
+            print("  written_to: %s" % payload["written_to"])
+    return 0
+
+
+def cmd_replay_cohort_calibrate(args: argparse.Namespace) -> int:
+    """Aggregate bounded replay calibration from independent projects."""
+    from agent.evaluation.replay_cohort import calibrate_replay_cohort
+
+    artifact_paths = [Path(value).resolve() for value in args.artifact or []]
+    project_ids = [str(value).strip() for value in args.project_id or []]
+    if project_ids and len(project_ids) != len(artifact_paths):
+        _out({"error": "--project-id must be repeated once per --artifact",
+              "artifacts": len(artifact_paths),
+              "project_ids": len(project_ids)})
+        return 2
+    inputs = []
+    invalid = []
+    for index, path in enumerate(artifact_paths):
+        try:
+            if not path.is_file() or path.stat().st_size > 8 * 1024 * 1024:
+                invalid.append(str(path))
+                continue
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            invalid.append(str(path))
+            continue
+        if isinstance(raw, dict) and isinstance(raw.get("calibration"), dict):
+            raw = raw["calibration"]
+        inputs.append({
+            "calibration": raw,
+            "project_id": project_ids[index] if project_ids else "",
+        })
+    if invalid:
+        _out({"error": "invalid replay calibration artifact",
+              "paths": invalid[:8]})
+        return 2
+    if not inputs:
+        _out({"error": "at least one --artifact is required"})
+        return 2
+    cohort = calibrate_replay_cohort(inputs)
+    payload = {
+        "cohort": cohort,
+        "artifact_count": len(inputs),
+        "claim_status": "not-a-finding",
+    }
+    if args.out:
+        out_path = Path(args.out).resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(cohort, indent=2, ensure_ascii=False),
+                            encoding="utf-8")
+        payload["written_to"] = str(out_path)
+    if args.json:
+        _out(payload)
+    else:
+        metrics = cohort.get("metrics", {})
+        print("replay cohort calibration: status=%s projects=%s eligible=%s "
+              "replayed=%s threshold=%s claim_status=%s" % (
+                  cohort.get("status", "no-data"),
+                  metrics.get("project_count", 0),
+                  metrics.get("eligible_projects", 0),
+                  metrics.get("eligible_replayed_guidance_items", 0),
+                  (cohort.get("policy") or {}).get(
+                      "replacement_zero_gain_rounds", 1),
+                  cohort.get("claim_status", "not-a-finding")))
         if args.out:
             print("  written_to: %s" % payload["written_to"])
     return 0
@@ -1567,6 +1635,20 @@ def build_parser() -> argparse.ArgumentParser:
     rc.add_argument("--json", action="store_true",
                     help="machine-readable output")
     rc.set_defaults(fn=cmd_replay_calibrate)
+
+    rcc = sub.add_parser(
+        "replay-cohort-calibrate",
+        help="aggregate bounded replay calibration across independent projects",
+    )
+    rcc.add_argument("--artifact", action="append", required=True,
+                     help="per-target research-replay-calibration-v1 JSON; repeatable")
+    rcc.add_argument("--project-id", action="append", default=[],
+                     help="optional opaque label, repeated once per artifact")
+    rcc.add_argument("--out", default=None,
+                     help="write the cohort artifact to this path")
+    rcc.add_argument("--json", action="store_true",
+                     help="machine-readable output")
+    rcc.set_defaults(fn=cmd_replay_cohort_calibrate)
 
     rv = sub.add_parser(
         "review",

@@ -455,6 +455,7 @@ class AutoCtx:
         self.stop_file = root / "state" / cfg.name / "STOP"
         self._public_scan_cache: Optional[Dict[str, Any]] = None
         self._benchmark_feedback_cache: Optional[Dict[str, Any]] = None
+        self._replay_cohort_cache: Optional[Dict[str, Any]] = None
 
     def public_disclosures(self) -> Dict[str, Any]:
         """Memoized internet disclosure scan (plan 2.7); [] when offline."""
@@ -495,6 +496,23 @@ class AutoCtx:
                 value = {}
         self._benchmark_feedback_cache = benchmark_feedback_from_input(value)
         return dict(self._benchmark_feedback_cache)
+
+    def replay_cohort_calibration(self) -> Dict[str, Any]:
+        """Load only explicitly configured cross-project replay metadata."""
+        if self._replay_cohort_cache is not None:
+            return dict(self._replay_cohort_cache)
+        configured_path = getattr(
+            self.cfg, "replay_cohort_calibration_path", None)
+        value: Dict[str, Any] = {}
+        if configured_path:
+            from ..evaluation.replay_cohort import load_replay_cohort_file
+
+            path = Path(configured_path)
+            if not path.is_absolute():
+                path = self.root / path
+            value = load_replay_cohort_file(path)
+        self._replay_cohort_cache = value
+        return dict(value)
 
 
 def _fmt_entries(entries: List[Dict[str, Any]]) -> str:
@@ -1915,8 +1933,14 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         build_replay_calibration, load_replay_calibration,
         write_replay_calibration,
     )
+    from ..evaluation.replay_cohort import (
+        select_effective_replay_calibration,
+    )
     prior_replay_calibration = load_replay_calibration(
         ctx.root, ctx.cfg.name)
+    replay_cohort = ctx.replay_cohort_calibration()
+    effective_replay_calibration = select_effective_replay_calibration(
+        prior_replay_calibration, replay_cohort)
     memory_delta = build_round_memory(
         candidates, memory_summaries, memory_conclusions, runtime_lab, round_no,
         target_type=ctx.cfg.target_type)
@@ -1947,7 +1971,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             strategy, candidates, memory_summaries, round_no)
         strategy, research_guidance = apply_research_guidance(
             strategy, portfolio, review_feedback, round_no,
-            replay_calibration=prior_replay_calibration)
+            replay_calibration=effective_replay_calibration)
         if strategy:
             strategy_file = write_research_strategy(
                 ctx.root, ctx.cfg.name, strategy)
@@ -1964,6 +1988,9 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         ctx.root, ctx.cfg.name, replay_calibration)
     ctx.write_artifact(round_no, "S8", "research-replay-calibration.json",
                        replay_calibration)
+    if replay_cohort:
+        ctx.write_artifact(round_no, "S8", "research-replay-cohort.json",
+                           replay_cohort)
     ctx.write_artifact(round_no, "S8", "research-memory.json", memory_delta)
     ctx.write_artifact(round_no, "S8", "research-memory-summary.json", memory["summary"])
     ctx.write_artifact(round_no, "S8", "review-feedback.json", review_feedback)
@@ -2004,6 +2031,21 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             "metrics", {}).get("replacement_hit_rate"),
         "claim_status": "not-a-finding",
     }
+    research_replay_cohort_info = {
+        "claim_status": "not-a-finding",
+    }
+    if replay_cohort:
+        research_replay_cohort_info = {
+            "artifact": "configured:replay_cohort_calibration_path",
+            "round_artifact": "state/%s/round-%02d/S8/research-replay-cohort.json"
+                              % (ctx.cfg.name, round_no),
+            "status": replay_cohort.get("status", "no-data"),
+            "eligible_projects": replay_cohort.get("metrics", {}).get(
+                "eligible_projects", 0),
+            "policy_threshold": replay_cohort.get("policy", {}).get(
+                "replacement_zero_gain_rounds", 1),
+            "claim_status": "not-a-finding",
+        }
     research_strategy_info = {
         "claim_status": "not-a-finding",
     }
@@ -2059,6 +2101,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             "review_feedback": review_feedback_info,
             "research_portfolio": research_portfolio_info,
             "research_replay_calibration": research_replay_calibration_info,
+            "research_replay_cohort": research_replay_cohort_info,
             "research_strategy": research_strategy_info,
         }
         by_candidate_memory = {
@@ -2083,6 +2126,8 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                                 "research_portfolio": research_portfolio_info,
                                 "research_replay_calibration":
                                 research_replay_calibration_info,
+                                "research_replay_cohort":
+                                research_replay_cohort_info,
                                 "research_strategy": research_strategy_info})
     print("[round-%02d] done: 确认=%d 排除=%d" % (round_no, len(rows), len(excluded)))
     return {"next_candidates": _propose_next(ctx, candidates, rows),
@@ -2090,6 +2135,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             "review_feedback": review_feedback_info,
             "research_portfolio": research_portfolio_info,
             "research_replay_calibration": research_replay_calibration_info,
+            "research_replay_cohort": research_replay_cohort_info,
             "research_strategy": research_strategy_info}
 
 

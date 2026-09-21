@@ -92,6 +92,19 @@ S8 还会从目标的有界轮次快照生成 `research-replay-calibration-v1`�
 将后续 guidance 的零增益阈值在一轮与两轮之间选择；样本不足时保持默认值。校准产物不包含原始 payload、命令、
 输出、凭据或漏洞证据，只影响 S2/S8 的研究调度。
 
+当多个独立目标都积累了这类有界 artifact 后，操作者可以显式汇聚为
+`research-replay-cohort-v1`：
+
+```bash
+python3 scripts/agent_cli.py replay-cohort-calibrate \
+  --artifact /path/to/project-a/research-replay-calibration.json \
+  --artifact /path/to/project-b/research-replay-calibration.json \
+  --artifact /path/to/project-c/research-replay-calibration.json \
+  --out state/research-replay-cohort.json --json
+```
+
+cohort 会从不透明的 project row 重新计算策略，并保留按研究面的样本充分性；只有至少三个不同项目都有足够回放历史，且项目级低收益信号一致时，才会启用已有的两轮 zero-gain replacement threshold。项目数不足时保持默认，并生成 `collect-more-projects` 建议。目标可以显式设置 `replay_cohort_calibration_path`；目标本地校准优先，cohort 不会被隐式发现。管线只把有界 cohort 快照复制到 S8，并在目标本地历史不足时把它用作调度 fallback；不会复制输入路径、原始回放数据或目标漏洞证据，也不会改变 candidate status、CVSS、G4 或 G5。
+
 S1 中包含授权边界和危险 Sink 的启发式 Source→Sink 路径会写入
 `composite-chain-candidates.json`，并在 S2 进入与模型候选、控制图候选、同族差分候选相同的调度池。它们始终保留
 `heuristic-nearby` / `requires_manual_dataflow=true`，只能作为审计和 PoC

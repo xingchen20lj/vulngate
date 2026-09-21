@@ -279,6 +279,20 @@ threshold from one to two consecutive rounds. Insufficient history retains the
 default. The calibration is research scheduling metadata only, marked
 `not-a-finding`, and cannot alter candidate state, CVSS, G4, or G5.
 
+The next research-loop layer is the explicit cross-project cohort adapter,
+`research-replay-cohort-v1`. `agent_cli.py replay-cohort-calibrate` accepts
+multiple per-target calibration artifacts and recomputes policy from opaque
+project rows rather than averaging untrusted artifact prose. It tracks
+distinct-project sufficiency and per-surface replay sufficiency, requires at
+least three eligible projects before a cohort can influence scheduling, and
+uses a project-level majority of low-yield replacement signals before selecting
+the two-round threshold. A target may opt in with
+`replay_cohort_calibration_path`; its own calibrated history always wins, while
+an insufficient cohort leaves the default unchanged. The pipeline records the
+bounded cohort snapshot in S8 only when configured, and all cohort state remains
+`not-a-finding` scheduling metadata with no effect on candidate conclusions,
+CVSS, G4, or G5.
+
 ## Native targets
 
 The macOS adapter turns `.app`, `.dmg` and `.pkg` bundles into an auditable

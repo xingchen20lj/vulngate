@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added bounded cross-project replay calibration, `research-replay-cohort-v1`.
+  `agent_cli.py replay-cohort-calibrate` aggregates explicit per-target
+  `research-replay-calibration-v1` artifacts by distinct-project sample counts,
+  preserves per-surface sufficiency, and activates a one-to-two-round
+  zero-information replacement policy only when the cohort is sufficiently
+  observed. Target-local calibration takes precedence; insufficient cohorts
+  retain the default. The artifact is `not-a-finding` and cannot affect
+  candidate status, CVSS, G4, or G5.
+
 - S8/S2 now produce `research-replay-calibration-v1` from bounded real-project
   round history. `agent_cli.py replay-calibrate` measures replacement hit rate,
   unproductive repeats, environment recovery, fixture-budget truncation, and
