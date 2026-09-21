@@ -3,6 +3,32 @@
 VulnGate 1.2.0 expands the audit engine while keeping the host-agent and
 deterministic-executor boundary intact.
 
+## Unreleased shared Python syntax frontend
+
+The common syntax interface now has three real consumers: Python symbol
+extraction, AST branch witnesses and AST value binding. They share content-keyed
+parsed units rather than independently parsing the same file. The bounded cache
+and parser metrics live in the existing inventory summary, and parser/revision/
+gap fields extend existing records. No additional planner or artifact is added.
+
+`tests/test_semantic_frontend.py` includes a small oracle-labelled comparison:
+one real definition plus one definition-shaped string. Legacy regex returns both
+(one false symbol); AST returns only the real definition (zero false symbols,
+same real-definition recall). It also tests multiline typed/default/keyword
+parameters, nested-name uniqueness, repeated-definition ambiguity, decorator
+ownership, one-function/file range ties, cache reuse/invalidation/eviction,
+encoding cookies, parse/byte/node/depth gaps, cross-pass source revision mismatch
+and all three inventory consumers
+issuing one underlying parse on a one-file fixture. This is a syntax regression
+benchmark, **not** historical-CVE candidate precision or recall evidence.
+
+A frontend-only smoke on six local analysis modules additionally measures time
+and Python allocation peak without invoking the whole call/flow pipeline. Shared
+retention is bounded by both file and node counts; consumer indices are also
+file-bounded. Java/JS/TS/Go adapters, resolved Python call binding, minimal CFG and
+historical vulnerable/fixed/safe/environment-gap CVE comparisons remain future
+work. Nothing here proves runtime effects or changes S4/G4/G5.
+
 ## Unreleased evidence provenance and correlation
 
 The semantic path, guard, call, control-flow, AST, transform, and Python value

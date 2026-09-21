@@ -101,6 +101,8 @@ def _parameters(lines: Sequence[str], symbol: models.SymbolRecord) -> List[str]:
     ``start_line`` would splice route strings in as parameter names and make
     every argument appear attacker-controlled or not, at random.
     """
+    if symbol.parser == "ast":
+        return list(symbol.parameters)
     if symbol.start_line < 1 or symbol.start_line > len(lines):
         return []
     index = symbol.start_line - 1
@@ -174,7 +176,8 @@ def _innermost_by_line(file_symbols: Sequence[models.SymbolRecord],
         end = min(line_count, symbol.end_line)
         for number in range(start, end + 1):
             current = owners[number]
-            if current is None or span < (current.end_line - current.start_line):
+            if current is None or (span, symbol.kind == FILE_KIND) < \
+                    (current.end_line - current.start_line, current.kind == FILE_KIND):
                 owners[number] = symbol
     return owners
 

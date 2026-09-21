@@ -142,6 +142,41 @@ python3 scripts/agent_cli.py semantic-bindings <target> \
   --workspace <audit-dir> --show-candidates --json
 ```
 
+### Shared syntax frontend (Python first)
+
+`SemanticFrontend` provides `parse`, `symbols`, `calls`, `assignments`,
+`branches`, `returns`, `parameters` and `arguments`. Python's standard-library
+AST implements it locally without executing or importing target code. Syntax
+facts have source-bound IDs, spans and lexical scopes; calls remain
+`dispatch=unresolved`. These are not resolved types, data-flow edges or a CFG.
+
+One build-local, content-digest-keyed session feeds Python symbol extraction,
+AST branch witnesses and Python value binding. No new artifact is introduced:
+`symbol-index.json` carries `parser`, `parse_status`, `source_revision`,
+`analysis_gaps` and `claim_status`; existing semantic rows carry the same source
+revision. `inventory-summary.json` → `counts.semantic_frontend` records files,
+LOC, parse requests, cache hits/evictions, nodes, bytes and parser gaps, alongside
+existing symbol/edge/flow/path counts and elapsed time. Rebuild existing indices
+with `coverage --rebuild` after upgrading.
+
+Bounds are 2,000,000 bytes/file, 100,000 AST nodes/file and depth 128. The shared
+LRU retains at most 8 files and 200,000 nodes; each consumer's derived index also
+retains at most 8 files. Eviction permits reparsing rather than unbounded memory.
+Digest checks detect same-size/same-mtime edits. A symbol's recorded AST revision
+that differs from the provenance build's source hash becomes an explicit mismatch
+gap; this is not an atomic snapshot guarantee. Oversized prefixes never claim
+to be hashes of complete files. Invalid syntax, decoding, source access or budget
+failures remain gaps; Python symbol extraction may fall back to explicitly
+heuristic regex. Java/JS/TS/Go are still regex fallback pending adapters.
+
+Python declaration ranges include decorators, retain multiline parameter names
+and nested scopes, and ignore definitions inside string literals. Repeated
+qualified names get occurrence suffixes and `duplicate-definition` gaps rather
+than silently merging identities. AST symbol confidence describes syntax only;
+the call graph and semantic interpretations remain heuristic and `not-a-finding`.
+Dynamic lookup, mutation, decorators, imports and full interprocedural semantics
+are not resolved here, and S4/G4/G5 remain unchanged.
+
 ### Evidence provenance and correlation
 
 The layered static passes share a deterministic `evidence-provenance-v1`

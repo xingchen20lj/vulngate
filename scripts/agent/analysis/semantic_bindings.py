@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from . import controls as control_rules
+from .semantic_frontend import FrontendSession, ParsedUnit, MAX_FILES, MAX_NODES
 
 
 SEMANTIC_BINDING_INDEX = "semantic-python-binding-evidence"
@@ -34,9 +35,8 @@ CONFIDENCE = "heuristic-nearby"
 EVIDENCE_TYPE = "static-inferred"
 
 _PYTHON_SUFFIXES = frozenset({".py", ".pyw"})
-_MAX_AST_BYTES = 2_000_000
-_MAX_AST_NODES = 100_000
-_MAX_AST_FILES = 8
+_MAX_AST_NODES = MAX_NODES
+_MAX_AST_FILES = MAX_FILES
 _MAX_PATHS = 64
 _MAX_RECURSION = 24
 _AST_NAME_CONSTANT = getattr(ast, "NameConstant", ())
@@ -53,6 +53,8 @@ _CANDIDATE_RELATIONS = frozenset({
     "ast-parse-failed",
     "ast-too-large",
     "ast-node-limit",
+    "ast-depth-limit",
+    "ast-source-outside-root",
     "ast-source-unreadable",
     "ast-cross-scope-unresolved",
     "unsupported-language",
@@ -104,22 +106,6 @@ def _identifiers(value: Any) -> Set[str]:
 
 def _location(file_name: Any, line: Any) -> str:
     return "%s:%d" % (str(file_name or ""), _int(line)) if file_name else ""
-
-
-def _read_text(root: Path, file_name: Any,
-               cache: Dict[str, Optional[str]]) -> Optional[str]:
-    name = str(file_name or "")
-    if name in cache:
-        return cache[name]
-    path = Path(name)
-    if not path.is_absolute():
-        path = root / path
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except (OSError, UnicodeError):
-        text = None
-    cache[name] = text
-    return text
 
 
 def _call_leaf(node: Any) -> str:
@@ -250,28 +236,19 @@ def _target_names(node: Any) -> List[str]:
 class _PythonIndex:
     """One bounded AST parse and scope/call lookup for a Python file."""
 
-    def __init__(self, file_name: str, text: Optional[str]):
+    def __init__(self, file_name: str, unit: ParsedUnit):
         self.file_name = file_name
-        self.status = "parsed"
-        self.error_kind = ""
-        self.tree: Optional[ast.AST] = None
+        self.status = unit.status
+        self.error_kind = unit.error_kind
+        self.source_revision = unit.source_revision
+        self.analysis_gaps = list(unit.analysis_gaps)
+        self.parser = unit.parser
+        self.tree: Optional[ast.AST] = unit.tree
         self.functions: List[ast.AST] = []
         self.calls_by_leaf: Dict[str, List[ast.Call]] = {}
         self.node_count = 0
         self.max_line = 1
-        if text is None:
-            self.status = "source-unreadable"
-            self.error_kind = "source-read-failed"
-            return
-        if len(text.encode("utf-8", errors="replace")) > _MAX_AST_BYTES:
-            self.status = "too-large"
-            self.error_kind = "ast-byte-limit"
-            return
-        try:
-            self.tree = ast.parse(text, filename=file_name, type_comments=False)
-        except (SyntaxError, ValueError, TypeError, MemoryError) as exc:
-            self.status = "parse-failed"
-            self.error_kind = type(exc).__name__
+        if self.status != "parsed":
             return
         self._walk(self.tree)
         if self.node_count > _MAX_AST_NODES:
@@ -734,12 +711,12 @@ def _unsupported_row(flow: Mapping[str, Any], transform: Mapping[str, Any],
 
 def build_semantic_binding_evidence(
         root: Path, semantic_transform_evidence: Mapping[str, Any],
-        symbols: Sequence[Any]) -> Dict[str, Any]:
+        symbols: Sequence[Any], frontend_session: Optional[FrontendSession] = None) -> Dict[str, Any]:
     """Build bounded AST value-flow evidence for transform rows."""
     root = Path(root).resolve()
     symbol_map = {str(_field(item, "symbol_id", "")): item for item in symbols
                   if str(_field(item, "symbol_id", ""))}
-    text_cache: Dict[str, Optional[str]] = {}
+    frontend_session = frontend_session or FrontendSession(root)
     index_cache: "OrderedDict[str, _PythonIndex]" = OrderedDict()
     flow_rows: List[Dict[str, Any]] = []
     candidates: List[Dict[str, Any]] = []
@@ -784,7 +761,7 @@ def build_semantic_binding_evidence(
                         if len(index_cache) >= _MAX_AST_FILES:
                             index_cache.popitem(last=False)
                         index_cache[file_name] = _PythonIndex(
-                            file_name, _read_text(root, file_name, text_cache))
+                            file_name, frontend_session.parse(file_name))
                     else:
                         index_cache.move_to_end(file_name)
                     index = index_cache[file_name]
@@ -845,7 +822,7 @@ def build_semantic_binding_evidence(
                                     transform.get("relation") or ""),
                                 "relation": relation,
                                 "adapter": "python-ast-value-flow",
-                                "parser": "python-ast-value-flow",
+                                "parser": index.parser,
                                 "parse_status": index.status,
                                 "scope": scope_info,
                                 "control_input_variables": sorted(input_variables)[:16],
@@ -861,6 +838,10 @@ def build_semantic_binding_evidence(
                                 "evidence_type": EVIDENCE_TYPE,
                                 "requires_manual_dataflow": True,
                             }
+                    binding.update({"parser": index.parser,
+                                    "source_revision": index.source_revision,
+                                    "analysis_gaps": list(index.analysis_gaps),
+                                    "parse_status": index.status})
             relation = str(binding.get("relation") or "ast-unresolved")
             relation_counts[relation] += 1
             parse_status = str(binding.get("parse_status") or "unavailable")

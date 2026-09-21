@@ -200,6 +200,8 @@ def build_evidence_provenance(
                 continue
             revision, gaps = revisions.get(str(row.get("file") or ""))
             gaps = list(gaps)
+            if row.get("source_revision") and revision and row["source_revision"] != revision:
+                gaps.append("source-revision-mismatch:%s:%s" % (kind, rid))
             if not all(_location(row)[:2]):
                 gaps.append("source-location-missing:%s:%s" % (kind, rid))
             if len(variants[rid]) > 1:

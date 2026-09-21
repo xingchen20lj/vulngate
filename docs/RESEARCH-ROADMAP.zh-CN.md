@@ -55,6 +55,13 @@
 | 38 | Python AST 结构见证与解析缺口 | 已实现（bounded Python-AST structural evidence） | `semantic-ast-evidence-v1`、`semantic-ast-evidence.json`、`semantic-ast-candidates.json`、`semantic-ast` CLI | 以语法树确认 Python 作用域、终止守卫、`else`/异常备用路径和解析状态；不声称完整 CFG、SSA、类型/运行时证明，其他语言保留显式降级 |
 | 39 | 变换结果绑定与清洗失效线索 | 已实现（bounded transform binding evidence） | `semantic-transform-evidence-v1`、`semantic-transform-evidence.json`、`semantic-transform-candidates.json`、`semantic-transforms` CLI | 区分校验/清洗结果真正绑定、被丢弃、被覆盖、未绑定和跨符号缺口；不声称 sanitizer 语义、SSA、完整别名或漏洞结论 |
 | 40 | 语言感知值绑定与混合路径 | 已实现（bounded Python AST value-flow adapter） | `semantic-python-binding-evidence-v1`、`semantic-python-binding-evidence.json`、`semantic-python-binding-candidates.json`、`semantic-bindings` CLI | 对 Python 简单赋值/别名/守卫/异常/有限循环路径区分变换值、原值、派生值、混合路径和未解析状态；其他语言明确 adapter gap，不声称完整 CFG/SSA/类型/运行时或漏洞结论 |
+| 41 | 同源证据溯源与相关性 | 已实现首版 | `evidence-provenance-v1`、现有 S1/S2/CLI 消费链 | 源码版本绑定、具体上游引用、显式缺口；仅对同源同控制同问题降权，不把多层解释重复计票 |
+| 42 | 统一语法前端 | 已接入 Python，其他语言待实现 | `SemanticFrontend`、既有 symbol/AST/binding/index summary | 三个实际消费者共用有界 AST 缓存；参数、嵌套符号、回退与解析缺口可回归，语法置信度不升级为语义证明 |
+
+当前研发优先级以《VulnGate 后续研发目标（Codex）》为准。上表的已有 synthetic
+评分器与回放契约不等于 Historical CVE Benchmark 已完成；Java/JS/TS/Go AST、
+有界跨过程传播、最小 CFG、真实历史漏洞四态对照和独立运行时观测仍需逐项验证。
+暂停新增非必要平台与 planner，优先检验研究有效性，不以产物数量作为完成标准。
 
 ## 已实现基础：可证伪实验规划
 

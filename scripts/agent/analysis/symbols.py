@@ -1,9 +1,7 @@
 """Symbol index (spec §4.2, §8, §23 PR2).
 
-A deliberately shallow, deterministic extractor: regex declaration detection plus
-brace / indent / paren range scanning.  The spec explicitly allows this as the
-first version ("第一阶段无需实现完整 AST. 可以先实现 Regex + Symbol Heuristic +
-Call Heuristic") and defers tree-sitter / CodeQL / Joern to Phase 5+.
+Python uses the shared, bounded AST frontend. Other languages and Python parse
+failures retain explicit regex fallback with brace / indent / paren ranges.
 
 What it must get right, because everything downstream depends on it:
 
@@ -11,9 +9,9 @@ What it must get right, because everything downstream depends on it:
   languages (package-qualified), ``<language>:<file>#<name>`` otherwise.  The
   call graph, the flow index and the coverage ledger all key on this string, so
   it may not depend on line numbers.
-* **Honest ``confidence``.**  Every record is ``heuristic``.  Nothing here may
-  be promoted to a proof; :func:`agent.analysis.models.is_proving` is the gate
-  and it returns ``False`` for ``heuristic``.
+* **Honest ``confidence``.** Python AST records describe syntax only; fallback
+  remains heuristic. All records carry ``not-a-finding``. Neither kind proves
+  data propagation, dispatch, reachability or runtime effects.
 
 Known limitations (recorded rather than hidden): overloads collapse to one id
 per name, lambdas/anonymous classes are not symbols, and preprocessor-conditional
@@ -23,11 +21,13 @@ C/C++ declarations are treated as if all branches were active.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import models
+from .semantic_frontend import FrontendSession, ParsedUnit, PythonFrontend, MAX_BYTES
 from .languages import (JVM_LANGUAGES, SourceFilter, read_source_lines,
                         scan_tree, suffix_owner_language)
 
@@ -358,8 +358,36 @@ def _enclosing(decls: Sequence[Decl], decl: Decl) -> List[Decl]:
             and d.start < decl.start and d.end >= decl.end]
 
 
+def _python_symbols(unit: ParsedUnit) -> List[models.SymbolRecord]:
+    declarations = unit.select("symbol")
+    duplicates = Counter(s.attributes["qualified_name"] for s in declarations)
+    class_scopes = {s.attributes["qualified_name"] for s in declarations
+                    if s.attributes["symbol_kind"] == "class"}
+    common = dict(language="python", file=unit.file, producer="python-ast",
+                  parser="ast", parse_status=unit.status, source_revision=unit.source_revision,
+                  confidence="ast", claim_status="not-a-finding")
+    output = [models.SymbolRecord(symbol_id=_symbol_id("python", unit.file),
+                                  start_line=1, end_line=max(1, unit.line_count),
+                                  kind=FILE_KIND, name=unit.file, **common)]
+    for fact in declarations:
+        qualified = fact.attributes["qualified_name"]
+        duplicate = duplicates[qualified] > 1
+        suffix = "@%d:%d" % (fact.line, fact.column) if duplicate else ""
+        components = fact.scope.split(".") if fact.scope else []
+        classes = [part for i, part in enumerate(components)
+                   if ".".join(components[:i + 1]) in class_scopes]
+        output.append(models.SymbolRecord(
+            symbol_id=_symbol_id("python", "%s#%s%s" % (unit.file, qualified, suffix)),
+            start_line=fact.line, end_line=fact.end_line, name=fact.name,
+            kind=fact.attributes["symbol_kind"], class_name=".".join(classes),
+            parameters=list(fact.attributes["parameters"]),
+            analysis_gaps=["duplicate-definition"] if duplicate else [], **common))
+    return output
+
+
 def extract_symbols(root: Path, rel_paths: Sequence[str],
-                    source_filter: Optional[SourceFilter] = None
+                    source_filter: Optional[SourceFilter] = None,
+                    frontend_session: Optional[FrontendSession] = None
                     ) -> Tuple[List[models.SymbolRecord], Dict[str, str]]:
     """Build the symbol index over ``rel_paths``.
 
@@ -381,6 +409,8 @@ def extract_symbols(root: Path, rel_paths: Sequence[str],
     """
     root = Path(root).resolve()
     flt = source_filter or SourceFilter()
+    frontend_session = frontend_session or FrontendSession(
+        root, PythonFrontend(max_bytes=min(MAX_BYTES, flt.max_file_bytes or MAX_BYTES)))
     read_failures: Dict[str, str] = {}
     symbols: List[models.SymbolRecord] = []
 
@@ -388,11 +418,23 @@ def extract_symbols(root: Path, rel_paths: Sequence[str],
         language = suffix_owner_language(rel)
         if language is None:
             continue
+        parsed = frontend_session.parse(rel) if language == "python" else None
+        if parsed is not None and parsed.status == "parsed":
+            symbols.extend(_python_symbols(parsed))
+            continue
+        if parsed is not None:
+            read_failures[rel] = "analysis-gap:%s" % parsed.status
+            if parsed.status in {"source-outside-root", "source-unreadable"}:
+                continue
         lines = read_source_lines(root / rel, flt.max_file_bytes)
         if lines is None:
             read_failures[rel] = "unreadable"
             continue
         namespace = ""
+        fallback = dict(parser="regex-fallback",
+                        parse_status=parsed.status if parsed is not None else "unsupported-language",
+                        source_revision=parsed.source_revision if parsed is not None else "",
+                        analysis_gaps=list(parsed.analysis_gaps) if parsed is not None else ["ast-adapter-unavailable"])
         for text in lines[:60]:
             match = _PACKAGE.match(text) or _NAMESPACE.match(text)
             if match:
@@ -406,6 +448,7 @@ def extract_symbols(root: Path, rel_paths: Sequence[str],
             language=language, file=rel, start_line=1, end_line=max(1, len(lines)),
             kind=FILE_KIND, name=namespace or rel, class_name="",
             namespace=namespace,
+            **fallback,
         ))
         decls = _decls_in_file(lines, language)
         for decl in decls:
@@ -422,6 +465,7 @@ def extract_symbols(root: Path, rel_paths: Sequence[str],
                 end_line=decl.end, kind=kind, name=decl.name,
                 class_name=".".join(p.name for p in parents if p.kind in TYPE_KINDS),
                 namespace=namespace,
+                **fallback,
             ))
     symbols.sort(key=lambda s: (s.file, s.start_line, s.end_line, s.symbol_id))
     return symbols, read_failures
@@ -449,8 +493,8 @@ def innermost_at(grouped: Dict[str, List[models.SymbolRecord]], file: str,
     best: Optional[models.SymbolRecord] = None
     for symbol in grouped.get(file, ()):
         if symbol.start_line <= line <= symbol.end_line:
-            if best is None or (symbol.end_line - symbol.start_line) < \
-                    (best.end_line - best.start_line):
+            if best is None or (symbol.end_line - symbol.start_line, symbol.kind == FILE_KIND) < \
+                    (best.end_line - best.start_line, best.kind == FILE_KIND):
                 best = symbol
     return best
 

@@ -17,11 +17,12 @@ from __future__ import annotations
 
 import ast
 import hashlib
-from collections import Counter
+from collections import Counter, OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import controls as control_rules
+from .semantic_frontend import FrontendSession, ParsedUnit, MAX_FILES, MAX_NODES
 
 
 SEMANTIC_AST_INDEX = "semantic-ast-evidence"
@@ -31,9 +32,7 @@ CLAIM_STATUS = "not-a-finding"
 CONFIDENCE = "heuristic-nearby"
 EVIDENCE_TYPE = "static-inferred"
 
-_PYTHON_SUFFIXES = frozenset({".py", ".pyw"})
-_MAX_AST_BYTES = 2_000_000
-_MAX_AST_NODES = 100_000
+_MAX_AST_NODES = MAX_NODES
 _CANDIDATE_RELATIONS = frozenset({
     "ast-alternate-path",
     "ast-same-block-unverified",
@@ -63,10 +62,6 @@ def _int(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
-
-
-def _suffix(file_name: Any) -> str:
-    return Path(str(file_name or "")).suffix.lower()
 
 
 def _span(node: Any) -> Tuple[int, int]:
@@ -187,7 +182,7 @@ _NODE_PRIORITY = {
 class _AstIndex:
     """Small syntax index kept in memory for one target scan."""
 
-    def __init__(self, file_name: str, text: str):
+    def __init__(self, file_name: str, unit: ParsedUnit):
         self.file_name = file_name
         self.status = "parsed"
         self.error_kind = ""
@@ -201,20 +196,16 @@ class _AstIndex:
         self._branches_cache: Dict[int, List[Tuple[Dict[str, Any], str]]] = {}
         self._control_cache: Dict[int, Optional[Dict[str, Any]]] = {}
         self._node_cache: Dict[int, Optional[ast.AST]] = {}
-        self._parse(text)
+        self.source_revision = unit.source_revision
+        self.analysis_gaps = list(unit.analysis_gaps)
+        self.parser = unit.parser
+        self._parse(unit)
 
-    def _parse(self, text: str) -> None:
-        encoded_size = len(text.encode("utf-8", errors="replace"))
-        if encoded_size > _MAX_AST_BYTES:
-            self.status = "too-large"
-            self.error_kind = "ast-byte-limit"
-            return
-        try:
-            self.tree = ast.parse(text, filename=self.file_name,
-                                  type_comments=False)
-        except (SyntaxError, ValueError, TypeError, MemoryError) as exc:
-            self.status = "syntax-error"
-            self.error_kind = type(exc).__name__
+    def _parse(self, unit: ParsedUnit) -> None:
+        self.status = {"parse-failed": "syntax-error", "source-unreadable": "unreadable"}.get(unit.status, unit.status)
+        self.error_kind = unit.error_kind
+        self.tree = unit.tree
+        if self.status != "parsed":
             return
         module_end = max(
             (_span(node)[1] for node in ast.walk(self.tree)
@@ -367,22 +358,6 @@ class _AstIndex:
         return result
 
 
-def _read_text(root: Path, file_name: Any,
-               cache: Dict[str, Optional[str]]) -> Optional[str]:
-    name = str(file_name or "")
-    if name in cache:
-        return cache[name]
-    path = Path(name)
-    if not path.is_absolute():
-        path = root / path
-    try:
-        value = path.read_text(encoding="utf-8", errors="replace")
-    except (OSError, UnicodeError):
-        value = None
-    cache[name] = value
-    return value
-
-
 def _public_branch(branch: Optional[Mapping[str, Any]], part: str = "") -> Dict[str, Any]:
     if not branch:
         return {}
@@ -406,7 +381,9 @@ def _relation(index: _AstIndex, control: Mapping[str, Any],
     sink_scope = index.scope_at(sink_line)
     relation: Dict[str, Any] = {
         "relation": "ast-path-unresolved",
-        "parser": "python-ast",
+        "parser": index.parser,
+        "source_revision": index.source_revision,
+        "analysis_gaps": list(index.analysis_gaps),
         "parse_status": index.status,
         "control_line": control_line,
         "sink_line": sink_line,
@@ -557,12 +534,14 @@ def _candidate(flow: Mapping[str, Any], guard: Mapping[str, Any],
 
 
 def build_semantic_ast_evidence(
-        root: Path, semantic_controlflow_evidence: Mapping[str, Any]
+        root: Path, semantic_controlflow_evidence: Mapping[str, Any],
+        frontend_session: Optional[FrontendSession] = None
         ) -> Dict[str, Any]:
     """Build syntax-aware Python branch witnesses from control-flow rows."""
     root = Path(root).resolve()
-    text_cache: Dict[str, Optional[str]] = {}
-    index_cache: Dict[str, _AstIndex] = {}
+    frontend_session = frontend_session or FrontendSession(root)
+    index_cache: "OrderedDict[str, _AstIndex]" = OrderedDict()
+    parser_status_by_file: Dict[str, str] = {}
     flow_rows: List[Dict[str, Any]] = []
     candidates: List[Dict[str, Any]] = []
     relation_counts: Counter = Counter()
@@ -579,20 +558,13 @@ def build_semantic_ast_evidence(
             guard = dict(guard)
             file_name = str(guard.get("file") or sink_file or "")
             if file_name not in index_cache:
-                if _suffix(file_name) not in _PYTHON_SUFFIXES:
-                    index_cache[file_name] = _AstIndex(file_name, "")
-                    index_cache[file_name].status = "unsupported-language"
-                    index_cache[file_name].error_kind = _suffix(file_name)
-                else:
-                    text = _read_text(root, file_name, text_cache)
-                    if text is None:
-                        index_cache[file_name] = _AstIndex(file_name, "")
-                        index_cache[file_name].status = "unreadable"
-                        index_cache[file_name].error_kind = "source-read-failed"
-                    else:
-                        index_cache[file_name] = _AstIndex(file_name, text)
-                files_seen.add(file_name)
+                if len(index_cache) >= MAX_FILES:
+                    index_cache.popitem(last=False)
+                index_cache[file_name] = _AstIndex(file_name, frontend_session.parse(file_name))
+            index_cache.move_to_end(file_name)
+            files_seen.add(file_name)
             index = index_cache[file_name]
+            parser_status_by_file[file_name] = index.status
             fallback = dict(guard.get("control_flow") or {})
             relation = _relation(index, guard, sink, fallback)
             row = dict(guard)
@@ -635,13 +607,13 @@ def build_semantic_ast_evidence(
         str(item.get("flow_id") or ""), str(item.get("control_id") or ""),
         str(item.get("candidate_id") or "")))
     parser_counts: Counter = Counter(
-        index_cache[name].status for name in sorted(files_seen))
+        parser_status_by_file[name] for name in sorted(files_seen))
     summary = {
         "flows": len(flow_rows),
         "controls": sum(len(row.get("controls") or []) for row in flow_rows),
         "files": len(files_seen),
         "parsed_files": len([name for name in files_seen
-                              if index_cache[name].status == "parsed"]),
+                              if parser_status_by_file[name] == "parsed"]),
         "parser_status": dict(sorted(parser_counts.items())),
         "relations": dict(sorted(relation_counts.items())),
         "candidates": len(candidates),

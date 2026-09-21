@@ -66,6 +66,7 @@ from . import semantic_ast as semantic_ast_analysis
 from . import semantic_transforms as semantic_transform_analysis
 from . import semantic_bindings as semantic_binding_analysis
 from . import evidence_provenance as evidence_provenance_analysis
+from .semantic_frontend import FrontendSession, PythonFrontend, MAX_BYTES
 from . import threat_model as threat_model_analysis
 from .callgraph import build_call_graph
 from .dataflow import build_flow_index
@@ -731,6 +732,7 @@ class InventoryResult:
     #: Unified lineage for raw facts, derived semantic rows, and candidates.
     evidence_provenance: Dict[str, Any] = field(default_factory=dict)
     symbol_read_failures: Dict[str, str] = field(default_factory=dict)
+    semantic_frontend: Dict[str, Any] = field(default_factory=dict)
     callgraph_summary: Dict[str, Any] = field(default_factory=dict)
     flow_summary: Dict[str, Any] = field(default_factory=dict)
     relinked: int = 0
@@ -793,6 +795,7 @@ class InventoryResult:
             "files_module_level_only": len([f for f in production
                                             if f.symbols and not f.callables]),
             "symbol_read_failures": len(self.symbol_read_failures),
+            "semantic_frontend": dict(self.semantic_frontend),
             "call_edges": len(self.call_edges),
             "flows": len(self.flows),
             "flows_high": self.flow_summary.get("high", 0),
@@ -859,6 +862,7 @@ class InventoryResult:
             "semantic_binding_candidates": self.semantic_binding_candidates,
             "evidence_provenance": self.evidence_provenance,
             "symbol_read_failures": dict(self.symbol_read_failures),
+            "semantic_frontend": dict(self.semantic_frontend),
         }
 
 
@@ -923,8 +927,11 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
     semantic_binding_dict: Dict[str, Any] = {}
     semantic_binding_candidates: List[Dict[str, Any]] = []
     evidence_provenance_dict: Dict[str, Any] = {}
+    frontend_session = FrontendSession(
+        root, PythonFrontend(max_bytes=min(MAX_BYTES, flt.max_file_bytes or MAX_BYTES)))
     if with_flows:
-        symbol_records, read_failures = extract_symbols(root, production_rels, flt)
+        symbol_records, read_failures = extract_symbols(
+            root, production_rels, flt, frontend_session=frontend_session)
         # Replace PR1's ``<file>#<nearest-declaration>`` hint with the real
         # innermost symbol before anything keys on it.
         relinked = relink_records(symbol_records,
@@ -973,7 +980,7 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
         semantic_controlflow_candidates = list(
             semantic_controlflow_dict.get("candidates") or [])
         semantic_ast_dict = semantic_ast_analysis.build_semantic_ast_evidence(
-            root, semantic_controlflow_dict)
+            root, semantic_controlflow_dict, frontend_session=frontend_session)
         semantic_ast_candidates = list(semantic_ast_dict.get("candidates") or [])
         semantic_transform_dict = (
             semantic_transform_analysis.build_semantic_transform_evidence(
@@ -982,7 +989,7 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
             semantic_transform_dict.get("candidates") or [])
         semantic_binding_dict = (
             semantic_binding_analysis.build_semantic_binding_evidence(
-                root, semantic_transform_dict, symbol_records))
+                root, semantic_transform_dict, symbol_records, frontend_session=frontend_session))
         semantic_binding_candidates = list(
             semantic_binding_dict.get("candidates") or [])
         evidence_provenance_dict = evidence_provenance_analysis.build_evidence_provenance(
@@ -1043,6 +1050,7 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
         entries=entries, sinks=sinks, controls=controls,
         symbols=symbol_records, call_edges=call_edges, flows=flows,
         sink_reachability=reachability, symbol_read_failures=read_failures,
+        semantic_frontend=frontend_session.stats(),
         callgraph_summary=callgraph_summary, flow_summary=flow_summary,
         control_map=cmap, control_candidates=control_candidates,
         differential=diff_dict, sibling_groups=sibling_groups,

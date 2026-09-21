@@ -291,6 +291,32 @@ python3 scripts/agent_cli.py semantic-bindings <target> \
   --workspace <audit-dir> --show-candidates --json
 ```
 
+## 统一语法前端：先接入 Python
+
+`SemanticFrontend` 提供 `parse`、`symbols`、`calls`、`assignments`、`branches`、
+`returns`、`parameters` 和 `arguments`。Python 后端使用标准库 AST，在本地解析，
+不导入或执行目标代码。语法事实包含绑定源码的 ID、位置和词法作用域；调用仍标记
+`dispatch=unresolved`，不代表已解析类型、数据流边或 CFG。
+
+每次 inventory 构建使用一份按内容摘要缓存的 session，供 Python 符号提取、AST
+分支见证和值绑定分析复用。不增加新产物：`symbol-index.json` 保存 `parser`、
+`parse_status`、`source_revision`、`analysis_gaps` 和 `claim_status`；现有语义
+记录携带相同源码版本。`inventory-summary.json` 的 `counts.semantic_frontend`
+记录文件、LOC、解析请求、缓存命中/淘汰、节点、读取字节和解析缺口，与已有
+符号/边/flow/path 数及耗时一起使用。升级后用 `coverage --rebuild` 重建旧索引。
+
+预算为每文件 2,000,000 字节、100,000 AST 节点、深度 128。共享 LRU 最多保留
+8 个文件和 200,000 节点，各消费者的派生索引也最多保留 8 个文件；淘汰后可重解析。
+内容摘要能识别大小和 mtime 不变的修改；符号 AST 版本与溯源构建读到的源码哈希
+不同时，明确标记版本不一致缺口，但不声称原子快照。超大文件的截断前缀不冒充完整文件版本。
+语法、解码、读取和预算失败均为明确缺口，Python 符号可回退为带标记的低置信度
+regex。Java/JS/TS/Go 仍为 regex fallback，尚未完成对应 AST 适配器。
+
+Python 声明范围包含装饰器，保留多行参数和嵌套作用域，不把字符串中的伪定义当成
+符号。重复限定名使用出现位置后缀并标记 `duplicate-definition`，不静默合并身份。
+AST 符号的置信度只描述语法；调用图和语义解释仍是启发式及 `not-a-finding`。
+此阶段不解析动态查找、变更、装饰器、导入或完整跨过程语义，不改变 S4/G4/G5。
+
 ## 证据溯源与相关性
 
 各个静态语义层现在共享确定性的 `evidence-provenance-v1` 产物：

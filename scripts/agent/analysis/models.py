@@ -171,6 +171,11 @@ class SymbolRecord:
     producer: str = "regex"
     confidence: str = "heuristic"
     evidence_type: str = "static-observed"
+    parser: str = "regex-fallback"
+    parse_status: str = "not-parsed"
+    source_revision: str = ""
+    analysis_gaps: List[str] = field(default_factory=list)
+    claim_status: str = "not-a-finding"
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -184,6 +189,11 @@ class SymbolRecord:
             "class": self.class_name,
             "namespace": self.namespace,
             "parameters": list(self.parameters),
+            "parser": self.parser,
+            "parse_status": self.parse_status,
+            "source_revision": self.source_revision,
+            "analysis_gaps": list(self.analysis_gaps),
+            "claim_status": self.claim_status,
             "callers": list(self.callers),
             "callees": list(self.callees),
             "reachable_from_entries": list(self.reachable_from_entries),

@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added a shared `SemanticFrontend` syntax interface and bounded Python AST
+  implementation, consumed by symbol extraction, AST control-flow witnesses
+  and Python value binding. Source-digest caching avoids redundant parsing;
+  parser gaps and budgets are recorded in existing artifacts, not a new schema.
+  Python symbols now retain multiline parameters and nested names, exclude
+  string pseudo-definitions, and explicitly mark repeated definitions. Fixed
+  file-symbol ties that attributed a whole-file handler to the synthetic file.
+  Syntax confidence does not promote flows, effects, findings or S4/G4/G5.
 - Added `evidence-provenance-v1` for deterministic lineage from raw source
   facts through semantic layers to static candidates. Related path, guard,
   call, control-flow, AST, transform, and value-binding rows now share an
