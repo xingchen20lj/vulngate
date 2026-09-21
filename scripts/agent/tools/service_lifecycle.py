@@ -420,7 +420,6 @@ class ServiceLifecycle:
                     headers={"User-Agent": "VulnGate-HealthCheck/1"})
                 response = connection.getresponse()
                 code = int(response.status or 0)
-                response.read(1)
                 return {"kind": "url", "ready": code in self.expected_status,
                         "http_status": code}
             except (http.client.HTTPException, OSError, TimeoutError) as exc:
