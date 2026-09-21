@@ -55,6 +55,10 @@ TARGET_TYPES = frozenset({
 OBSERVATION_STATUSES = frozenset(STRATEGY_OBSERVATION_STATUSES)
 KINDS = frozenset(STRATEGY_KINDS)
 ACTIONS = frozenset(STRATEGY_GUIDANCE_ACTIONS)
+BUDGET_RECOMMENDATIONS = frozenset({
+    "recover-environment", "cooldown-low-yield", "exploit-high-yield",
+    "explore-undercovered", "continue-balanced",
+})
 
 AGENDA_REASON_CODES = frozenset({
     "priority",
@@ -72,6 +76,11 @@ AGENDA_REASON_CODES = frozenset({
     "outcome-not-executed",
     "outcome-falsifier",
     "outcome-new-information",
+    "budget-recovery",
+    "budget-exploit",
+    "budget-explore",
+    "budget-cooldown",
+    "budget-fallback",
 })
 PREREQUISITES = frozenset({
     "environment-ready",
@@ -107,6 +116,15 @@ def _text(value: Any, limit: int = MAX_TEXT) -> str:
 
 def _int(value: Any, default: int = 0, minimum: int = 0,
          maximum: int = 1000000) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def _signed(value: Any, default: int = 0, minimum: int = -8,
+            maximum: int = 8) -> int:
     try:
         parsed = int(value)
     except (TypeError, ValueError):
@@ -258,7 +276,7 @@ def _prerequisites(action: str, missing: Sequence[str]) -> List[str]:
 
 def _priority_score(item: Mapping[str, Any], expected_gain: int,
                     estimated_cost: int, recheck_status: str = "",
-                    outcome_code: str = "") -> int:
+                    outcome_code: str = "", budget_delta: int = 0) -> int:
     priority = _int(item.get("priority"), 1, 1, 5)
     guidance = item.get("guidance")
     guidance = guidance if isinstance(guidance, Mapping) else {}
@@ -287,11 +305,76 @@ def _priority_score(item: Mapping[str, Any], expected_gain: int,
     if expected_gain == 0:
         score -= 12
     score -= max(0, estimated_cost - 3) * 2
+    # The budget policy is a bounded scheduling signal.  It may cool down a
+    # low-yield repeat or prioritize environment recovery, but it cannot
+    # promote a candidate past any evidence gate.
+    score += _signed(budget_delta)
     return max(0, min(100, score))
 
 
+def _budget_policy_view(raw: Any) -> Dict[str, Any]:
+    """Keep only the safe, bounded part of the adaptive budget policy."""
+    if not isinstance(raw, Mapping):
+        return {}
+    schema = _text(raw.get("schema_version"), 80)
+    if schema != "research-budget-v1":
+        return {}
+    rows: List[Dict[str, Any]] = []
+    seen = set()
+    for raw_row in raw.get("surfaces") or []:
+        if not isinstance(raw_row, Mapping):
+            continue
+        surface = _surface(raw_row.get("surface"))
+        if not surface or surface in seen:
+            continue
+        seen.add(surface)
+        rows.append({
+            "surface": surface,
+            "recommendation": _code(
+                raw_row.get("recommendation"), BUDGET_RECOMMENDATIONS, ""),
+            "priority_delta": _signed(raw_row.get("priority_delta"), 0),
+            "cap_hint": _int(raw_row.get("cap_hint"), 2, 1, MAX_SLOTS),
+        })
+        if len(rows) >= len(RESEARCH_SURFACES):
+            break
+    surface_order: List[str] = []
+    for value in raw.get("surface_order") or []:
+        surface = _surface(value)
+        if surface and surface not in surface_order:
+            surface_order.append(surface)
+        if len(surface_order) >= len(RESEARCH_SURFACES):
+            break
+    return {
+        "schema_version": schema,
+        "round": _int(raw.get("round"), 0, 0, 1000000),
+        "algorithm": _text(raw.get("algorithm"), 80) or
+        "outcome-cost-adaptive-v1",
+        "surface_order": surface_order,
+        "surfaces": rows,
+        "claim_status": AGENDA_CLAIM_STATUS,
+    }
+
+
+def _budget_index(policy: Mapping[str, Any]) -> Dict[str, Mapping[str, Any]]:
+    result: Dict[str, Mapping[str, Any]] = {}
+    for row in policy.get("surfaces") or []:
+        if not isinstance(row, Mapping):
+            continue
+        surface = _surface(row.get("surface"))
+        if surface:
+            result[surface] = row
+    return result
+
+
+def _budget_for(item: Mapping[str, Any],
+                policy: Mapping[str, Any]) -> Mapping[str, Any]:
+    surface = _surface(item.get("research_surface"), item.get("target_type"))
+    return _budget_index(policy).get(surface, {})
+
+
 def _agenda_item(item: Mapping[str, Any], recheck_status: str = "",
-                 outcome: Optional[Mapping[str, Any]] = None
+                 outcome: Optional[Mapping[str, Any]] = None,
+                 budget_policy: Optional[Mapping[str, Any]] = None
                  ) -> Dict[str, Any]:
     strategy_id = _text(item.get("strategy_id"), 80)
     identity = (item.get("research_key") or item.get("candidate_id") or
@@ -307,8 +390,13 @@ def _agenda_item(item: Mapping[str, Any], recheck_status: str = "",
     expected_gain = _expected_information_gain(
         status, action, missing, recheck_status)
     estimated_cost = _estimated_cost(action, missing)
+    budget_policy = budget_policy if isinstance(budget_policy, Mapping) else {}
+    budget = _budget_for(item, budget_policy)
+    budget_recommendation = _code(
+        budget.get("recommendation"), BUDGET_RECOMMENDATIONS, "")
+    budget_delta = _signed(budget.get("priority_delta"), 0)
     score = _priority_score(item, expected_gain, estimated_cost,
-                            recheck_status, outcome_code)
+                            recheck_status, outcome_code, budget_delta)
     guidance = item.get("guidance")
     guidance = guidance if isinstance(guidance, Mapping) else {}
     surface = _surface(item.get("research_surface"), item.get("target_type"))
@@ -342,6 +430,14 @@ def _agenda_item(item: Mapping[str, Any], recheck_status: str = "",
         reasons.append("outcome-falsifier")
     elif outcome_code == "new-information":
         reasons.append("outcome-new-information")
+    if budget_recommendation == "recover-environment":
+        reasons.append("budget-recovery")
+    elif budget_recommendation == "exploit-high-yield":
+        reasons.append("budget-exploit")
+    elif budget_recommendation == "explore-undercovered":
+        reasons.append("budget-explore")
+    elif budget_recommendation == "cooldown-low-yield":
+        reasons.append("budget-cooldown")
     if selection_status == "hold":
         reasons = ["evidence-satisfied"]
     return {
@@ -381,12 +477,17 @@ def _agenda_item(item: Mapping[str, Any], recheck_status: str = "",
             outcome.get("observed_signals"), limit=8, item_limit=48),
         "outcome_consecutive_no_information": _int(
             outcome.get("consecutive_no_information"), 0, 0, 32),
+        "budget_recommendation": budget_recommendation,
+        "budget_priority_delta": budget_delta,
+        "budget_cap_hint": _int(budget.get("cap_hint"), 0, 0, MAX_SLOTS),
         "claim_status": AGENDA_CLAIM_STATUS,
     }
 
 
 def _empty(target: str = "", round_no: int = 0, slots: int = DEFAULT_SLOTS,
-           max_per_surface: int = DEFAULT_MAX_PER_SURFACE) -> Dict[str, Any]:
+           max_per_surface: int = DEFAULT_MAX_PER_SURFACE,
+           budget_policy: Optional[Mapping[str, Any]] = None
+           ) -> Dict[str, Any]:
     return {
         "schema_version": AGENDA_SCHEMA_VERSION,
         "target": _text(target, 120),
@@ -397,6 +498,7 @@ def _empty(target: str = "", round_no: int = 0, slots: int = DEFAULT_SLOTS,
                                       DEFAULT_MAX_PER_SURFACE, 1,
                                       MAX_PER_SURFACE),
             "algorithm": "priority-information-gain-diversity-v1",
+            "budget_policy": _budget_policy_view(budget_policy),
             "claim_status": AGENDA_CLAIM_STATUS,
         },
         "summary": {
@@ -476,6 +578,7 @@ def build_research_agenda(
         slots: int = DEFAULT_SLOTS,
         max_per_surface: int = DEFAULT_MAX_PER_SURFACE,
         outcomes: Optional[Mapping[str, Any]] = None,
+        budget_policy: Optional[Mapping[str, Any]] = None,
         ) -> Dict[str, Any]:
     """Select a diverse, information-seeking queue from normalized strategy."""
     normalized = normalize_research_strategy(strategy or {})
@@ -483,6 +586,8 @@ def build_research_agenda(
     slots = _int(slots, DEFAULT_SLOTS, 0, MAX_SLOTS)
     max_per_surface = _int(max_per_surface, DEFAULT_MAX_PER_SURFACE, 1,
                            MAX_PER_SURFACE)
+    normalized_budget = _budget_policy_view(budget_policy)
+    budget_index = _budget_index(normalized_budget)
     rechecks = _recheck_statuses(normalized_portfolio)
     outcome_index: Dict[str, Mapping[str, Any]] = {}
     if isinstance(outcomes, Mapping):
@@ -521,7 +626,8 @@ def build_research_agenda(
             if key and key in outcome_index:
                 outcome = outcome_index[key]
                 break
-        row = _agenda_item(raw, rechecks.get(identity, ""), outcome)
+        row = _agenda_item(raw, rechecks.get(identity, ""), outcome,
+                           normalized_budget)
         candidates.append(row)
 
     candidates.sort(key=lambda item: (
@@ -539,11 +645,17 @@ def build_research_agenda(
     surface_counts: Counter = Counter()
     diversity_buckets = set()
 
-    def choose(item: Dict[str, Any], diverse: bool) -> bool:
+    def choose(item: Dict[str, Any], diverse: bool,
+               respect_budget_cap: bool = True) -> bool:
         if len(selected) >= slots:
             return False
         surface = _text(item.get("surface"), 24) or "unknown"
-        if surface_counts[surface] >= max_per_surface:
+        cap = max_per_surface
+        budget_row = budget_index.get(surface, {})
+        if respect_budget_cap and budget_row:
+            cap = min(cap, _int(budget_row.get("cap_hint"), cap, 1,
+                                MAX_PER_SURFACE))
+        if surface_counts[surface] >= cap:
             return False
         bucket = (surface, _text(item.get("attack_class"), 80)
                   or _text(item.get("kind"), 48))
@@ -553,6 +665,8 @@ def build_research_agenda(
         reasons = set(item.get("selection_reason_codes") or [])
         if diverse:
             reasons.add("surface-diversity")
+        elif budget_row and not respect_budget_cap:
+            reasons.add("budget-fallback")
         item["selection_reason_codes"] = sorted(
             reasons & AGENDA_REASON_CODES)[:MAX_REASON_CODES]
         selected.append(item)
@@ -572,6 +686,14 @@ def build_research_agenda(
             break
         if item not in selected:
             choose(item, False)
+    # A policy cap is a preference, not a reason to silently discard the rest
+    # of a finite round when no other surface can consume the slots.
+    if len(selected) < slots:
+        for item in eligible:
+            if len(selected) >= slots:
+                break
+            if item not in selected:
+                choose(item, False, respect_budget_cap=False)
 
     selected_ids = {id(item) for item in selected}
     for item in candidates:
@@ -585,7 +707,8 @@ def build_research_agenda(
                 set(item.get("selection_reason_codes") or [])
                 | {"budget-deferred"})[:MAX_REASON_CODES]
 
-    result = _empty(target, round_no, slots, max_per_surface)
+    result = _empty(target, round_no, slots, max_per_surface,
+                    normalized_budget)
     result["items"] = sorted(candidates, key=lambda item: (
         0 if item.get("selection_status") == "selected" else
         (2 if item.get("selection_status") == "hold" else 1),
@@ -654,6 +777,12 @@ def _normalize_item(raw: Any) -> Dict[str, Any]:
             raw.get("outcome_observed_signals"), limit=8, item_limit=48),
         "outcome_consecutive_no_information": _int(
             raw.get("outcome_consecutive_no_information"), 0, 0, 32),
+        "budget_recommendation": _code(
+            raw.get("budget_recommendation"), BUDGET_RECOMMENDATIONS, ""),
+        "budget_priority_delta": _signed(
+            raw.get("budget_priority_delta"), 0),
+        "budget_cap_hint": _int(raw.get("budget_cap_hint"), 0, 0,
+                                 MAX_SLOTS),
         "claim_status": AGENDA_CLAIM_STATUS,
     }
 
@@ -670,7 +799,9 @@ def normalize_research_agenda(raw: Any) -> Dict[str, Any]:
     max_per_surface = _int(
         policy.get("max_per_surface"), DEFAULT_MAX_PER_SURFACE, 1,
         MAX_PER_SURFACE)
-    result = _empty(target, round_no, slots, max_per_surface)
+    budget_policy = _budget_policy_view(policy.get("budget_policy"))
+    result = _empty(target, round_no, slots, max_per_surface,
+                    budget_policy)
     items: List[Dict[str, Any]] = []
     seen = set()
     for row in raw.get("items") or []:

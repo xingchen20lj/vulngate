@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added `research-budget-v1` outcome-adaptive finite-budget policy. S8 now
+  aggregates agenda execution by research surface, cost, and information gain,
+  emitting bounded recovery, exploitation, exploration, and low-yield cooldown
+  hints for the next agenda. The policy is inspectable through
+  `agent_cli.py research-budget`, remains `not-a-finding`, and cannot change
+  candidate status, CVSS, G4, or G5.
+
 - Added `research-agenda-outcome-v1` execution feedback. S8 joins the prior
   active queue with the actual schedule and bounded S4/S8 observations, records
   productive information, falsifiers, no-information repeats, environment

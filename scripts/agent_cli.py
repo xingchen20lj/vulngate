@@ -1230,6 +1230,69 @@ def cmd_research_agenda_outcomes(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_research_budget(args: argparse.Namespace) -> int:
+    """Show or rebuild the bounded outcome-to-budget policy."""
+    from agent.analysis.research_agenda import load_research_agenda
+    from agent.analysis.research_agenda_outcomes import (
+        load_research_agenda_outcomes,
+    )
+    from agent.analysis.research_budget import (
+        budget_path,
+        build_research_budget,
+        load_research_budget,
+        write_research_budget,
+    )
+
+    workspace = Path(args.workspace).resolve()
+    budget = load_research_budget(workspace, args.target)
+    if args.rebuild or not budget:
+        agenda = load_research_agenda(workspace, args.target)
+        outcomes = load_research_agenda_outcomes(workspace, args.target)
+        prior = budget
+        round_no = args.round or int(
+            (outcomes or {}).get("round", 0) or
+            (agenda or {}).get("round", 0) or
+            (budget or {}).get("round", 0) or 0)
+        budget = build_research_budget(
+            agenda, outcomes, prior_budget=prior, target=args.target,
+            round_no=round_no, slots=args.slots)
+        write_research_budget(workspace, args.target, budget)
+    if not budget:
+        _out({"error": "research budget artifact not found",
+              "hint": "run an S8 round or pass --rebuild",
+              "artifact": str(budget_path(workspace, args.target))})
+        return 2
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "artifact": str(budget_path(
+            workspace, args.target).relative_to(workspace)),
+        "budget": budget,
+    }
+    if args.json:
+        _out(payload)
+    else:
+        summary = budget.get("summary", {})
+        print("research budget: %s" % payload["artifact"])
+        print("  surfaces=%s observed=%s selected=%s productive=%s gain=%s "
+              "cost=%s claim_status=%s" % (
+                  summary.get("surface_count", 0),
+                  summary.get("observed_surface_count", 0),
+                  summary.get("selected_count", 0),
+                  summary.get("productive_count", 0),
+                  summary.get("information_gain", 0),
+                  summary.get("estimated_cost", 0),
+                  budget.get("claim_status", "not-a-finding")))
+        for row in budget.get("surfaces") or []:
+            if not isinstance(row, dict):
+                continue
+            print("  surface: %s [%s] delta=%s cap=%s yield=%s" % (
+                row.get("surface"), row.get("recommendation"),
+                row.get("priority_delta", 0), row.get("cap_hint", 0),
+                row.get("yield_per_cost", 0)))
+    return 0
+
+
 def cmd_coverage(args: argparse.Namespace) -> int:
     """Security audit coverage report (spec §16).
 
@@ -2171,6 +2234,23 @@ def build_parser() -> argparse.ArgumentParser:
     rao.add_argument("--json", action="store_true",
                      help="machine-readable output")
     rao.set_defaults(fn=cmd_research_agenda_outcomes)
+
+    rb = sub.add_parser(
+        "research-budget",
+        help="show or rebuild bounded outcome-adaptive research budget policy",
+    )
+    rb.add_argument("target", help="target name (state/<target>/...)")
+    rb.add_argument("--workspace", required=True,
+                    help="workspace root containing state/<target>/")
+    rb.add_argument("--round", type=int, default=0,
+                    help="budget round; default: newest agenda outcome")
+    rb.add_argument("--slots", type=int, default=8,
+                    help="finite research slots (default: 8)")
+    rb.add_argument("--rebuild", action="store_true",
+                    help="rebuild from agenda outcomes and prior policy")
+    rb.add_argument("--json", action="store_true",
+                    help="machine-readable output")
+    rb.set_defaults(fn=cmd_research_budget)
 
     rs = sub.add_parser(
         "research-strategy",

@@ -266,6 +266,28 @@ python3 scripts/agent_cli.py research-agenda-outcomes <target> \
   --workspace <audit-dir> [--round N] [--rebuild] [--json]
 ```
 
+Stage 33 adds `research-budget-v1`, an outcome-cost adaptive policy for the
+finite agenda.  S8 joins the previous agenda and its normalized outcome rows,
+then aggregates selected work by explicit research surface, information gain,
+estimated cost, environment gaps, and no-information repeats.  It emits only
+bounded `recover-environment`, `exploit-high-yield`, `explore-undercovered`,
+`continue-balanced`, or `cooldown-low-yield` guidance.  The next agenda
+consumes surface priority deltas and cap hints while retaining an exploration
+floor; a low-yield surface is cooled down, never deleted, and an environment
+gap is never treated as negative security evidence.
+
+S8 writes target and round `research-budget.json` artifacts, and replay packs
+include them as optional provenance.  Inspect or rebuild the policy with:
+
+```bash
+python3 scripts/agent_cli.py research-budget <target> \
+  --workspace <audit-dir> [--round N] [--rebuild] [--slots N] [--json]
+```
+
+Budget policy, agenda hints, and their scheduler evidence remain
+`claim_status=not-a-finding`; they cannot confirm a vulnerability or change
+candidate status, CVSS, G4, or G5.
+
 ## Two operating modes
 
 | Mode | Reasoning | Setup | Typical use |

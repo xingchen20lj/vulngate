@@ -73,6 +73,11 @@ from ..analysis.research_agenda_outcomes import (
     load_schedule_snapshot,
     write_research_agenda_outcomes,
 )
+from ..analysis.research_budget import (
+    build_research_budget,
+    load_research_budget,
+    write_research_budget,
+)
 from ..orchestrator.config import TargetConfig
 from ..orchestrator.gates import g3_novelty
 from ..sandbox.approval import ApprovalGate
@@ -2044,6 +2049,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
     prior_research_agenda = load_research_agenda(ctx.root, ctx.cfg.name)
     prior_agenda_outcomes = load_research_agenda_outcomes(
         ctx.root, ctx.cfg.name)
+    prior_research_budget = load_research_budget(ctx.root, ctx.cfg.name)
     schedule_snapshot = load_schedule_snapshot(
         ctx.root, ctx.cfg.name, round_no)
     verification_matrix = {}
@@ -2066,9 +2072,18 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         ctx.root, ctx.cfg.name, research_agenda_outcomes)
     ctx.write_artifact(round_no, "S8", "research-agenda-outcomes.json",
                        research_agenda_outcomes)
+    research_budget = build_research_budget(
+        prior_research_agenda, research_agenda_outcomes,
+        prior_budget=prior_research_budget, target=ctx.cfg.name,
+        round_no=round_no,
+        slots=((prior_research_agenda.get("policy") or {}).get(
+            "slots", 0) if prior_research_agenda else 0) or 8)
+    research_budget_file = write_research_budget(
+        ctx.root, ctx.cfg.name, research_budget)
+    ctx.write_artifact(round_no, "S8", "research-budget.json", research_budget)
     research_agenda = build_research_agenda(
         strategy, portfolio, target=ctx.cfg.name, round_no=round_no,
-        outcomes=research_agenda_outcomes)
+        outcomes=research_agenda_outcomes, budget_policy=research_budget)
     research_agenda_file = write_research_agenda(
         ctx.root, ctx.cfg.name, research_agenda)
     ctx.write_artifact(round_no, "S8", "research-agenda.json", research_agenda)
@@ -2185,6 +2200,17 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                             ).get("outcome_counts", {}),
         "claim_status": "not-a-finding",
     }
+    research_budget_info = {
+        "artifact": str(research_budget_file.relative_to(
+            ctx.root.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-budget.json"
+                          % (ctx.cfg.name, round_no),
+        "surface_count": (research_budget.get("summary") or {}).get(
+            "surface_count", 0),
+        "recommendation_counts": (research_budget.get("summary") or {}
+                                   ).get("recommendation_counts", {}),
+        "claim_status": "not-a-finding",
+    }
     research_replay_calibration_info = {
         "artifact": str(replay_calibration_file.relative_to(ctx.root.resolve())),
         "round_artifact": "state/%s/round-%02d/S8/research-replay-calibration.json"
@@ -2279,6 +2305,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             "research_consistency_rechecks": research_consistency_rechecks_info,
             "research_agenda": research_agenda_info,
             "research_agenda_outcomes": research_agenda_outcomes_info,
+            "research_budget": research_budget_info,
             "review_feedback": review_feedback_info,
             "research_portfolio": research_portfolio_info,
             "research_replay_calibration": research_replay_calibration_info,
@@ -2312,6 +2339,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                                 "research_agenda": research_agenda_info,
                                 "research_agenda_outcomes":
                                 research_agenda_outcomes_info,
+                                "research_budget": research_budget_info,
                                 "review_feedback": review_feedback_info,
                                 "research_portfolio": research_portfolio_info,
                                 "research_replay_calibration":
@@ -2329,6 +2357,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             "research_consistency_rechecks": research_consistency_rechecks_info,
             "research_agenda": research_agenda_info,
             "research_agenda_outcomes": research_agenda_outcomes_info,
+            "research_budget": research_budget_info,
             "review_feedback": review_feedback_info,
             "research_portfolio": research_portfolio_info,
             "research_replay_calibration": research_replay_calibration_info,

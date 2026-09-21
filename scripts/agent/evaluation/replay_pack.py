@@ -36,8 +36,8 @@ PACK_FILENAME = "research-replay-pack.json"
 PACK_CLAIM_STATUS = "not-a-finding"
 
 MAX_ROUNDS = 128
-MAX_ARTIFACTS_PER_ROUND = 10
-MAX_TARGET_ARTIFACTS = 10
+MAX_ARTIFACTS_PER_ROUND = 11
+MAX_TARGET_ARTIFACTS = 11
 MAX_LANES_PER_ROUND = 32
 MAX_JSON_BYTES = 8 * 1024 * 1024
 MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
@@ -101,6 +101,7 @@ _ROUND_SPECS: Tuple[Tuple[str, str, str], ...] = (
      "research-consistency-recheck-v1"),
     ("S8", "research-agenda.json", "research-agenda-v1"),
     ("S8", "research-agenda-outcomes.json", "research-agenda-outcome-v1"),
+    ("S8", "research-budget.json", "research-budget-v1"),
     ("S8", "research-portfolio.json", "research-portfolio-v1"),
     ("S8", "research-replay-calibration.json",
      "research-replay-calibration-v1"),
@@ -118,6 +119,7 @@ _TARGET_SPECS: Tuple[Tuple[str, str], ...] = (
     ("coverage/research-agenda.json", "research-agenda-v1"),
     ("coverage/research-agenda-outcomes.json",
      "research-agenda-outcome-v1"),
+    ("coverage/research-budget.json", "research-budget-v1"),
     ("coverage/research-replay-calibration.json",
      "research-replay-calibration-v1"),
 )
@@ -137,6 +139,8 @@ _OPTIONAL_ARTIFACTS = frozenset({
     "coverage/research-agenda.json",
     "S8/research-agenda-outcomes.json",
     "coverage/research-agenda-outcomes.json",
+    "S8/research-budget.json",
+    "coverage/research-budget.json",
 })
 
 

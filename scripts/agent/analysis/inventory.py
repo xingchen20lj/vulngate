@@ -26,6 +26,7 @@ Storage layout follows spec §3::
     ├── research-strategy.json   (cross-artifact S2 research agenda)
     ├── research-agenda.json     (bounded active research queue)
     ├── research-agenda-outcomes.json (bounded agenda execution feedback)
+    ├── research-budget.json     (outcome-adaptive finite budget policy)
     ├── research-guidance.json   (bounded next-action scheduling layer)
     └── inventory-summary.json
 

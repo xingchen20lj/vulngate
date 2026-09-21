@@ -126,6 +126,13 @@ def _safe_weight(value: Any) -> int:
         return 0
 
 
+def _safe_delta(value: Any) -> int:
+    try:
+        return max(-8, min(8, int(value)))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _normalize_weight_total(raw: Dict[str, int], target: int) -> Dict[str, int]:
     """Scale integer weights back to the original total deterministically."""
     names = list(FACTOR_ORDER)
@@ -867,6 +874,11 @@ def _research_agenda_guidance(candidate: Dict[str, Any],
         ],
         "outcome_consecutive_no_information": _safe_weight(
             item.get("outcome_consecutive_no_information")),
+        "budget_recommendation": str(
+            item.get("budget_recommendation") or ""),
+        "budget_priority_delta": _safe_delta(
+            item.get("budget_priority_delta")),
+        "budget_cap_hint": _safe_weight(item.get("budget_cap_hint")),
         "match_kind": str(item.get("_match_kind") or ""),
         "claim_status": "not-a-finding",
     }
@@ -2253,6 +2265,11 @@ def prompt_coverage_block(ctx: ScheduleContext, plan: Optional[SchedulePlan] = N
                         "outcome_observed_signals", []),
                     "outcome_consecutive_no_information": item.get(
                         "outcome_consecutive_no_information", 0),
+                    "budget_recommendation": item.get(
+                        "budget_recommendation", ""),
+                    "budget_priority_delta": _safe_delta(item.get(
+                        "budget_priority_delta", 0)),
+                    "budget_cap_hint": item.get("budget_cap_hint", 0),
                     "prerequisites": item.get("prerequisites", []),
                     "claim_status": item.get("claim_status", "not-a-finding"),
                 }

@@ -47,6 +47,7 @@
 | 30 | 一致性复核的真实执行与闭合 | 已实现（bounded S4→S8 recheck closure） | `research-consistency-recheck-v1`、S4 lane witness、`research-consistency-rechecks` CLI、S8/portfolio closure | 只有正/负向 lane、独立重复、fixture/context 锁、comparison、状态重置和 required observation 都有实际 witness 才标记 `observed`；缺失、部分执行和环境缺口保持可区分并继续 pending，不改变候选、CVSS、G4/G5 |
 | 31 | 主动研究议程与有限预算分配 | 已实现（bounded information-gain agenda） | `research-agenda-v1`、`research-agenda` CLI、S8 agenda、scheduler exact-match signal | 将 strategy 的证据债务转成 selected/deferred/hold 队列，显式记录 expected information gain、estimated cost、prerequisites 和 surface diversity；只改变下一轮调度，不改变候选、CVSS、G4/G5 |
 | 32 | 主动议程执行反馈与预算闭环 | 已实现（bounded agenda outcome feedback） | `research-agenda-outcome-v1`、`research-agenda-outcomes` CLI、S8 outcome、下一轮 agenda outcome fields | 将上一轮 selected 队列与实际 schedule、S4/S8 观测对齐，区分 new-information、falsifier、no-new-information、environment-gap、not-executed；用收益反馈调整下一轮优先级，不改变候选、CVSS、G4/G5 |
+| 33 | 结果自适应研究预算分配 | 已实现（bounded outcome-cost adaptive budget） | `research-budget-v1`、`research-budget` CLI、S8 surface budget、agenda budget hints、replay pack provenance | 按 research surface 汇总成本、信息增益、环境缺口和无信息重复；产生 recovery/exploit/explore/cooldown 策略并影响下一轮有限预算，保留探索与假设，不改变候选、CVSS、G4/G5 |
 
 ## 已实现基础：可证伪实验规划
 
@@ -513,3 +514,12 @@ S2→S4→S8 的单向契约：
 - 每项只输出 allowlist outcome：`new-information`、`falsifier-observed`、`no-new-information`、`environment-gap`、`not-executed` 或 `not-selected`，并保留有限的 information gain、observed signals、execution state、cells/fixtures 计数、reason codes 与连续无增益计数；缺少 schedule 或运行环境失败不会被解释成负向安全证据；
 - 目标级写入 `state/<target>/coverage/research-agenda-outcomes.json`，轮次写入 `S8/research-agenda-outcomes.json`，同时保留有界 history。下一轮 agenda 将最近 outcome 作为 `last_outcome` 和 recovery/no-information priority signal，scheduler prompt/evidence 也会展示该反馈；
 - 可用 `python3 scripts/agent_cli.py research-agenda-outcomes <target> --workspace <audit-dir> [--round N] [--rebuild] [--json]` 检查或重建。outcome、agenda 和 scheduler feedback 都保持 `claim_status=not-a-finding`，不能确认漏洞、改变 candidate status、CVSS、G4 或 G5。
+
+## 阶段 33 初步实现：结果自适应研究预算分配
+
+阶段 32 已经能记录每个议程项是否产生了新信息，但还不能回答“有限预算应该在不同研究面之间如何重新分配”。如果只在单项上加固定 boost，连续低收益实验仍可能消耗大部分轮次，而环境恢复或尚未覆盖的研究面没有明确的预算策略。阶段 33 增加 `research-budget-v1`：
+
+- S8 将上一轮 agenda 与 outcome 按精确键关联，再按 research surface 汇总 selected 数、productive outcome、information gain、estimated cost、environment gap 和 no-information repeat；仅保留受控计数、比率和固定策略码，不复制源码、payload、命令、stdout/stderr、凭据或 reviewer note；
+- 策略固定分为 `recover-environment`、`exploit-high-yield`、`explore-undercovered`、`continue-balanced` 和 `cooldown-low-yield`。环境缺口获得有限恢复权重，连续无信息项降温但不删除，生产性研究面得到小幅 exploitation 权重，未观察研究面保留探索机会；
+- S8 同时写入 target/round `research-budget.json`，下一轮 `research-agenda-v1` 只消费其中的 surface hint、bounded priority delta 和 cap hint；`agent_cli.py research-budget <target> --workspace <audit-dir> [--round N] [--rebuild] [--slots N] [--json]` 可检查或重建；
+- budget、agenda、replay pack 和 scheduler 仍是 `claim_status=not-a-finding`，策略只影响研究顺序和预算，不确认漏洞、不改变 candidate status、CVSS、G4 或 G5。样本不足时保持默认探索策略，策略合并按 round 去重并可重复回放。

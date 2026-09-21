@@ -156,6 +156,9 @@ def _history_workspace(root: Path, target: str = "demo") -> Path:
         (round_root / "S8" / "research-consistency-actions.json").write_text(
             json.dumps({"schema_version": "research-consistency-action-v1"}),
             encoding="utf-8")
+        (round_root / "S8" / "research-budget.json").write_text(
+            json.dumps({"schema_version": "research-budget-v1"}),
+            encoding="utf-8")
         (round_root / "S8" / "research-portfolio.json").write_text(
             json.dumps({"schema_version": "research-portfolio-v1"}),
             encoding="utf-8")
@@ -184,6 +187,9 @@ def _history_workspace(root: Path, target: str = "demo") -> Path:
     (coverage / "research-consistency-actions.json").write_text(
         json.dumps({"schema_version": "research-consistency-action-v1"}),
         encoding="utf-8")
+    (coverage / "research-budget.json").write_text(
+        json.dumps({"schema_version": "research-budget-v1"}),
+        encoding="utf-8")
     return target_root
 
 
@@ -204,6 +210,12 @@ class ReplayPackTests(unittest.TestCase):
         self.assertEqual("calibrated", pack["calibration"]["status"])
         self.assertEqual("match",
                          pack["provenance"]["calibration_consistency"])
+        self.assertTrue(any(
+            artifact.get("artifact") == "S8/research-budget.json"
+            for artifact in pack["rounds"][0]["artifacts"]))
+        self.assertTrue(any(
+            artifact.get("artifact") == "coverage/research-budget.json"
+            for artifact in pack["target_artifacts"]))
         self.assertTrue(verify_replay_pack(self.root, "demo", pack)["valid"])
         self.assertTrue(normalize_replay_pack(pack))
         encoded = json.dumps(pack, ensure_ascii=False)

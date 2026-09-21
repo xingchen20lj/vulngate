@@ -45,6 +45,11 @@ from ..analysis.research_agenda_outcomes import (
     load_schedule_snapshot,
     write_research_agenda_outcomes,
 )
+from ..analysis.research_budget import (
+    build_research_budget,
+    load_research_budget,
+    write_research_budget,
+)
 from ..memory.state import CheckpointStore
 from ..analysis.languages import ALL_SUFFIXES
 from ..sandbox.approval import ApprovalGate
@@ -1328,6 +1333,7 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
     prior_research_agenda = load_research_agenda(ctx.workspace, ctx.target)
     prior_agenda_outcomes = load_research_agenda_outcomes(
         ctx.workspace, ctx.target)
+    prior_research_budget = load_research_budget(ctx.workspace, ctx.target)
     schedule_snapshot = ctx.store.read_artifact(
         "S2", "candidate-schedule.json") or load_schedule_snapshot(
             ctx.workspace, ctx.target, ctx.round_no)
@@ -1342,9 +1348,18 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
         ctx.workspace, ctx.target, research_agenda_outcomes)
     ctx.store.write_artifact(
         "S8", "research-agenda-outcomes.json", research_agenda_outcomes)
+    research_budget = build_research_budget(
+        prior_research_agenda, research_agenda_outcomes,
+        prior_budget=prior_research_budget, target=ctx.target,
+        round_no=ctx.round_no,
+        slots=((prior_research_agenda.get("policy") or {}).get(
+            "slots", 0) if prior_research_agenda else 0) or 8)
+    research_budget_file = write_research_budget(
+        ctx.workspace, ctx.target, research_budget)
+    ctx.store.write_artifact("S8", "research-budget.json", research_budget)
     research_agenda = build_research_agenda(
         strategy, portfolio, target=ctx.target, round_no=ctx.round_no,
-        outcomes=research_agenda_outcomes)
+        outcomes=research_agenda_outcomes, budget_policy=research_budget)
     research_agenda_file = write_research_agenda(
         ctx.workspace, ctx.target, research_agenda)
     ctx.store.write_artifact("S8", "research-agenda.json", research_agenda)
@@ -1476,6 +1491,17 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
                             ).get("outcome_counts", {}),
         "claim_status": "not-a-finding",
     }
+    summary["research_budget"] = {
+        "artifact": str(research_budget_file.relative_to(
+            ctx.workspace.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-budget.json"
+                          % (ctx.target, ctx.round_no),
+        "surface_count": (research_budget.get("summary") or {}).get(
+            "surface_count", 0),
+        "recommendation_counts": (research_budget.get("summary") or {}
+                                   ).get("recommendation_counts", {}),
+        "claim_status": "not-a-finding",
+    }
     if strategy_file:
         summary["research_strategy"] = {
             "artifact": str(strategy_file.relative_to(ctx.workspace.resolve())),
@@ -1546,6 +1572,7 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
             "research_agenda": summary["research_agenda"],
             "research_agenda_outcomes": summary[
                 "research_agenda_outcomes"],
+            "research_budget": summary["research_budget"],
             "research_portfolio": summary["research_portfolio"],
             "research_replay_calibration": summary[
             "research_replay_calibration"],

@@ -190,6 +190,24 @@ python3 scripts/agent_cli.py research-agenda-outcomes <target> \
   --workspace <audit-dir> [--round N] [--rebuild] [--json]
 ```
 
+阶段 33 增加 `research-budget-v1` 结果自适应预算策略。S8 将上一轮 agenda 与归一化
+outcome 按 research surface 汇总，计算 selected 数、information gain、estimated cost、
+environment gap 和 no-information repeat，只产生有界的
+`recover-environment`、`exploit-high-yield`、`explore-undercovered`、`continue-balanced` 或
+`cooldown-low-yield` 策略码。下一轮 agenda 消费 surface priority delta 与 cap hint，并保留
+探索下限；低收益研究面只降温、不删除，环境缺口也绝不会被当成负向安全证据。
+
+S8 写入 target/round `research-budget.json`，replay pack 会在产物存在时记录可选 provenance。
+可用下面命令检查或重建：
+
+```bash
+python3 scripts/agent_cli.py research-budget <target> \
+  --workspace <audit-dir> [--round N] [--rebuild] [--slots N] [--json]
+```
+
+budget、agenda hint 和 scheduler evidence 仍是 `claim_status=not-a-finding`，不能确认漏洞、
+改变 candidate status、CVSS、G4 或 G5。
+
 S1 中包含授权边界和危险 Sink 的启发式 Source→Sink 路径会写入
 `composite-chain-candidates.json`，并在 S2 进入与模型候选、控制图候选、同族差分候选相同的调度池。它们始终保留
 `heuristic-nearby` / `requires_manual_dataflow=true`，只能作为审计和 PoC

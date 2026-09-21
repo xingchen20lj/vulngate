@@ -698,6 +698,27 @@ python3 scripts/agent_cli.py research-agenda-outcomes <target> \
   --workspace <audit-dir> [--round N] [--rebuild] [--json]
 ```
 
+S8 also derives `research-budget-v1`, an outcome-cost adaptive policy for the
+finite agenda. It joins the previous agenda with normalized execution outcomes
+and aggregates explicit research-surface rows by selected count, information
+gain, estimated cost, environment gaps, and no-information repeats. The fixed
+recommendations are `recover-environment`, `exploit-high-yield`,
+`explore-undercovered`, `continue-balanced`, and `cooldown-low-yield`.
+Environment gaps receive bounded recovery priority; repeated no-information
+work is cooled down without deleting the hypothesis; productive surfaces get a
+small exploitation nudge; and surfaces without observations retain an
+exploration opportunity. The next agenda consumes only allowlisted surface
+priority deltas and cap hints. Target and round artifacts are
+`research-budget.json`, and `agent_cli.py research-budget` can inspect or
+rebuild them. The policy remains `claim_status=not-a-finding` and cannot
+change candidate status, CVSS, G4, or G5; insufficient history keeps the
+default exploration behavior.
+
+```bash
+python3 scripts/agent_cli.py research-budget <target> \
+  --workspace <audit-dir> [--round N] [--rebuild] [--slots N] [--json]
+```
+
 S3 residuals are carried across the same boundary as pending research debt.
 Memory stores only controlled kind/reason codes, bounded source locations, a
 probe digest, and whether a bounded probe plan exists. The portfolio emits one
@@ -1605,6 +1626,21 @@ strategy feedback，只输出 `new-information`、`falsifier-observed`、`no-new
 python3 scripts/agent_cli.py research-agenda-outcomes <target> \
   --workspace <audit-dir> [--round N] [--rebuild] [--json]
 ```
+
+S8 还会生成 `research-budget-v1` 结果—成本自适应策略。它把上一轮 agenda 与归一化 outcome
+按显式 research surface 汇总 selected 数、信息增益、估计成本、环境缺口和无信息重复，并只产生
+`recover-environment`、`exploit-high-yield`、`explore-undercovered`、`continue-balanced` 和
+`cooldown-low-yield` 等固定策略码。环境缺口得到有界恢复优先级，连续无增益任务只降温不删除，已有
+产出的研究面得到小幅利用权重，尚未观测的研究面保留探索机会；下一轮 agenda 只消费 allowlist 的
+surface priority delta 与 cap hint。target/round 产物为 `research-budget.json`，可用下面命令检查或重建：
+
+```bash
+python3 scripts/agent_cli.py research-budget <target> \
+  --workspace <audit-dir> [--round N] [--rebuild] [--slots N] [--json]
+```
+
+budget、agenda hint 和 scheduler evidence 继续保持 `claim_status=not-a-finding`，不能确认漏洞、改变
+candidate status、CVSS、G4 或 G5；历史不足时保持默认探索策略。
 
 S2 还会写出有界的 `research-strategy-v1`：目标级为
 `state/<target>/coverage/research-strategy.json`，轮次快照为 `S2/research-strategy.json`。它将
