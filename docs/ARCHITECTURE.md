@@ -84,6 +84,20 @@ python3 scripts/agent_cli.py semantic-calls <target> \
   --workspace <audit-dir> --show-candidates --json
 ```
 
+`semantic-controlflow-evidence-v1` adds a bounded structural relation layer on
+top of the guard rows. It groups brace/indent branch intervals and records
+whether a sink is likely inside the guarded branch, after a terminating
+rejection branch, or in an `else`/`except` alternate path. `dominates-likely`
+is only a deterministic review signal: the layer does not execute a complete
+CFG and does not model loops, short-circuit conditions, exceptions,
+fallthrough, macros, or path feasibility. Rows and `cfg-*` candidates remain
+`not-a-finding`, with `requires_manual_dataflow=true`.
+
+```bash
+python3 scripts/agent_cli.py semantic-controlflow <target> \
+  --workspace <audit-dir> --show-candidates --json
+```
+
 S8 also emits a bounded `research-strategy-guidance-v1` view. It joins only
 strategy observation metadata, the latest review status, and explicit variant
 coverage, then maps them to finite next-action classes. Guidance can adjust

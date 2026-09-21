@@ -426,6 +426,7 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
     from ..analysis import capability_graph as capability
     from ..analysis import coverage as cov
     from ..analysis import semantic_calls as semantic_call
+    from ..analysis import semantic_controlflow as semantic_controlflow
     from ..analysis import semantic_guards as semantic_guard
     from ..analysis import semantic_paths as semantic
     from ..analysis import threat_model as threat_model_analysis
@@ -437,7 +438,8 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
             and store.path(threat_model_analysis.THREAT_MODEL_INDEX).exists()
             and store.path(semantic.SEMANTIC_PATH_INDEX).exists()
             and store.path(semantic_guard.SEMANTIC_GUARD_INDEX).exists()
-            and store.path(semantic_call.SEMANTIC_CALL_INDEX).exists()):
+            and store.path(semantic_call.SEMANTIC_CALL_INDEX).exists()
+            and store.path(semantic_controlflow.SEMANTIC_CONTROLFLOW_INDEX).exists()):
         return {"rebuilt": False, "graph": capability.load_capability_graph(store),
                 "candidates": capability.load_capability_candidates(store),
                 "semantic": semantic.load_semantic_evidence(store),
@@ -445,6 +447,8 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
                 "semantic_guard_candidates": semantic_guard.load_semantic_guard_candidates(store),
                 "semantic_calls": semantic_call.load_semantic_call_evidence(store),
                 "semantic_call_candidates": semantic_call.load_semantic_call_candidates(store),
+                "semantic_controlflow": semantic_controlflow.load_semantic_controlflow(store),
+                "semantic_controlflow_candidates": semantic_controlflow.load_semantic_controlflow_candidates(store),
                 "threat_model": threat_model_analysis.load_threat_model(
                     ctx.root, ctx.cfg.name)}
 
@@ -469,6 +473,8 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
                 "semantic_guard_candidates": semantic_guard.load_semantic_guard_candidates(store),
                 "semantic_calls": semantic_call.load_semantic_call_evidence(store),
                 "semantic_call_candidates": semantic_call.load_semantic_call_candidates(store),
+                "semantic_controlflow": semantic_controlflow.load_semantic_controlflow(store),
+                "semantic_controlflow_candidates": semantic_controlflow.load_semantic_controlflow_candidates(store),
                 "threat_model": threat_model_analysis.load_threat_model(
                     ctx.root, ctx.cfg.name),
                 "root": str(target_root)}
@@ -480,6 +486,8 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
                 "semantic_guard_candidates": [],
                 "semantic_calls": {},
                 "semantic_call_candidates": [],
+                "semantic_controlflow": {},
+                "semantic_controlflow_candidates": [],
                 "threat_model": {}}
 
 
@@ -1679,6 +1687,10 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                        capability_state.get("semantic_calls") or {})
     ctx.write_artifact(round_no, "S1", "semantic-call-candidates.json",
                        capability_state.get("semantic_call_candidates") or [])
+    ctx.write_artifact(round_no, "S1", "semantic-controlflow-evidence.json",
+                       capability_state.get("semantic_controlflow") or {})
+    ctx.write_artifact(round_no, "S1", "semantic-controlflow-candidates.json",
+                       capability_state.get("semantic_controlflow_candidates") or [])
     if capability_state.get("error"):
         ctx.write_artifact(round_no, "S1", "capability-graph-error.json", {
             "error": capability_state["error"]})

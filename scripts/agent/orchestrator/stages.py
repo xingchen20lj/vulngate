@@ -193,7 +193,7 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
     they do.  Without this check an upgraded checkout silently keeps scoring
     flows it never computed.
 
-    PR4's control map, differential index and semantic path/guard/call evidence join that
+    PR4's control map, differential index and semantic path/guard/call/control-flow evidence join that
     required set for the same reason: a store built by an earlier phase has
     flows but no complete path evidence, and a scheduler that silently scored
     without it would look identical to one that had it.
@@ -204,6 +204,7 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
     from ..analysis import differential as diff
     from ..analysis import semantic_guards as semantic_guard
     from ..analysis import semantic_calls as semantic_call
+    from ..analysis import semantic_controlflow as semantic_controlflow
     from ..analysis import semantic_paths as semantic
     from ..analysis import threat_model as threat_model_analysis
     from ..analysis.inventory import CoverageStore, build_inventory, persist_inventory
@@ -215,6 +216,7 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
                 semantic.SEMANTIC_PATH_INDEX,
                 semantic_guard.SEMANTIC_GUARD_INDEX,
                 semantic_call.SEMANTIC_CALL_INDEX,
+                semantic_controlflow.SEMANTIC_CONTROLFLOW_INDEX,
                 threat_model_analysis.THREAT_MODEL_INDEX)
     missing = [name for name in required if not store.path(name).exists()]
     built = False
@@ -238,6 +240,8 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
         semantic_guard.SEMANTIC_GUARD_INDEX) or {}).get("summary") or {}
     semantic_call_summary = (store.read(
         semantic_call.SEMANTIC_CALL_INDEX) or {}).get("summary") or {}
+    semantic_controlflow_summary = (store.read(
+        semantic_controlflow.SEMANTIC_CONTROLFLOW_INDEX) or {}).get("summary") or {}
     threat_model_summary = (store.read(
         threat_model_analysis.THREAT_MODEL_INDEX) or {}).get("summary") or {}
     if control_summary:
@@ -302,6 +306,19 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
             "sink_binding": semantic_call_summary.get("sink_binding"),
             "candidates": semantic_call_summary.get("candidates"),
             "claim_status": semantic_call_summary.get(
+                "claim_status", "not-a-finding"),
+        }
+    if semantic_controlflow_summary:
+        info["semantic_controlflow"] = {
+            "flows": semantic_controlflow_summary.get("flows"),
+            "controls": semantic_controlflow_summary.get("controls"),
+            "flows_with_alternate_paths": semantic_controlflow_summary.get(
+                "flows_with_alternate_paths"),
+            "flows_with_dominance_likely": semantic_controlflow_summary.get(
+                "flows_with_dominance_likely"),
+            "relations": semantic_controlflow_summary.get("relations"),
+            "candidates": semantic_controlflow_summary.get("candidates"),
+            "claim_status": semantic_controlflow_summary.get(
                 "claim_status", "not-a-finding"),
         }
     if threat_model_summary:
@@ -468,6 +485,7 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
         from ..analysis import capability_graph as capability
         from ..analysis import semantic_guards as semantic_guard
         from ..analysis import semantic_calls as semantic_call
+        from ..analysis import semantic_controlflow as semantic_controlflow
         from ..analysis import semantic_paths as semantic
         from ..analysis.inventory import CoverageStore
         coverage_store = CoverageStore(ctx.workspace, ctx.target)
@@ -498,6 +516,12 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
         ctx.store.write_artifact(
             "S1", "semantic-call-candidates.json",
             semantic_call.load_semantic_call_candidates(coverage_store))
+        ctx.store.write_artifact(
+            "S1", "semantic-controlflow-evidence.json",
+            semantic_controlflow.load_semantic_controlflow(coverage_store))
+        ctx.store.write_artifact(
+            "S1", "semantic-controlflow-candidates.json",
+            semantic_controlflow.load_semantic_controlflow_candidates(coverage_store))
     except Exception as exc:  # pragma: no cover - evidence mirror is best-effort
         ctx.store.write_artifact("S1", "capability-graph-error.json", {
             "error": "%s: %s" % (type(exc).__name__, exc)})

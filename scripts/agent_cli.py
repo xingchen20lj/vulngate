@@ -50,6 +50,8 @@ Usage:
                                 [--show-candidates] [--json]
   agent_cli.py semantic-calls <target> [--workspace <dir>] [--rebuild]
                                 [--show-candidates] [--json]
+  agent_cli.py semantic-controlflow <target> [--workspace <dir>] [--rebuild]
+                                [--show-candidates] [--json]
   agent_cli.py threat-model <target> [--workspace <dir>] [--rebuild]
                                 [--json]
   agent_cli.py spawn-probe --workspace <dir> --target <name> --round <N>
@@ -1320,7 +1322,7 @@ def cmd_coverage(args: argparse.Namespace) -> int:
         not store.path(name).exists()
         for name in ("source-inventory", "symbol-index", "flow-index",
                      "semantic-path-evidence", "semantic-guard-evidence",
-                     "semantic-call-evidence"))
+                     "semantic-call-evidence", "semantic-controlflow-evidence"))
     if need_build:
         root = Path(args.root).resolve() if args.root else (
             workspace / "targets" / target)
@@ -1358,6 +1360,8 @@ def cmd_coverage(args: argparse.Namespace) -> int:
         "summary") or {}
     semantic_call_summary = (store.read("semantic-call-evidence") or {}).get(
         "summary") or {}
+    semantic_controlflow_summary = (store.read(
+        "semantic-controlflow-evidence") or {}).get("summary") or {}
     if callgraph_summary or flow_summary:
         print("\n%s" % ("跨过程分析" if args.lang == "zh" else "Cross-procedural analysis"))
         print("─" * 46)
@@ -1414,6 +1418,18 @@ def cmd_coverage(args: argparse.Namespace) -> int:
         print("  callsites %s  sink binding %s"
               % (semantic_call_summary.get("callsite_status") or {},
                  semantic_call_summary.get("sink_binding") or {}))
+    if semantic_controlflow_summary:
+        print("\n%s" % ("语义控制流证据" if args.lang == "zh"
+                        else "Semantic control-flow evidence"))
+        print("─" * 46)
+        print("  flows %s  controls %s  alternate %s  dominance-likely %s  candidates %s"
+              % (semantic_controlflow_summary.get("flows", 0),
+                 semantic_controlflow_summary.get("controls", 0),
+                 semantic_controlflow_summary.get("flows_with_alternate_paths", 0),
+                 semantic_controlflow_summary.get("flows_with_dominance_likely", 0),
+                 semantic_controlflow_summary.get("candidates", 0)))
+        print("  relations %s"
+              % (semantic_controlflow_summary.get("relations") or {}))
     if args.schedule:
         from agent.analysis import scheduler as sched
         plan_payload = sched.load_schedule(store)
@@ -1891,6 +1907,51 @@ def cmd_semantic_calls(args: argparse.Namespace) -> int:
         return 0
 
     print(semantic_call.render_semantic_calls_text(
+        evidence, args.lang, limit=args.limit))
+    if args.show_candidates:
+        print("\n%s" % ("待验证线索详情" if args.lang == "zh"
+                        else "Verification lead details"))
+        print("─" * 52)
+        for candidate in candidates[:max(0, args.limit)]:
+            print("  %-22s %s" % (candidate.get("candidate_id", ""),
+                                  candidate.get("hypothesis", "")))
+    if rebuilt is not None:
+        print("\n[index rebuilt from %s]" % rebuilt["root"])
+    return 0
+
+
+def cmd_semantic_controlflow(args: argparse.Namespace) -> int:
+    """Show bounded branch-dominance and alternate-path evidence."""
+    from agent.analysis import semantic_controlflow as semantic_cf
+
+    try:
+        workspace, store, rebuilt, _ = _ensure_coverage_analysis(
+            args, (semantic_cf.SEMANTIC_CONTROLFLOW_INDEX,))
+    except FileNotFoundError as exc:
+        _out({"error": "target source root not found", "root": str(exc),
+              "hint": "pass --root <src root> (with --rebuild) or run S1 first"})
+        return 2
+
+    evidence = semantic_cf.load_semantic_controlflow(store)
+    candidates = semantic_cf.load_semantic_controlflow_candidates(store)
+    if args.limit_candidates:
+        candidates = candidates[:args.limit_candidates]
+    payload: Dict[str, Any] = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "summary": evidence.get("summary") or {},
+        "candidates": candidates,
+        "claim_status": evidence.get("claim_status", "not-a-finding"),
+        "limitations": evidence.get("limitations") or [],
+    }
+    if rebuilt is not None:
+        payload["rebuilt"] = rebuilt
+    if args.json:
+        payload["flows"] = (evidence.get("flows") or [])[:max(0, args.limit)]
+        _out(payload)
+        return 0
+
+    print(semantic_cf.render_semantic_controlflow_text(
         evidence, args.lang, limit=args.limit))
     if args.show_candidates:
         print("\n%s" % ("待验证线索详情" if args.lang == "zh"
@@ -2602,6 +2663,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_analysis_args(sc)
     sc.set_defaults(fn=cmd_semantic_calls)
+
+    scf = sub.add_parser(
+        "semantic-controlflow",
+        help="bounded branch-dominance and alternate-path evidence; "
+             "all outputs are research leads, not findings",
+    )
+    _add_analysis_args(scf)
+    scf.set_defaults(fn=cmd_semantic_controlflow)
 
     tm = sub.add_parser(
         "threat-model",

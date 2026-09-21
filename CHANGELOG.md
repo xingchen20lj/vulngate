@@ -28,6 +28,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added `agent_cli.py semantic-calls` and merged interprocedural binding leads
   into the static S2 candidate pool without promoting static data flow to a
   finding or runtime effect.
+- Added `semantic-controlflow-evidence-v1` and
+  `semantic-controlflow-candidates.json`. S1 now records bounded structural
+  relations for guarded branches, terminating rejection paths, and alternate
+  `else`/`except` paths without claiming a complete CFG or dominance proof.
+- Added `agent_cli.py semantic-controlflow` and merged control-flow gaps into
+  the static S2 candidate pool as `not-a-finding` research leads.
 
 ### Fixed
 

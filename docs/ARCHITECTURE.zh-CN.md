@@ -251,6 +251,13 @@ python3 scripts/agent_cli.py semantic-calls <target> \
   --workspace <audit-dir> --show-candidates --json
 ```
 
+`semantic-controlflow-evidence-v1` 在守卫证据之上增加有界的结构化关系层：按 brace/indent 分支区间记录 sink 是否看起来位于受保护分支、终止拒绝分支之后，或位于 `else`/`except` 备用路径。`dominates-likely` 只是确定性的人工复核信号；该层不执行完整 CFG，也不建模循环、短路、异常、fallthrough、宏或路径可行性。行和 `cfg-*` 候选保持 `not-a-finding` 与 `requires_manual_dataflow=true`。
+
+```bash
+python3 scripts/agent_cli.py semantic-controlflow <target> \
+  --workspace <audit-dir> --show-candidates --json
+```
+
 ## 两种运行模式
 
 | 模式 | 推理方 | 配置 | 典型用途 |

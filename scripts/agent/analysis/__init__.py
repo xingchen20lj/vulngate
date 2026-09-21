@@ -32,6 +32,7 @@ Module map:
 ``semantic_paths`` bounded source-local control-order and same-symbol data-flow evidence
 ``semantic_guards`` bounded branch-posture and subject/object binding evidence
 ``semantic_calls`` bounded one-hop interprocedural argument/return evidence
+``semantic_controlflow`` bounded branch-dominance and alternate-path evidence
 """
 
 from __future__ import annotations
@@ -49,6 +50,7 @@ __all__ = [
     "scheduler",
     "semantic_guards",
     "semantic_calls",
+    "semantic_controlflow",
     "semantic_paths",
     "symbols",
 ]

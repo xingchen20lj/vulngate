@@ -51,6 +51,7 @@
 | 34 | 语义路径证据与有限同符号数据流 | 已实现（bounded semantic path evidence） | `semantic-path-evidence-v1`、`semantic-path-evidence.json`、`semantic-path-candidates.json`、`semantic-paths` CLI | 区分控制在 sink 前/后/同一行及语义块关系；对同符号参数/简单别名给出 direct/propagated/not-traced，跨符号明确 unresolved；不复制源码、不升级 candidate/CVSS/G4/G5 |
 | 35 | 语义守卫姿态与主体绑定 | 已实现（bounded semantic guard evidence） | `semantic-guard-evidence-v1`、`semantic-guard-evidence.json`、`semantic-guard-candidates.json`、`semantic-guards` CLI | 区分 terminating/nested/non-branch/未解析分支姿态及 overlap/mismatch/unresolved 主体绑定；只生成 `not-a-finding` 研究线索，不声称 branch dominance、对象身份或授权绕过 |
 | 36 | 有界跨符号调用点参数/返回绑定 | 已实现（bounded interprocedural binding evidence） | `semantic-call-evidence-v1`、`semantic-call-evidence.json`、`semantic-call-candidates.json`、`semantic-calls` CLI | 对一跳调用点绑定实参/形参、有限传播污染参数、记录返回形状和 sink 参数绑定；跨符号 unresolved、静态线索保持 `not-a-finding`，不声称完整数据流或漏洞 |
+| 37 | 有界控制流关系与备用路径 | 已实现（bounded control-flow relation evidence） | `semantic-controlflow-evidence-v1`、`semantic-controlflow-evidence.json`、`semantic-controlflow-candidates.json`、`semantic-controlflow` CLI | 区分可能支配、终止拒绝分支之后、`else`/`except` alternate path 和同块未验证检查；不声称完整 CFG、路径可行性或授权绕过 |
 
 ## 已实现基础：可证伪实验规划
 
@@ -554,3 +555,13 @@ S2→S4→S8 的单向契约：
 - 在被调符号的有限范围内记录返回语句是否引用污染形参，形成 `tainted-return-likely`、`not-observed` 或 unresolved 的返回形状提示；这只帮助 S3 选择复核点，不声称真实返回值、异常路径、容器元素或异步回调已经被证明；
 - 将最终 sink 实参与这条有界绑定链对齐，区分 `bound`、`not-bound`、`unresolved` 和 `not-applicable`，并对未闭合的跨符号路径生成 `semantic-interprocedural-binding` 研究候选，进入 S2 的完整静态候选池；
 - 产物与 CLI 为 `state/<target>/coverage/semantic-call-evidence.json`、`semantic-call-candidates.json` 和 `python3 scripts/agent_cli.py semantic-calls <target> --workspace <audit-dir> --show-candidates --json`。实现刻意不建模 CFG、完整类型/别名、virtual dispatch、DI、reflection、callback、async 或 sanitizer 语义；所有记录、摘要和候选仍保持 `claim_status=not-a-finding`、`confidence=heuristic-nearby`、`requires_manual_dataflow=true`，必须由 S3/S4 补真实数据流与效果证据。
+
+## 阶段 37 初步实现：有界控制流关系与备用路径
+
+阶段 35 的 branch posture 和阶段 36 的调用点绑定已经能指出“检查存在”和“输入可能沿调用边传播”，但还不能稳定地区分 sink 位于被保护分支内、位于拒绝分支之后，还是落在 `else`/`except` 备用路径。阶段 37 增加独立的 `semantic-controlflow-evidence-v1`：
+
+- 按源码文件构建有上限的 brace/indent 分支区间和 branch group，记录 `terminating-guard-likely`、`enclosing-branch-likely`、`alternate-path-likely`、`same-block-unverified`、`after-sink`、`same-line` 与 unresolved 关系；`dominates-likely` 只表示结构形状足以安排人工追踪，不是 CFG dominance 证明；
+- 对 `if`/`elif`/`else`、`try`/`except`/`finally`、`switch`/`case` 等有限兄弟分支建立可引用的 alternate-path 状态，避免把“同一 handler 出现过授权调用”误认为所有 sink 分支都被保护；
+- 对可能的终止拒绝分支记录 sink 是否位于分支体之外，对同块普通检查保留 `same-block-unverified`；不推断返回/异常、循环、短路、fallthrough、宏、路径可行性或对象身份；
+- 对满足原有 control-map 前置条件且关系未闭合的路径生成 `semantic-controlflow-gap` 的稳定 `cfg-*` 候选，写入完整 S2 静态候选池。产物不保存源码原文，所有摘要、行和候选保持 `claim_status=not-a-finding`、`confidence=heuristic-nearby`、`requires_manual_dataflow=true`，S3/S4 仍必须补真实 CFG、授权和 typed-effect 证据；
+- 产物与 CLI 为 `state/<target>/coverage/semantic-controlflow-evidence.json`、`semantic-controlflow-candidates.json` 和 `python3 scripts/agent_cli.py semantic-controlflow <target> --workspace <audit-dir> --show-candidates --json`。后续可以用 AST/CFG、类型和运行时分支观测替换这一结构启发式，而不改变既有闸门。

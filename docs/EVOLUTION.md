@@ -87,6 +87,31 @@ The call-binding candidates join the same deterministic S2 pool and are kept
 as a separate artifact so a later typed/CFG resolver can replace the lexical
 bridge without weakening the evidence gates.
 
+## Unreleased semantic control-flow evidence
+
+The guard layer can identify a likely terminating check or a nested branch, but
+it still needs to distinguish a sink in the protected body from a sink in an
+`else`/`except` sibling or a plain check that only happens to be earlier in the
+same block. S1 now persists `semantic-controlflow-evidence-v1` and
+`semantic-controlflow-candidates.json`.
+
+The artifact uses bounded brace/indent intervals and branch groups to record
+`terminating-guard-likely`, `enclosing-branch-likely`,
+`alternate-path-likely`, `same-block-unverified`, and unresolved relations.
+`dominates-likely` means that the source shape is useful for selecting a trace;
+it does not prove CFG dominance, return/throw behavior, exception handling,
+loop/fallthrough semantics, path feasibility, or authorization correctness.
+Rows and `cfg-*` candidates remain `claim_status=not-a-finding`,
+`heuristic-nearby`, and `requires_manual_dataflow=true`. Use:
+
+```bash
+python3 scripts/agent_cli.py semantic-controlflow <target> \
+  --workspace <audit-dir> --show-candidates --json
+```
+
+The layer is kept separate from semantic guard evidence so a future AST/CFG
+resolver can replace the structural heuristic without weakening existing gates.
+
 ## Analysis coverage
 
 The engine now records the complete production-source universe, explicit skip

@@ -832,6 +832,10 @@ def static_candidates(store: Any) -> List[Dict[str, Any]]:
     # parameter/return tracing tasks without claiming complete data flow.
     from . import semantic_calls as semantic_call_analysis
     candidates.extend(semantic_call_analysis.load_semantic_call_candidates(store))
+    # Structural branch relations refine guard posture without claiming a CFG.
+    from . import semantic_controlflow as semantic_controlflow_analysis
+    candidates.extend(
+        semantic_controlflow_analysis.load_semantic_controlflow_candidates(store))
     return candidates
 
 
