@@ -53,6 +53,7 @@
 | 36 | 有界跨符号调用点参数/返回绑定 | 已实现（bounded interprocedural binding evidence） | `semantic-call-evidence-v1`、`semantic-call-evidence.json`、`semantic-call-candidates.json`、`semantic-calls` CLI | 对一跳调用点绑定实参/形参、有限传播污染参数、记录返回形状和 sink 参数绑定；跨符号 unresolved、静态线索保持 `not-a-finding`，不声称完整数据流或漏洞 |
 | 37 | 有界控制流关系与备用路径 | 已实现（bounded control-flow relation evidence） | `semantic-controlflow-evidence-v1`、`semantic-controlflow-evidence.json`、`semantic-controlflow-candidates.json`、`semantic-controlflow` CLI | 区分可能支配、终止拒绝分支之后、`else`/`except` alternate path 和同块未验证检查；不声称完整 CFG、路径可行性或授权绕过 |
 | 38 | Python AST 结构见证与解析缺口 | 已实现（bounded Python-AST structural evidence） | `semantic-ast-evidence-v1`、`semantic-ast-evidence.json`、`semantic-ast-candidates.json`、`semantic-ast` CLI | 以语法树确认 Python 作用域、终止守卫、`else`/异常备用路径和解析状态；不声称完整 CFG、SSA、类型/运行时证明，其他语言保留显式降级 |
+| 39 | 变换结果绑定与清洗失效线索 | 已实现（bounded transform binding evidence） | `semantic-transform-evidence-v1`、`semantic-transform-evidence.json`、`semantic-transform-candidates.json`、`semantic-transforms` CLI | 区分校验/清洗结果真正绑定、被丢弃、被覆盖、未绑定和跨符号缺口；不声称 sanitizer 语义、SSA、完整别名或漏洞结论 |
 
 ## 已实现基础：可证伪实验规划
 
@@ -576,3 +577,13 @@ S2→S4→S8 的单向契约：
 - 直接 `return`/`raise` 只作为终止形状见证；异常、循环、装饰器、动态导入、动态 dispatch、类型/对象身份、sanitizer 和路径可行性仍要求人工与 S4 证据；解析失败、不支持语言和超限文件保持 analysis gap，绝不作为安全负证据；
 - 对 guarded/partial 且关系未闭合的路径生成稳定 `ast-*` 候选，加入 S2 静态候选池。记录和候选始终保持 `claim_status=not-a-finding`、`confidence=heuristic-nearby`、`requires_manual_dataflow=true`，不改变候选状态、CVSS、G4/G5；
 - 产物与 CLI 为 `state/<target>/coverage/semantic-ast-evidence.json`、`semantic-ast-candidates.json` 和 `python3 scripts/agent_cli.py semantic-ast <target> --workspace <audit-dir> --show-candidates --json`。其他语言继续使用既有通用控制流证据，后续可增加对应的语法/类型适配器。
+
+## 阶段 39 实现：变换结果绑定与清洗失效线索
+
+阶段 34–38 已经逐步回答“控制是否出现、是否在 sink 前、是否看起来位于正确分支以及跨符号输入是否可能传播”，但仍缺少一个直接影响真实漏洞判断的问题：控制调用返回的值是否就是 sink 最终消费的值。很多真实缺陷不是没有调用清洗 API，而是调用结果被丢弃、结果变量后来被原始输入覆盖，或值通过未解析别名进入 sink。阶段 39 增加独立的 `semantic-transform-evidence-v1`：
+
+- 对 semantic path 中属于 validation、sanitization、allowlist、length/depth limit、path/origin/signature check 和 CSRF 的控制，在同一文件/符号内做有界调用识别、赋值识别和一跳别名追踪；只保存变量 token、行号、控制 ID、sink ID 和固定关系枚举，不保存源码原文、payload 或 API 输出；
+- 区分 `assignment-bound`、`direct-bound`、`guard-condition`、`not-bound`、`transform-result-discarded`、`validator-result-discarded`、`overwritten-after-transform`、`after-sink`、`cross-symbol-unresolved` 和 `transform-unresolved`。`bound` 只是选择后续 trace 的正向静态信号，gap 是人工复核任务，不是漏洞或安全结论；
+- 对 static control map 已判为 guarded/partial 且变换绑定未闭合的路径生成稳定 `xform-*` 候选，候选包含 entry/control/sink 位置、变换关系、需要确认的 API 返回/原地修改/异常语义以及 typed-effect/运行时验证要求，并加入完整 S2 静态候选池；
+- S1 coverage、config-driven 和 autonomous 管线共用同一 artifact，`semantic-transforms` CLI 可单独查看或触发覆盖索引重建。记录和候选始终保持 `claim_status=not-a-finding`、`confidence=heuristic-nearby`、`requires_manual_dataflow=true`，不会改变候选状态、CVSS、G4/G5；
+- 该层的后续升级顺序是：先用真实项目回放校准误报/漏报，再增加语言 AST/类型/SSA 适配，最后才允许把某些 API 的语义作为显式、可审计的 allowlist 知识输入；绝不把函数名本身当成“已安全”。

@@ -516,6 +516,7 @@ class PersistenceTests(ControlFixture):
         from agent.analysis import semantic_calls as CALLS
         from agent.analysis import semantic_controlflow as CONTROLFLOW
         from agent.analysis import semantic_ast as AST
+        from agent.analysis import semantic_transforms as TRANSFORMS
         from agent.analysis import semantic_paths as SEM
         static = CTL.static_candidates(self.store)
         sources = {c["source"] for c in static}
@@ -523,7 +524,7 @@ class PersistenceTests(ControlFixture):
         self.assertTrue(sources <= {"control-map", "differential", "capability-graph",
                                     "semantic-paths", "semantic-guards",
                                     "semantic-calls", "semantic-controlflow",
-                                    "semantic-ast"})
+                                    "semantic-ast", "semantic-transforms"})
         self.assertEqual(len(self.candidates()) + len(
             DIFF.load_differential_candidates(self.store)) + len(
             CAP.load_capability_candidates(self.store)) + len(
@@ -531,7 +532,8 @@ class PersistenceTests(ControlFixture):
             GUARD.load_semantic_guard_candidates(self.store)) + len(
             CALLS.load_semantic_call_candidates(self.store)) + len(
             CONTROLFLOW.load_semantic_controlflow_candidates(self.store)) + len(
-            AST.load_semantic_ast_candidates(self.store)),
+            AST.load_semantic_ast_candidates(self.store)) + len(
+            TRANSFORMS.load_semantic_transform_candidates(self.store)),
             len(static))
 
     def test_merging_never_displaces_an_existing_id(self):

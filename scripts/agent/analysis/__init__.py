@@ -54,5 +54,6 @@ __all__ = [
     "semantic_controlflow",
     "semantic_ast",
     "semantic_paths",
+    "semantic_transforms",
     "symbols",
 ]

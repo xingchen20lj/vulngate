@@ -269,6 +269,16 @@ python3 scripts/agent_cli.py semantic-ast <target> \
   --workspace <audit-dir> --show-candidates --json
 ```
 
+`semantic-transform-evidence-v1` 对校验/清洗控制调用到 sink 消费值做有界绑定追踪，区分结果已经赋值并使用、
+校验结果被丢弃、变换后的变量被原始值覆盖以及跨符号未解析。它只是帮助选择下一步源码/运行时追踪的静态
+证据，不推断 API 语义、类型、SSA、完整别名、框架过滤器或安全性；记录和
+`semantic-transform-candidates.json` 始终是 `not-a-finding` 研究线索。
+
+```bash
+python3 scripts/agent_cli.py semantic-transforms <target> \
+  --workspace <audit-dir> --show-candidates --json
+```
+
 ## 两种运行模式
 
 | 模式 | 推理方 | 配置 | 典型用途 |

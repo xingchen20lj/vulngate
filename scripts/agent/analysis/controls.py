@@ -840,6 +840,13 @@ def static_candidates(store: Any) -> List[Dict[str, Any]]:
     # replacing the language-agnostic structural layer.
     from . import semantic_ast as semantic_ast_analysis
     candidates.extend(semantic_ast_analysis.load_semantic_ast_candidates(store))
+    # Transform binding is the value-flow follow-up to a nearby validation or
+    # sanitization control.  It remains a separate persisted layer so a future
+    # typed/SSA resolver can replace the lexical evidence without changing the
+    # candidate-pool contract.
+    from . import semantic_transforms as semantic_transform_analysis
+    candidates.extend(
+        semantic_transform_analysis.load_semantic_transform_candidates(store))
     return candidates
 
 

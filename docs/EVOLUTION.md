@@ -3,6 +3,41 @@
 VulnGate 1.2.0 expands the audit engine while keeping the host-agent and
 deterministic-executor boundary intact.
 
+## Unreleased semantic transform binding evidence
+
+The existing semantic path/control layers can show that a validation or
+sanitization control is present before a sink, but that is not the same as
+showing that the sink consumes the value returned by that control. A common
+expert review failure is:
+
+```text
+sanitize(value); sink(value)
+safe = sanitize(value); safe = value; sink(safe)
+```
+
+S1 now persists `semantic-transform-evidence-v1` and
+`semantic-transform-candidates.json`. It performs a bounded source-local call,
+assignment and one-hop alias walk, and records `assignment-bound`,
+`direct-bound`, `guard-condition`, `not-bound`, `transform-result-discarded`,
+`validator-result-discarded`, `overwritten-after-transform`, and explicit
+cross-symbol/unresolved relations. It does not infer the API's actual
+sanitizer semantics, types, SSA, full branch dominance, framework filters or
+runtime behavior. Every row and `xform-*` candidate remains
+`claim_status=not-a-finding`, `heuristic-nearby`, and
+`requires_manual_dataflow=true`.
+
+Use:
+
+```bash
+python3 scripts/agent_cli.py semantic-transforms <target> \
+  --workspace <audit-dir> --show-candidates --json
+```
+
+The layer is merged into the deterministic S2 static candidate pool and is
+also mirrored into config-driven and autonomous S1 artifacts. A bound result
+does not close G4/G5; an unresolved or discarded result is a review task, not
+an automatic vulnerability conclusion.
+
 ## Unreleased semantic path evidence
 
 The next analysis layer closes a specific gap in the earlier heuristic control

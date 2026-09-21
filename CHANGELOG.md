@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added `semantic-transform-evidence-v1` and
+  `semantic-transform-candidates.json`. S1 now records bounded evidence for
+  whether validation/sanitization results are bound to the same sink input,
+  including discarded results, overwritten values, post-sink controls, and
+  cross-symbol gaps. All leads remain `not-a-finding` and require manual data
+  flow verification.
+- Added `agent_cli.py semantic-transforms` and merged transform-binding gaps
+  into the static S2 candidate pool without treating a nearby sanitizer call
+  as proof that the sink is protected.
 - Added deterministic `semantic-path-evidence-v1` and
   `semantic-path-candidates.json`. S1 now records bounded control-order
   evidence and same-symbol parameter/alias reachability, while leaving

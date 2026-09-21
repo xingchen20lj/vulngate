@@ -113,6 +113,19 @@ python3 scripts/agent_cli.py semantic-ast <target> \
   --workspace <audit-dir> --show-candidates --json
 ```
 
+`semantic-transform-evidence-v1` follows validation and sanitization control
+calls to the value consumed by a sink. It distinguishes a result that is
+assigned/used, a discarded validator result, an overwritten transformed value,
+and unresolved cross-symbol binding. This is bounded lexical evidence for
+choosing the next source/runtime trace; it does not infer API semantics, types,
+SSA, complete aliasing, framework filters, or safety. Its rows and
+`semantic-transform-candidates.json` remain `not-a-finding` leads.
+
+```bash
+python3 scripts/agent_cli.py semantic-transforms <target> \
+  --workspace <audit-dir> --show-candidates --json
+```
+
 S8 also emits a bounded `research-strategy-guidance-v1` view. It joins only
 strategy observation metadata, the latest review status, and explicit variant
 coverage, then maps them to finite next-action classes. Guidance can adjust
