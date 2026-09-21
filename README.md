@@ -133,9 +133,10 @@ Current gate identifiers are **G0, G1, G1b, G3, G4, and G5**; G1b is the default
 
 ## Coverage-driven auditing and native applications
 
-Version 1.1.0 extends the Codex plugin with a broader deterministic analysis
-layer and native-application support. The host uses your configured Codex model;
-the new deterministic commands require no additional model API key.
+Version 1.2.0 extends the Codex plugin with a broader deterministic analysis
+layer, native-application support, and outcome-adaptive research scheduling. The
+host uses your configured Codex model; the deterministic commands require no
+additional model API key.
 
 - Full production-source inventory with explicit skipped-file reasons and
   ledger-derived review coverage.
