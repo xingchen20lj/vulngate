@@ -97,6 +97,8 @@ _ROUND_SPECS: Tuple[Tuple[str, str, str], ...] = (
     ("S8", "research-consistency.json", "research-consistency-v1"),
     ("S8", "research-consistency-actions.json",
      "research-consistency-action-v1"),
+    ("S8", "research-consistency-rechecks.json",
+     "research-consistency-recheck-v1"),
     ("S8", "research-portfolio.json", "research-portfolio-v1"),
     ("S8", "research-replay-calibration.json",
      "research-replay-calibration-v1"),
@@ -109,6 +111,8 @@ _TARGET_SPECS: Tuple[Tuple[str, str], ...] = (
     ("coverage/research-consistency.json", "research-consistency-v1"),
     ("coverage/research-consistency-actions.json",
      "research-consistency-action-v1"),
+    ("coverage/research-consistency-rechecks.json",
+     "research-consistency-recheck-v1"),
     ("coverage/research-replay-calibration.json",
      "research-replay-calibration-v1"),
 )
@@ -117,6 +121,14 @@ _ROUND_SPEC_BY_ARTIFACT = {
     for stage, name, schema in _ROUND_SPECS
 }
 _TARGET_SCHEMA_BY_ARTIFACT = dict(_TARGET_SPECS)
+
+# Closure was added after the first replay-pack schema.  Treat its absence as
+# a backwards-compatible missing capability, but still record and validate it
+# whenever a round/target actually contains the artifact.
+_OPTIONAL_ARTIFACTS = frozenset({
+    "S8/research-consistency-rechecks.json",
+    "coverage/research-consistency-rechecks.json",
+})
 
 
 def _text(value: Any, limit: int = MAX_TEXT) -> str:
@@ -210,6 +222,10 @@ def _artifact_metadata(round_no: int, artifact: str, stage: str,
         "claim_status": PACK_CLAIM_STATUS,
     }
     return metadata, raw if status == "present" else None
+
+
+def _optional_artifact(artifact: str) -> bool:
+    return artifact in _OPTIONAL_ARTIFACTS
 
 
 def _target_artifact_metadata(name: str, expected_schema: str,
@@ -781,9 +797,12 @@ def build_replay_pack(workspace: Path, target: str,
         artifacts: List[Dict[str, Any]] = []
         raw_by_artifact: Dict[str, Dict[str, Any]] = {}
         for stage, name, schema in _ROUND_SPECS:
+            artifact_name = "%s/%s" % (stage, name)
+            artifact_path = directory / stage / name
+            if _optional_artifact(artifact_name) and not artifact_path.is_file():
+                continue
             metadata, raw = _artifact_metadata(
-                round_no, "%s/%s" % (stage, name), stage, name, schema,
-                directory / stage / name)
+                round_no, artifact_name, stage, name, schema, artifact_path)
             artifacts.append(metadata)
             if raw is not None:
                 raw_by_artifact[metadata["artifact"]] = raw
@@ -809,8 +828,11 @@ def build_replay_pack(workspace: Path, target: str,
     target_artifacts: List[Dict[str, Any]] = []
     target_raw: Dict[str, Dict[str, Any]] = {}
     for name, schema in _TARGET_SPECS:
+        artifact_path = target_dir / name
+        if _optional_artifact(name) and not artifact_path.is_file():
+            continue
         metadata, raw = _target_artifact_metadata(
-            name, schema, target_dir / name)
+            name, schema, artifact_path)
         target_artifacts.append(metadata)
         if raw is not None:
             target_raw[name] = raw

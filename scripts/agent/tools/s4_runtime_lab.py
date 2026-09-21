@@ -23,7 +23,9 @@ from urllib.parse import urlparse
 from .authz import authz_fixture_id, normalize_authz_case, normalize_authz_cases
 from ..evaluation.research_consistency_actions import (
     normalize_research_consistency_action,
+    normalize_research_consistency_lane,
 )
+from ..evaluation.research_consistency_rechecks import summarize_recheck_lane
 from .build import (JavaMatrixRunner, MatrixCell, POCSpec, ShellMatrixRunner,
                     ShellPOCSpec)
 from .redaction import redact_text
@@ -154,6 +156,8 @@ def build_s4_fixture(candidate: Dict[str, Any], spec: Any, cell: MatrixCell,
         "cell_context": context,
         "comparison_id": comparison.get("comparison_id", ""),
         "consistency_action": recheck,
+        "consistency_lane": normalize_research_consistency_lane(
+            cell.consistency_lane),
     }
     digest = _digest(identity)
     fixture = {
@@ -183,6 +187,9 @@ def build_s4_fixture(candidate: Dict[str, Any], spec: Any, cell: MatrixCell,
         "variant_context": variant,
         "comparison_contract": comparison,
         "consistency_action": recheck,
+        "consistency_lane": normalize_research_consistency_lane(
+            cell.consistency_lane),
+        "context_digest": _digest(context)[:24],
         "claim_status": "not-a-finding",
     }
     return fixture
@@ -346,7 +353,8 @@ def build_runtime_context_snapshot(
 def _clone_cell(cell: MatrixCell, version: str, safe_mode: bool,
                 *, features: Optional[List[str]] = None,
                 sequence: Optional[List[str]] = None,
-                variant_context: Optional[Dict[str, Any]] = None
+                variant_context: Optional[Dict[str, Any]] = None,
+                consistency_lane: Optional[str] = None
                 ) -> MatrixCell:
     return MatrixCell(
         version=version,
@@ -368,6 +376,8 @@ def _clone_cell(cell: MatrixCell, version: str, safe_mode: bool,
         variant_context=(dict(cell.variant_context)
                          if variant_context is None else variant_context),
         consistency_action=dict(cell.consistency_action),
+        consistency_lane=(cell.consistency_lane
+                          if consistency_lane is None else consistency_lane),
     )
 
 
@@ -392,6 +402,18 @@ def _variant_contexts(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
         if context:
             rows.append(context)
     return rows
+
+
+def _consistency_lanes(candidate: Dict[str, Any]) -> List[str]:
+    """Materialize the paired lanes required by a pending recheck action."""
+    plan = candidate.get("experiment_plan")
+    action = normalize_research_consistency_action(
+        plan.get("consistency_action") if isinstance(plan, dict) else None)
+    if not action:
+        return []
+    lanes = [normalize_research_consistency_lane(item) for item in
+             (action.get("matrix_shape") or {}).get("paired_lanes") or []]
+    return [item for item in lanes if item]
 
 
 def _comparison_contract(candidate: Dict[str, Any],
@@ -569,6 +591,14 @@ def normalize_matrix_record(row: Dict[str, Any], fixture_id: str = "",
         result["fixture_id"] = fixture_id
     if lab_kind:
         result["lab_kind"] = lab_kind
+    lane = normalize_research_consistency_lane(
+        row.get("consistency_lane") or
+        (row.get("experiment") or {}).get("consistency_lane"))
+    if lane:
+        result["consistency_lane"] = lane
+    action = normalize_research_consistency_action(row.get("consistency_action"))
+    if action:
+        result["consistency_action"] = action
     context = normalize_variant_fixture_context(
         variant_context if variant_context is not None
         else row.get("variant_context"))
@@ -782,8 +812,10 @@ def _run_s4_runtime_lab_core(
     for item in templates:
         candidate = item[0]
         contexts = _variant_contexts(candidate) or [{}]
+        consistency_lanes = _consistency_lanes(candidate) or [""]
         for context in contexts:
-            work_items.append((*item, context))
+            for consistency_lane in consistency_lanes:
+                work_items.append((*item, context, consistency_lane))
     work_item_count = len(work_items)
     work_items = work_items[:options["max_fixtures"]]
     if not work_items:
@@ -810,9 +842,14 @@ def _run_s4_runtime_lab_core(
     baseline_results = baseline_results or {}
     rows: List[Dict[str, Any]] = []
     for (candidate, spec, kind, spec_index, base, template_key,
-         variant_context) in work_items:
+         variant_context, consistency_lane) in work_items:
         variant_base = (_variant_cell(base, variant_context)
                         if variant_context else base)
+        if consistency_lane:
+            variant_base = _clone_cell(
+                variant_base, variant_base.version,
+                bool(variant_base.safe_mode),
+                consistency_lane=consistency_lane)
         comparison_contract = _comparison_contract(candidate, versions)
         fixture = build_s4_fixture(
             candidate, spec, variant_base, kind, spec_index, template_key,
@@ -910,6 +947,11 @@ def _run_s4_runtime_lab_core(
             comparison_contract, differential_records, primary,
             source_revision_records=source_revision_records
             + source_revision_gaps)
+        consistency_recheck = summarize_recheck_lane(
+            fixture.get("consistency_action"), fixture,
+            raw_replay_records + raw_differential_records
+            or replay_records + differential_records,
+            replay, differential, comparison)
         baseline = _baseline_row(baseline_results.get(candidate_id, []),
                                  spec, kind, variant_base)
         expected = (normalize_matrix_record(baseline)
@@ -935,6 +977,7 @@ def _run_s4_runtime_lab_core(
             "differential_records": differential_records[:MAX_CELLS],
             "source_revision_records": source_revision_records[:MAX_CELLS],
             "variant_evidence": variant_evidence,
+            "consistency_recheck": consistency_recheck,
             "claim_status": "not-a-finding",
         })
 
@@ -972,6 +1015,14 @@ def _run_s4_runtime_lab_core(
             for signal in variant_evidence.get("observed_signals") or []:
                 if signal not in observed_signals and len(observed_signals) < 12:
                     observed_signals.append(signal)
+        recheck = item.get("consistency_recheck") or {}
+        if isinstance(recheck, dict) and recheck.get("status"):
+            status.setdefault("consistency_recheck_statuses", []).append(
+                recheck.get("status"))
+            lane = recheck.get("lane")
+            if lane:
+                lane_counts = status.setdefault("consistency_lane_counts", {})
+                lane_counts[lane] = int(lane_counts.get(lane, 0)) + 1
     return {
         "schema_version": LAB_SCHEMA_VERSION,
         "scope": "ordinary-s4",

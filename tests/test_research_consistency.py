@@ -29,6 +29,11 @@ from agent.evaluation.research_consistency_actions import (  # noqa: E402
     build_research_consistency_actions,
     normalize_research_consistency_actions,
 )
+from agent.evaluation.research_consistency_rechecks import (  # noqa: E402
+    RECHECK_SCHEMA_VERSION,
+    build_research_consistency_rechecks,
+    normalize_research_consistency_rechecks,
+)
 from agent.memory.portfolio import build_research_portfolio  # noqa: E402
 from agent.memory.research import (  # noqa: E402
     build_round_memory,
@@ -192,6 +197,82 @@ class ResearchConsistencyTests(unittest.TestCase):
         self.assertEqual(2, normalized["entries"][0]["matrix_shape"]
                          ["repeat_count"])
 
+    def test_recheck_closure_requires_both_lanes_and_comparison(self):
+        consistency = build_research_consistency(
+            self._memory_with_two_observations())
+        actions = build_research_consistency_actions(consistency)
+        action = actions["entries"][0]
+
+        def fixture(lane, comparison="no-difference", typed=False, safe=False):
+            return {
+                "fixture": {
+                    "candidate_id": "C1",
+                    "fixture_id": "fx-" + lane,
+                    "template_key": "template-1",
+                    "context_digest": "c" * 24,
+                    "base_version": "v1",
+                    "base_safe_mode": False,
+                    "consistency_action": action,
+                },
+                "consistency_recheck": {
+                    "schema_version": RECHECK_SCHEMA_VERSION,
+                    "lane": lane,
+                    "status": "observed",
+                    "row_count": 3,
+                    "replay_attempts": 2,
+                    "observed_observations": [
+                        "same-fixture-identity", "controlled-runtime-context",
+                        "independent-replay", "positive-effect-or-safe-equivalent",
+                        "state-reset-observed",
+                    ],
+                    "missing_observations": [],
+                    "comparison_status": comparison,
+                    "typed_effect_observed": typed,
+                    "safe_equivalent_observed": safe,
+                    "state_reset_observed": True,
+                },
+            }
+
+        runtime = {
+            "status": "completed",
+            "fixtures": [fixture("positive", typed=True),
+                         fixture("negative", safe=True)],
+        }
+        result = build_research_consistency_rechecks(runtime, actions)
+        self.assertEqual(RECHECK_SCHEMA_VERSION, result["schema_version"])
+        self.assertEqual("observed", result["entries"][0]["status"])
+        self.assertEqual([], result["entries"][0]["missing_observations"])
+        self.assertEqual([], result["entries"][0]["pending_falsifiers"])
+        self.assertEqual("not-a-finding", result["claim_status"])
+
+        partial = build_research_consistency_rechecks(
+            {"status": "completed",
+             "fixtures": [fixture("positive", typed=True)]}, actions)
+        row = partial["entries"][0]
+        self.assertEqual("partial", row["status"])
+        self.assertIn("negative", row["missing_lanes"])
+        self.assertIn("same-fixture-identity", row["missing_observations"])
+
+    def test_recheck_normalization_discards_raw_fields(self):
+        raw = {
+            "schema_version": RECHECK_SCHEMA_VERSION,
+            "entries": [{
+                "research_key": "rk-demo",
+                "candidate_id": "C1",
+                "status": "partial",
+                "expected_lanes": ["positive"],
+                "observed_lanes": ["positive"],
+                "missing_observations": ["independent-replay", "secret"],
+                "raw_stdout": "secret=must-not-persist",
+            }],
+            "raw_stderr": "also-secret",
+        }
+        normalized = normalize_research_consistency_rechecks(raw)
+        encoded = json.dumps(normalized, ensure_ascii=False)
+        self.assertNotIn("secret", encoded)
+        self.assertEqual("partial", normalized["entries"][0]["status"])
+        self.assertEqual(1, normalized["summary"]["entry_count"])
+
     def test_normalization_recomputes_summary_and_discards_raw_fields(self):
         raw = {
             "schema_version": CONSISTENCY_SCHEMA_VERSION,
@@ -256,6 +337,21 @@ class ResearchConsistencyTests(unittest.TestCase):
                          action_payload["actions"]["schema_version"])
         self.assertTrue((self.root / "state" / "demo" / "coverage"
                          / "research-consistency-actions.json").exists())
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = agent_cli.main([
+                "research-consistency-rechecks", "demo",
+                "--workspace", str(self.root), "--rebuild", "--json",
+            ])
+        self.assertEqual(0, status)
+        recheck_payload = json.loads(output.getvalue())
+        self.assertEqual(RECHECK_SCHEMA_VERSION,
+                         recheck_payload["rechecks"]["schema_version"])
+        self.assertEqual("not-executed",
+                         recheck_payload["rechecks"]["entries"][0]["status"])
+        self.assertTrue((self.root / "state" / "demo" / "coverage"
+                         / "research-consistency-rechecks.json").exists())
 
 
 if __name__ == "__main__":

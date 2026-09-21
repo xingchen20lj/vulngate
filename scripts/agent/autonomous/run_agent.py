@@ -54,6 +54,10 @@ from ..evaluation.research_consistency_actions import (
     load_research_consistency_actions,
     write_research_consistency_actions,
 )
+from ..evaluation.research_consistency_rechecks import (
+    build_research_consistency_rechecks,
+    write_research_consistency_rechecks,
+)
 from ..analysis.research_strategy import (apply_strategy_observations,
                                            apply_research_guidance,
                                            load_research_strategy,
@@ -1941,6 +1945,12 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                 runtime_lab = loaded_lab
         except (OSError, ValueError, TypeError):
             runtime_lab = {}
+    prior_consistency_actions = load_research_consistency_actions(
+        ctx.root, ctx.cfg.name)
+    research_consistency_rechecks = build_research_consistency_rechecks(
+        runtime_lab, prior_consistency_actions)
+    research_consistency_rechecks_file = write_research_consistency_rechecks(
+        ctx.root, ctx.cfg.name, research_consistency_rechecks)
     memory_summaries = {
         str(row.get("candidate", {}).get("candidate_id")): row.get("summary", {})
         for row in rows if isinstance(row, dict) and isinstance(row.get("candidate"), dict)
@@ -1985,7 +1995,8 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         ctx.root, ctx.cfg.name, research_consistency_actions)
     portfolio = build_research_portfolio(
         memory, review_feedback, ctx.benchmark_feedback(),
-        research_consistency, research_consistency_actions)
+        research_consistency, research_consistency_actions,
+        research_consistency_rechecks)
     portfolio_file = write_research_portfolio(ctx.root, ctx.cfg.name, portfolio)
     strategy = load_research_strategy(ctx.root, ctx.cfg.name)
     if not strategy:
@@ -2035,6 +2046,9 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
     ctx.write_artifact(
         round_no, "S8", "research-consistency-actions.json",
         research_consistency_actions)
+    ctx.write_artifact(
+        round_no, "S8", "research-consistency-rechecks.json",
+        research_consistency_rechecks)
     ctx.write_artifact(round_no, "S8", "research-portfolio.json", portfolio)
     replay_pack = build_replay_pack(ctx.root, ctx.cfg.name)
     replay_pack_file = write_replay_pack(
@@ -2086,6 +2100,19 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                           ).get("action_count", 0),
         "action_counts": (research_consistency_actions.get("summary") or {}
                            ).get("action_counts", {}),
+        "claim_status": "not-a-finding",
+    }
+    research_consistency_rechecks_info = {
+        "artifact": str(research_consistency_rechecks_file.relative_to(
+            ctx.root.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-consistency-rechecks.json"
+                          % (ctx.cfg.name, round_no),
+        "status_counts": {
+            key: value for key, value in
+            (research_consistency_rechecks.get("summary") or {}).items()
+            if key in {"observed", "partial", "environment_gap",
+                       "not_executed"}
+        },
         "claim_status": "not-a-finding",
     }
     research_replay_calibration_info = {
@@ -2179,6 +2206,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             "research_memory": research_memory_info,
             "research_consistency": research_consistency_info,
             "research_consistency_actions": research_consistency_actions_info,
+            "research_consistency_rechecks": research_consistency_rechecks_info,
             "review_feedback": review_feedback_info,
             "research_portfolio": research_portfolio_info,
             "research_replay_calibration": research_replay_calibration_info,
@@ -2207,6 +2235,8 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                                 "research_consistency": research_consistency_info,
                                 "research_consistency_actions":
                                 research_consistency_actions_info,
+                                "research_consistency_rechecks":
+                                research_consistency_rechecks_info,
                                 "review_feedback": review_feedback_info,
                                 "research_portfolio": research_portfolio_info,
                                 "research_replay_calibration":
@@ -2221,6 +2251,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             "research_memory": research_memory_info,
             "research_consistency": research_consistency_info,
             "research_consistency_actions": research_consistency_actions_info,
+            "research_consistency_rechecks": research_consistency_rechecks_info,
             "review_feedback": review_feedback_info,
             "research_portfolio": research_portfolio_info,
             "research_replay_calibration": research_replay_calibration_info,

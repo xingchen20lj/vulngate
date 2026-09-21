@@ -202,6 +202,31 @@ artifact, portfolio, strategy, and replay pack remain
 `claim_status=not-a-finding` and cannot change candidate status, CVSS, G4, or
 G5.
 
+The next boundary is executed closure, `research-consistency-recheck-v1`. S4
+now materializes the action's positive/negative or environment-gap lane and
+passes only a bounded `VULNGATE_CONSISTENCY_LANE` selector to the PoC. Lane
+fixtures have distinct lane identities but retain the same base context
+digest. While runner rows are still in memory, S4 extracts only allowlisted
+witnesses: execution/environment status, replay count, typed effect or safe
+equivalent, explicit state reset, comparison-arm status, and fixture/context
+identity. Raw stdout/stderr, commands, payloads, credentials, and source prose
+are not copied into the closure artifact.
+
+S8 combines the previous pending action with the current
+`S4/runtime-lab.json` and writes `research-consistency-recheck-v1`. It
+distinguishes `observed`, `partial`, `environment-gap`, and `not-executed`;
+only complete lane, repeat, fixture/context, comparison, and required
+observation witnesses stop the duplicate scheduling loop. Inspect it with:
+
+```bash
+python3 scripts/agent_cli.py research-consistency-rechecks <target> \
+  --workspace <audit-dir> --json
+```
+
+Closure remains `claim_status=not-a-finding`; it cannot confirm a vulnerability,
+turn an environment gap into negative evidence, or change candidate status,
+CVSS, G4, or G5.
+
 ## Two operating modes
 
 | Mode | Reasoning | Setup | Typical use |

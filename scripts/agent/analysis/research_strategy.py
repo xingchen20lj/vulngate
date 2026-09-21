@@ -120,6 +120,7 @@ STRATEGY_GUIDANCE_REASON_CODES = frozenset({
     "complete-observation",
     "falsifier-observed",
     "evidence-inconsistent",
+    "consistency-recheck-closed",
 })
 STRATEGY_REASON_CODES = frozenset({
     "threat-path",
@@ -614,6 +615,16 @@ def _item_guidance(item: Mapping[str, Any], portfolio: Mapping[str, Any],
     review_status = _text(review.get("status"), 32).lower()
     variant = _variant_guidance_rows(item, portfolio)
     variant_gaps = list(variant.get("gaps") or [])
+    recheck_rows = portfolio.get("consistency_rechecks")
+    recheck_rows = recheck_rows if isinstance(recheck_rows, Mapping) else {}
+    closed_rechecks = {
+        _text(row.get("research_key"), 80)
+        for row in recheck_rows.get("entries") or []
+        if isinstance(row, Mapping)
+        and _text(row.get("status"), 32).lower() == "observed"
+    }
+    recheck_closed = bool(
+        _text(item.get("research_key"), 80) in closed_rechecks)
     reasons: List[str] = []
     sources: List[str] = []
 
@@ -628,7 +639,11 @@ def _item_guidance(item: Mapping[str, Any], portfolio: Mapping[str, Any],
     action = "continue-path-closure"
     priority_delta = 0
 
-    if status == "environment-gap" or item.get("kind") == "environment-recovery":
+    if recheck_closed:
+        action = "hold-for-new-evidence"
+        add_reason("consistency-recheck-closed")
+        add_source("project-portfolio")
+    elif status == "environment-gap" or item.get("kind") == "environment-recovery":
         action = "repair-environment"
         priority_delta = 3
         add_reason("environment-gap")
@@ -680,7 +695,7 @@ def _item_guidance(item: Mapping[str, Any], portfolio: Mapping[str, Any],
         information_gain == 0 and
         zero_gain_streak >= replacement_zero_gain_rounds and
         current_status not in {"unobserved", "environment-gap"} and
-        action != "repair-environment")
+        action != "repair-environment" and not recheck_closed)
     if replacement:
         add_reason("zero-information-gain")
     if review_status:
@@ -1559,6 +1574,13 @@ def build_research_strategy(
         _text(item.get("research_key"), 80)
         for item in items if item.get("research_key")
     }
+    closed_recheck_keys = {
+        _text(row.get("research_key"), 80)
+        for row in portfolio.get("consistency_rechecks", {}).get("entries", [])
+        if isinstance(row, Mapping)
+        and _text(row.get("status"), 32).lower() == "observed"
+    } if isinstance(portfolio.get("consistency_rechecks"), Mapping) else set()
+    portfolio_keys.update(closed_recheck_keys)
     memory_entries = [entry for entry in (research_memory or [])
                       if isinstance(entry, Mapping)]
     for entry in memory_entries:

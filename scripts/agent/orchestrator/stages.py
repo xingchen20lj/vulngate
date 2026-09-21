@@ -26,6 +26,10 @@ from ..evaluation.research_consistency_actions import (
     load_research_consistency_actions,
     write_research_consistency_actions,
 )
+from ..evaluation.research_consistency_rechecks import (
+    build_research_consistency_rechecks,
+    write_research_consistency_rechecks,
+)
 from ..analysis.research_strategy import (apply_strategy_observations,
                                            apply_research_guidance,
                                            load_research_strategy,
@@ -1244,6 +1248,12 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
     # separate from the finding ledger: a stable replay or a version
     # difference is useful feedback, but neither is a vulnerability verdict.
     runtime_lab = ctx.store.read_artifact("S4", "runtime-lab.json") or {}
+    prior_consistency_actions = load_research_consistency_actions(
+        ctx.workspace, ctx.target)
+    research_consistency_rechecks = build_research_consistency_rechecks(
+        runtime_lab, prior_consistency_actions)
+    research_consistency_rechecks_file = write_research_consistency_rechecks(
+        ctx.workspace, ctx.target, research_consistency_rechecks)
     from ..evaluation.replay_calibration import (
         build_replay_calibration, load_replay_calibration,
         write_replay_calibration,
@@ -1276,7 +1286,8 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
         ctx.workspace, ctx.target, research_consistency_actions)
     portfolio = build_research_portfolio(
         memory, review_feedback, ctx.benchmark_feedback(),
-        research_consistency, research_consistency_actions)
+        research_consistency, research_consistency_actions,
+        research_consistency_rechecks)
     portfolio_file = write_research_portfolio(
         ctx.workspace, ctx.target, portfolio)
     strategy = load_research_strategy(ctx.workspace, ctx.target)
@@ -1319,6 +1330,9 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
     ctx.store.write_artifact(
         "S8", "research-consistency-actions.json",
         research_consistency_actions)
+    ctx.store.write_artifact(
+        "S8", "research-consistency-rechecks.json",
+        research_consistency_rechecks)
     ctx.store.write_artifact("S8", "research-portfolio.json", portfolio)
     replay_pack = build_replay_pack(ctx.workspace, ctx.target)
     replay_pack_file = write_replay_pack(
@@ -1386,6 +1400,19 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
                            ).get("action_counts", {}),
         "claim_status": "not-a-finding",
     }
+    summary["research_consistency_rechecks"] = {
+        "artifact": str(research_consistency_rechecks_file.relative_to(
+            ctx.workspace.resolve())),
+        "round_artifact": "state/%s/round-%02d/S8/research-consistency-rechecks.json"
+                          % (ctx.target, ctx.round_no),
+        "status_counts": {
+            key: value for key, value in
+            (research_consistency_rechecks.get("summary") or {}).items()
+            if key in {"observed", "partial", "environment_gap",
+                       "not_executed"}
+        },
+        "claim_status": "not-a-finding",
+    }
     if strategy_file:
         summary["research_strategy"] = {
             "artifact": str(strategy_file.relative_to(ctx.workspace.resolve())),
@@ -1451,6 +1478,8 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
             "research_consistency": summary["research_consistency"],
             "research_consistency_actions": summary[
                 "research_consistency_actions"],
+            "research_consistency_rechecks": summary[
+                "research_consistency_rechecks"],
             "research_portfolio": summary["research_portfolio"],
             "research_replay_calibration": summary[
             "research_replay_calibration"],

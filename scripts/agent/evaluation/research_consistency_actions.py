@@ -58,6 +58,12 @@ FALSIFIERS = frozenset({
 LANES = frozenset({"positive", "negative", "environment-gap"})
 
 
+def normalize_research_consistency_lane(value: Any) -> str:
+    """Normalize the small lane label exposed to an S4 PoC."""
+    lane = _text(value, 24).lower()
+    return lane if lane in LANES else ""
+
+
 def _text(value: Any, limit: int = MAX_TEXT) -> str:
     try:
         value = redact_text(value)

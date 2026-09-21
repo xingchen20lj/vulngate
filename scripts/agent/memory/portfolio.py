@@ -29,6 +29,10 @@ from ..evaluation.research_consistency_actions import (
     build_research_consistency_actions,
     normalize_research_consistency_actions,
 )
+from ..evaluation.research_consistency_rechecks import (
+    build_research_consistency_rechecks,
+    normalize_research_consistency_rechecks,
+)
 from ..tools.redaction import redact_text
 from .research import (
     MEMORY_CLAIM_STATUS,
@@ -271,6 +275,10 @@ def _empty_portfolio() -> Dict[str, Any]:
             "consistency_unstable": 0,
             "consistency_environment_gaps": 0,
             "consistency_insufficient": 0,
+            "consistency_recheck_observed": 0,
+            "consistency_recheck_partial": 0,
+            "consistency_recheck_environment_gaps": 0,
+            "consistency_recheck_not_executed": 0,
             "states": {},
             "review_statuses": {},
         },
@@ -279,6 +287,7 @@ def _empty_portfolio() -> Dict[str, Any]:
         "surface_lane_coverage": empty_surface_lane_coverage(),
         "consistency": build_research_consistency({}),
         "consistency_actions": build_research_consistency_actions({}),
+        "consistency_rechecks": build_research_consistency_rechecks({}, {}),
         "next_probes": [],
         "benchmark": {},
         "claim_status": PORTFOLIO_CLAIM_STATUS,
@@ -342,6 +351,7 @@ def build_research_portfolio(
         benchmark_feedback: Optional[Dict[str, Any]] = None,
         consistency: Optional[Dict[str, Any]] = None,
         consistency_actions: Optional[Dict[str, Any]] = None,
+        consistency_rechecks: Optional[Dict[str, Any]] = None,
         ) -> Dict[str, Any]:
     """Build a deterministic, bounded project view from research artifacts."""
     if not isinstance(memory, dict):
@@ -359,6 +369,16 @@ def build_research_portfolio(
         consistency_actions)
     if not consistency_actions:
         consistency_actions = build_research_consistency_actions(consistency)
+    if consistency_rechecks is None:
+        consistency_rechecks = build_research_consistency_rechecks({}, {})
+    else:
+        consistency_rechecks = normalize_research_consistency_rechecks(
+            consistency_rechecks)
+    recheck_entries = {
+        _text(row.get("research_key"), MAX_KEY): row
+        for row in consistency_rechecks.get("entries") or []
+        if isinstance(row, dict) and _text(row.get("research_key"), MAX_KEY)
+    }
     reviews = _review_index(review_feedback)
     states = Counter()
     latest_states = Counter()
@@ -564,6 +584,13 @@ def build_research_portfolio(
             continue
         if key in consistency_probe_keys:
             continue
+        recheck = recheck_entries.get(key, {})
+        recheck_status = _text(recheck.get("status"), 32).lower()
+        # A fully observed controlled recheck closes the scheduling obligation
+        # even if the historical consistency detector still retains the old
+        # contradictory rounds for auditability.
+        if recheck_status == "observed":
+            continue
         consistency_probe_keys.add(key)
         entry = next((item for item in entries
                       if _text(item.get("research_key"), MAX_KEY) == key), {})
@@ -579,7 +606,17 @@ def build_research_portfolio(
         else:
             state = STATE_INCONCLUSIVE
             priority = 3
-        next_candidates.append({
+        probe_hints = _consistency_probe_hints(row)
+        missing_recheck = _bounded_strings(
+            recheck.get("missing_observations"), MAX_HINTS, 96)
+        if recheck_status in {"partial", "not-executed", "environment-gap"}:
+            probe_hints = _bounded_strings(
+                ["一致性复核状态=%s；继续满足 lane/重复/上下文闭合条件%s" % (
+                    recheck_status,
+                    ("；缺少=" + ",".join(missing_recheck))
+                    if missing_recheck else "")]
+                + probe_hints, MAX_HINTS, 220)
+        consistency_probe = {
             "research_key": key,
             "candidate_id": _text(entry.get("candidate_id"), 120),
             "residual_id": "",
@@ -606,9 +643,17 @@ def build_research_portfolio(
                 row.get("observation_count"), 0, 0, 8),
             "consistency_action": dict(
                 action_entries.get(key) or {}),
-            "next_probe_hints": _consistency_probe_hints(row),
+            "next_probe_hints": probe_hints,
             "claim_status": PORTFOLIO_CLAIM_STATUS,
-        })
+        }
+        if recheck_status in {"partial", "environment-gap", "not-executed"}:
+            consistency_probe.update({
+                "consistency_recheck_status": recheck_status,
+                "consistency_recheck_missing_observations": missing_recheck,
+                "consistency_recheck_pending_falsifiers": _bounded_strings(
+                    recheck.get("pending_falsifiers"), MAX_HINTS, 120),
+            })
+        next_candidates.append(consistency_probe)
 
     def dimension_rows(dimension: str) -> List[Dict[str, Any]]:
         rows = []
@@ -672,6 +717,18 @@ def build_research_portfolio(
                 consistency_summary.get("environment_gap_entries"), 0, 0, 1000000),
             "consistency_insufficient": _safe_int(
                 consistency_summary.get("insufficient_entries"), 0, 0, 1000000),
+            "consistency_recheck_observed": sum(
+                1 for row in recheck_entries.values()
+                if _text(row.get("status"), 32).lower() == "observed"),
+            "consistency_recheck_partial": sum(
+                1 for row in recheck_entries.values()
+                if _text(row.get("status"), 32).lower() == "partial"),
+            "consistency_recheck_environment_gaps": sum(
+                1 for row in recheck_entries.values()
+                if _text(row.get("status"), 32).lower() == "environment-gap"),
+            "consistency_recheck_not_executed": sum(
+                1 for row in recheck_entries.values()
+                if _text(row.get("status"), 32).lower() == "not-executed"),
             "states": dict(sorted(states.items())),
             "latest_states": dict(sorted(latest_states.items())),
             "review_statuses": dict(sorted(review_statuses.items())),
@@ -683,6 +740,7 @@ def build_research_portfolio(
         "surface_lane_coverage": surface_lane_coverage,
         "consistency": consistency,
         "consistency_actions": consistency_actions,
+        "consistency_rechecks": consistency_rechecks,
         "next_probes": next_candidates[:MAX_NEXT_PROBES],
         "benchmark": benchmark,
         "claim_status": PORTFOLIO_CLAIM_STATUS,
@@ -702,6 +760,9 @@ def normalize_research_portfolio(raw: Any) -> Dict[str, Any]:
         "pending_residuals", "resolved_residuals",
         "consistency_conflicted", "consistency_unstable",
         "consistency_environment_gaps", "consistency_insufficient",
+        "consistency_recheck_observed", "consistency_recheck_partial",
+        "consistency_recheck_environment_gaps",
+        "consistency_recheck_not_executed",
     ):
         result["summary"][key] = _safe_int(summary.get(key), 0, 0, 1000000)
     for key in ("states", "latest_states", "review_statuses"):
@@ -720,6 +781,10 @@ def normalize_research_portfolio(raw: Any) -> Dict[str, Any]:
         raw.get("consistency_actions"))
     if consistency_actions:
         result["consistency_actions"] = consistency_actions
+    consistency_rechecks = normalize_research_consistency_rechecks(
+        raw.get("consistency_rechecks"))
+    if consistency_rechecks:
+        result["consistency_rechecks"] = consistency_rechecks
     for dimension in DIMENSIONS:
         rows = []
         for raw_row in (raw.get("dimensions") or {}).get(dimension, []) \
@@ -812,6 +877,17 @@ def normalize_research_portfolio(raw: Any) -> Dict[str, Any]:
             })
             if action.get("entries"):
                 probe["consistency_action"] = action["entries"][0]
+        recheck_status = _text(
+            raw_probe.get("consistency_recheck_status"), 32).lower()
+        if recheck_status in {"observed", "partial", "environment-gap",
+                              "not-executed"}:
+            probe["consistency_recheck_status"] = recheck_status
+            probe["consistency_recheck_missing_observations"] = \
+                _bounded_strings(raw_probe.get(
+                    "consistency_recheck_missing_observations"), MAX_HINTS, 96)
+            probe["consistency_recheck_pending_falsifiers"] = \
+                _bounded_strings(raw_probe.get(
+                    "consistency_recheck_pending_falsifiers"), MAX_HINTS, 120)
         if probe["research_key"] and probe["state"]:
             probes.append(probe)
     result["next_probes"] = probes[:MAX_NEXT_PROBES]

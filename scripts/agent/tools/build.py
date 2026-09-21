@@ -23,6 +23,7 @@ from ..sandbox.approval import ApprovalGate
 from ..sandbox.runner import CommandRunner, RunResult, minimal_poc_env
 from ..evaluation.research_consistency_actions import (
     normalize_research_consistency_action,
+    normalize_research_consistency_lane,
 )
 from .authz import (assert_authz_observations, authz_env, authz_fixture_id,
                     authz_jvm_props, normalize_authz_case)
@@ -112,6 +113,9 @@ class MatrixCell:
     # Cross-round contradiction recheck contract.  This is scheduling
     # metadata only; it is not an observation or a finding.
     consistency_action: Dict[str, Any] = field(default_factory=dict)
+    # The runtime lab materializes the action's paired lane here.  The label
+    # is only an execution selector; the PoC must still emit observations.
+    consistency_lane: str = ""
     experiment_warnings: List[str] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
@@ -126,6 +130,8 @@ class MatrixCell:
             self.variant_context)
         self.consistency_action = normalize_research_consistency_action(
             self.consistency_action)
+        self.consistency_lane = normalize_research_consistency_lane(
+            self.consistency_lane)
 
 
 def _cell_experiment_env(cell: MatrixCell) -> Dict[str, str]:
@@ -156,6 +162,7 @@ def _cell_experiment_env(cell: MatrixCell) -> Dict[str, str]:
         "VULNGATE_CONSISTENCY_ACTION": json.dumps(
             normalize_research_consistency_action(cell.consistency_action),
             ensure_ascii=False, separators=(",", ":")),
+        "VULNGATE_CONSISTENCY_LANE": cell.consistency_lane,
     }
     variant = normalize_variant_fixture_context(cell.variant_context)
     if variant:
@@ -189,6 +196,8 @@ def _cell_metadata(cell: MatrixCell) -> Dict[str, Any]:
             cell.variant_context),
         "consistency_action": normalize_research_consistency_action(
             cell.consistency_action),
+        "consistency_lane": normalize_research_consistency_lane(
+            cell.consistency_lane),
         "experiment": meta,
     }
 

@@ -632,6 +632,31 @@ replay-pack artifacts remain `claim_status=not-a-finding` and cannot change
 candidate status, CVSS, G4, or G5. Do not persist source prose, payloads,
 commands, stdout/stderr, credentials, or finding conclusions in the contract.
 
+S8 also verifies executed closure with `research-consistency-recheck-v1`. S4
+materializes the action's positive/negative or environment-gap lane and passes
+only the bounded `VULNGATE_CONSISTENCY_LANE` selector to the PoC. Lane fixtures
+must retain a common base context digest while using distinct lane identities.
+Before normalization, S4 may extract only allowlisted witnesses: execution or
+environment status, independent replay count, typed-effect or safe-equivalent,
+explicit state reset, comparison-arm status, and fixture/context identity.
+The closure artifact must not contain raw stdout/stderr, commands, payloads,
+credentials, or source prose.
+
+The `research-consistency-rechecks` artifact and CLI distinguish
+`observed`, `partial`, `environment-gap`, and `not-executed`. Only complete
+expected lanes, repeat count, fixture/context lock, comparison status, and
+required observations stop duplicate scheduling; otherwise portfolio keeps a
+bounded follow-up probe. Use:
+
+```bash
+python3 scripts/agent_cli.py research-consistency-rechecks <target> \
+  --workspace <audit-dir> [--round N] [--rebuild] [--json]
+```
+
+This closure remains `claim_status=not-a-finding` and cannot confirm a
+finding, turn an environment gap into negative evidence, or change candidate
+status, CVSS, G4, or G5.
+
 S3 residuals are carried across the same boundary as pending research debt.
 Memory stores only controlled kind/reason codes, bounded source locations, a
 probe digest, and whether a bounded probe plan exists. The portfolio emits one
@@ -1496,6 +1521,26 @@ S8 还会从有界、归一化的 `research-memory` 事件生成
 S8 还会为每个非一致历史生成 `research-consistency-action-v1`。可用
 `python3 scripts/agent_cli.py research-consistency-actions <target> --workspace <dir> [--rebuild] [--json]`
 查看或重建。每个 action 只包含 allowlist 隔离轴、正/负向或环境缺口 lane、有界重复形状、required observation code 和 falsifier code。S2 按稳定 `research_key` 匹配并生成 `consistency-recheck` 计划；S4 将归一化契约传入 MatrixCell、`VULNGATE_CONSISTENCY_ACTION`、runtime-lab fixture 和 replay/differential cell。缺少独立重放、fixture/context 不一致、状态未重置或签名漂移时，研究项继续 pending。action、portfolio、strategy 和 replay pack 都保持 `claim_status=not-a-finding`，不能改变 candidate status、CVSS、G4 或 G5；契约不得保存源码原文、payload、命令、stdout/stderr、凭据或漏洞结论。
+
+S8 还会验证复核是否真正闭合，产出 `research-consistency-recheck-v1`。S4 按 action 的
+`matrix_shape` 展开 positive/negative 或 environment-gap lane，并只向 PoC 暴露有界的
+`VULNGATE_CONSISTENCY_LANE`；lane fixture 使用不同 identity，但必须保留相同的基础
+context digest。runner row 归一化前只能提取执行/环境状态、独立 replay 次数、typed-effect
+或 safe-equivalent、显式 state reset、comparison arm 和 fixture/context identity；closure
+artifact 不得保存 raw stdout/stderr、命令、payload、凭据或源码原文。
+
+`research-consistency-rechecks` artifact 与 CLI 严格区分 `observed`、`partial`、
+`environment-gap` 和 `not-executed`。只有预期 lane、重复次数、fixture/context 锁、comparison
+和 required observations 全部有实际 witness 时才停止重复调度；否则 portfolio 继续给出有界
+follow-up probe。可用：
+
+```bash
+python3 scripts/agent_cli.py research-consistency-rechecks <target> \
+  --workspace <audit-dir> [--round N] [--rebuild] [--json]
+```
+
+该 closure 仍保持 `claim_status=not-a-finding`，不能确认漏洞、把环境缺口变成负证据，或改变
+candidate status、CVSS、G4、G5。
 
 S2 还会写出有界的 `research-strategy-v1`：目标级为
 `state/<target>/coverage/research-strategy.json`，轮次快照为 `S2/research-strategy.json`。它将

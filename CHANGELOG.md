@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added `research-consistency-recheck-v1` execution closure. S4 now expands a
+  pending consistency action into bounded positive/negative or environment-gap
+  lanes and records replay count, fixture/context identity, comparison status,
+  state-reset, typed-effect/safe-equivalent and environment witnesses without
+  persisting raw process data. S8, the portfolio, the strategy layer, replay
+  packs, and `agent_cli.py research-consistency-rechecks` distinguish observed,
+  partial, environment-gap, and not-executed closure; all metadata remains
+  `not-a-finding` and cannot change candidate status, CVSS, G4, or G5.
+
 - Added `research-consistency-v1` for bounded cross-round evidence checks.
   `agent_cli.py research-consistency` compares effect, reproduction, comparison,
   runtime-state, and context classifications from `research-memory`, while

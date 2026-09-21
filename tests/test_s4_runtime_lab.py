@@ -123,6 +123,83 @@ class S4RuntimeLabTests(unittest.TestCase):
         self.assertEqual(FakeJavaRunner.calls[1][2]["1.0"], [Path("a.jar")])
         self.assertEqual(item["claim_status"], "not-a-finding")
 
+    def test_consistency_action_materializes_paired_runtime_lanes(self):
+        class FakeJavaRunner:
+            calls = []
+
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def run_manifest(self, specs, _jars):
+                spec = specs[0]
+                self.calls.append(spec.cells)
+                return {spec.candidate_id: [{
+                    "candidate_id": spec.candidate_id,
+                    "poc_class": spec.class_name,
+                    "version": cell.version,
+                    "safe_mode": cell.safe_mode,
+                    "precondition": cell.precondition,
+                    "returncode": 0,
+                    "timed_out": False,
+                    "observations": {
+                        "PARSED": "ok",
+                        "EFFECT_KIND": "canary",
+                        "EFFECT": "shape-only",
+                        "STATE_RESET": "yes",
+                    },
+                } for cell in spec.cells]}
+
+        action = {
+            "research_key": "rk-recheck",
+            "candidate_id": "C1",
+            "status": "conflicted",
+            "conflict_codes": ["effect-presence-drift"],
+        }
+        candidate = {
+            "candidate_id": "C1", "entry": "parse",
+            "experiment_plan": {"consistency_action": action},
+        }
+        cfg = TargetConfig(
+            name="consistency-lab", discovery_date="2026-09-21",
+            runtime_lab={"max_fixtures": 2, "replay_runs": 2,
+                         "safe_modes": [False]},
+        )
+        spec = POCSpec(
+            candidate_id="C1", class_name="Probe", src="Probe.java",
+            cells=[MatrixCell(version="1.0", safe_mode=False,
+                              consistency_action=action)],
+        )
+        FakeJavaRunner.calls = []
+        with tempfile.TemporaryDirectory() as td, patch(
+                "agent.tools.s4_runtime_lab.JavaMatrixRunner", FakeJavaRunner):
+            artifact = run_s4_runtime_lab(
+                Path(td), "consistency-lab", 1, cfg, [candidate], [spec], [],
+                {"1.0": [Path("a.jar")]}, version_universe=["1.0"],
+            )
+        self.assertEqual(2, artifact["fixture_count"])
+        self.assertEqual({"positive", "negative"}, {
+            row["fixture"]["consistency_lane"]
+            for row in artifact["fixtures"]
+        })
+        self.assertNotEqual(
+            artifact["fixtures"][0]["fixture"]["fixture_id"],
+            artifact["fixtures"][1]["fixture"]["fixture_id"],
+        )
+        self.assertEqual(
+            artifact["fixtures"][0]["fixture"]["context_digest"],
+            artifact["fixtures"][1]["fixture"]["context_digest"],
+        )
+        self.assertTrue(all(
+            item["consistency_recheck"]["replay_attempts"] == 2
+            for item in artifact["fixtures"]
+        ))
+        self.assertEqual("positive",
+                         _cell_experiment_env(MatrixCell(
+                             version="1.0", safe_mode=False,
+                             consistency_action=action,
+                             consistency_lane="positive"))[
+                                 "VULNGATE_CONSISTENCY_LANE"])
+
     def test_target_can_disable_non_repeatable_fixture_lab(self):
         cfg = TargetConfig(
             name="disabled-lab", discovery_date="2026-09-21",

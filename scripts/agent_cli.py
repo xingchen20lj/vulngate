@@ -33,6 +33,7 @@ Usage:
                               [--benchmark-feedback <json>] [--json]
   agent_cli.py research-consistency <target> --workspace <dir> [--rebuild] [--json]
   agent_cli.py research-consistency-actions <target> --workspace <dir> [--rebuild] [--json]
+  agent_cli.py research-consistency-rechecks <target> --workspace <dir> [--rebuild] [--json]
   agent_cli.py research-strategy <target> --workspace <dir> [--rebuild]
                                [--benchmark-feedback <json>] [--json]
   agent_cli.py coverage <target> [--workspace <dir>] [--rebuild] [--show-uncovered]
@@ -1024,6 +1025,82 @@ def cmd_research_consistency_actions(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_research_consistency_rechecks(args: argparse.Namespace) -> int:
+    """Show or rebuild bounded S4 execution closure for consistency actions."""
+    from agent.evaluation.research_consistency_actions import (
+        load_research_consistency_actions,
+    )
+    from agent.evaluation.research_consistency_rechecks import (
+        build_research_consistency_rechecks,
+        load_research_consistency_rechecks,
+        rechecks_path,
+        write_research_consistency_rechecks,
+    )
+    from agent.tools.s4_runtime_lab import LAB_SCHEMA_VERSION
+
+    workspace = Path(args.workspace).resolve()
+    rechecks = load_research_consistency_rechecks(workspace, args.target)
+    if args.rebuild or not rechecks:
+        runtime_path = (workspace / "state" / args.target /
+                        ("round-%02d" % args.round) / "S4" /
+                        "runtime-lab.json") if args.round else None
+        runtime = {}
+        if runtime_path is not None:
+            try:
+                runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ValueError, TypeError):
+                runtime = {}
+        else:
+            # Rebuild from the newest bounded runtime-lab artifact only.  The
+            # command never scans matrix-runs or reads raw process output.
+            rounds = sorted((workspace / "state" / args.target).glob(
+                "round-*/S4/runtime-lab.json"))
+            if rounds:
+                try:
+                    runtime = json.loads(rounds[-1].read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, ValueError, TypeError):
+                    runtime = {}
+        if not isinstance(runtime, dict):
+            runtime = {"schema_version": LAB_SCHEMA_VERSION,
+                       "status": "not-executed", "fixtures": []}
+        rechecks = build_research_consistency_rechecks(
+            runtime, load_research_consistency_actions(workspace, args.target))
+        write_research_consistency_rechecks(workspace, args.target, rechecks)
+    if not rechecks:
+        _out({"error": "research consistency rechecks artifact not found",
+              "hint": "run an S8 round or pass --rebuild",
+              "artifact": str(rechecks_path(
+                  workspace, args.target))})
+        return 2
+    payload = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "artifact": str(rechecks_path(
+            workspace, args.target).relative_to(workspace)),
+        "rechecks": rechecks,
+    }
+    if args.json:
+        _out(payload)
+    else:
+        summary = rechecks.get("summary", {})
+        print("research consistency rechecks: %s" % payload["artifact"])
+        print("  entries=%s observed=%s partial=%s environment_gap=%s "
+              "not_executed=%s claim_status=%s" % (
+                  summary.get("entry_count", 0), summary.get("observed", 0),
+                  summary.get("partial", 0), summary.get("environment_gap", 0),
+                  summary.get("not_executed", 0),
+                  rechecks.get("claim_status", "not-a-finding")))
+        for row in rechecks.get("entries") or []:
+            if not isinstance(row, dict):
+                continue
+            print("  recheck: %s [%s] lanes=%s missing=%s" % (
+                row.get("candidate_id") or row.get("research_key"),
+                row.get("status"),
+                ",".join(row.get("observed_lanes") or []) or "-",
+                ",".join(row.get("missing_observations") or []) or "-"))
+    return 0
+
+
 def cmd_coverage(args: argparse.Namespace) -> int:
     """Security audit coverage report (spec §16).
 
@@ -1916,6 +1993,21 @@ def build_parser() -> argparse.ArgumentParser:
     rca.add_argument("--json", action="store_true",
                      help="machine-readable output")
     rca.set_defaults(fn=cmd_research_consistency_actions)
+
+    rcr = sub.add_parser(
+        "research-consistency-rechecks",
+        help="show or rebuild bounded S4 closure for consistency rechecks",
+    )
+    rcr.add_argument("target", help="target name (state/<target>/...)")
+    rcr.add_argument("--workspace", required=True,
+                     help="workspace root containing state/<target>/")
+    rcr.add_argument("--round", type=int, default=0,
+                     help="specific round to rebuild; default: newest runtime-lab")
+    rcr.add_argument("--rebuild", action="store_true",
+                     help="rebuild from a bounded runtime-lab artifact")
+    rcr.add_argument("--json", action="store_true",
+                     help="machine-readable output")
+    rcr.set_defaults(fn=cmd_research_consistency_rechecks)
 
     rs = sub.add_parser(
         "research-strategy",

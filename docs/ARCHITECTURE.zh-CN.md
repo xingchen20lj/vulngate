@@ -138,6 +138,28 @@ python3 scripts/agent_cli.py research-consistency-actions <target> \
 
 S2 按稳定 `research_key` 匹配 action，生成 `consistency-recheck` 计划；S4 将归一化契约传入 MatrixCell、`VULNGATE_CONSISTENCY_ACTION`、普通 runtime-lab fixture 以及 replay/differential cell。它仍只是检查清单，不是观测：缺少独立重放、fixture/context 不一致、状态未重置或只有签名漂移时，研究项继续保持 pending。action、portfolio、strategy 和 replay pack 都保持 `claim_status=not-a-finding`，不能改变 candidate status、CVSS、G4 或 G5。
 
+阶段 30 增加 `research-consistency-recheck-v1` 执行闭合。S4 按 action 的
+`matrix_shape` 真正展开 positive/negative 或 environment-gap lane，并通过
+`VULNGATE_CONSISTENCY_LANE` 把有界 lane 选择器交给 PoC；每个 lane 使用独立
+fixture identity，但保留相同的基础 context digest。runner row 在内存中时只提取
+执行/环境状态、独立 replay 次数、typed-effect/safe-equivalent、显式 state reset、
+comparison arm 和 fixture/context identity，不能把 raw stdout/stderr、命令、payload、
+凭据或 source prose 写进 closure artifact。
+
+S8 使用上一轮 pending action 与本轮 `S4/runtime-lab.json` 生成
+`research-consistency-rechecks.json`，严格区分 `observed`、`partial`、
+`environment-gap` 和 `not-executed`。只有预期 lane、重复次数、fixture/context 锁、
+comparison 和 required observations 全部实际闭合时才停止该条目的重复调度；否则
+portfolio 继续给出 bounded probe。可用下面命令检查：
+
+```bash
+python3 scripts/agent_cli.py research-consistency-rechecks <target> \
+  --workspace <audit-dir> --json
+```
+
+该 closure 仍是 `not-a-finding` 研究元数据，不确认漏洞、不降低环境缺口，也不能改变
+candidate status、CVSS、G4 或 G5。
+
 S1 中包含授权边界和危险 Sink 的启发式 Source→Sink 路径会写入
 `composite-chain-candidates.json`，并在 S2 进入与模型候选、控制图候选、同族差分候选相同的调度池。它们始终保留
 `heuristic-nearby` / `requires_manual_dataflow=true`，只能作为审计和 PoC
