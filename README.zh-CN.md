@@ -97,6 +97,7 @@ Evidence Gates
 - **受控一致性复核** —— `research-consistency-action-v1` 将非一致历史物化为固定隔离轴、正/负向 lane、required observations、falsifiers 和 S2 `consistency-recheck` 计划；S4 会在 MatrixCell、PoC 环境和 runtime-lab fixture 中传递该契约，但始终保持 `not-a-finding`。
 - **能力原语与攻击路径图** —— S1 从 entry/sink/flow 索引生成有界 `read` / `write` / `exec` / `ssrf` 等能力链候选，区分已观察与缺失原语，并自动生成最小验证序列；链路始终保持 `not-a-finding`，等待数据流与运行时 typed effect 证据。
 - **语义路径证据** —— S1 增加 `semantic-path-evidence-v1`，检查路径控制是否位于 sink 之前且处于同一语义块，并在同一符号内做有界的参数/别名数据流追踪；跨符号、分支支配和类型语义继续保留为研究缺口，所有线索仍是 `not-a-finding`。
+- **语义守卫证据** —— S1 增加 `semantic-guard-evidence-v1`，记录有限的拒绝分支姿态和 subject/object 绑定（`terminating-guard`、`nested-branch`、`non-branch-check`、`overlap`、`mismatch`、`unresolved`），用于优先安排授权/逻辑复核，但不把词法证据当作分支支配或对象身份证明。
 - **能力链运行时契约** —— 能力候选会把有界 `capability_contract` 传入 S4 cell；`CAPABILITY`/`TRANSITION` 轨迹会被分类为 `no-trace`、`partial` 或 `complete`，终点 typed effect 仍单独要求真实证据。
 - **运行时研究实验室** —— 定向 fuzz 输入会固化为 corpus fixture 和缩减 reproducer；有界重放与版本 × SafeMode 对照会保留稳定性、差分、签名漂移和前置缺口证据，但不会直接升级为漏洞结论。
 - **普通 S4 fixture 适配器** —— Java 与 Shell PoC cell 可固化为脱敏执行 fixture 并有界重放；`S4/runtime-lab.json` 将稳定性、版本/SafeMode 差异和 harness 缺口与 G4/G5 结论分开。
@@ -129,6 +130,7 @@ Evidence Gates
 - 启发式符号、调用图，以及入口到 sink 的正向/反向路径。
 - 逐路径安全控制缺口和同族 handler 差分；产出候选线索，等待验证。
 - 独立的语义路径证据索引：控制顺序、语义块关系和同符号参数/别名可达性；结果会作为 S2 研究候选，但不会冒充严格数据流证明。
+- 有界的语义守卫证据索引：分支姿态与 subject/object 绑定；结果单独落盘并作为 `not-a-finding` 的 S2 研究候选。
 - 能力原语图与显式攻击链方程；保留缺失中间能力，不把静态组合直接升级为 RCE。
 - 按证据评分、类别配额调度候选，延期工作保留到后续轮次。
 - macOS `.app`/`.dmg`/`.pkg`、Mach-O 元数据、Electron ASAR/source map 与 JAR 视图。
@@ -140,6 +142,7 @@ python3 scripts/agent_cli.py controls demo --workspace /path/to/audit --show-can
 python3 scripts/agent_cli.py differential demo --workspace /path/to/audit --show-candidates
 python3 scripts/agent_cli.py capability demo --workspace /path/to/audit --show-candidates
 python3 scripts/agent_cli.py semantic-paths demo --workspace /path/to/audit --show-candidates
+python3 scripts/agent_cli.py semantic-guards demo --workspace /path/to/audit --show-candidates
 python3 scripts/agent_cli.py benchmark --manifest benchmarks/research-benchmark-v1.json \
   --run benchmarks/research-benchmark-sample-run.json \
   --feedback-out state/research-benchmark-feedback.json --json
@@ -209,7 +212,7 @@ npm install -g @openai/codex
 
 | 阶段 | 目的 | 代表性输出 | 闸门 |
 |---|---|---|---|
-| S1 | 攻击面、入口、危险调用点、修复历史/变体、项目画像、目标类型规则、复合攻击链、能力原语、语义路径证据与攻击路径威胁模型 | `S1/entry-inventory.json`、`S1/security-fix-history.json`、`S1/patch-variants.json`、`S1/project-profile.json`、`S1/target-rules.json`、`S1/composite-chain-candidates.json`、`S1/capability-graph.json`、`S1/capability-candidates.json`、`S1/semantic-path-evidence.json`、`S1/semantic-path-candidates.json`、`S1/threat-model.json` | G0 死代码、G1 可达性 |
+| S1 | 攻击面、入口、危险调用点、修复历史/变体、项目画像、目标类型规则、复合攻击链、能力原语、语义路径/守卫证据与攻击路径威胁模型 | `S1/entry-inventory.json`、`S1/security-fix-history.json`、`S1/patch-variants.json`、`S1/project-profile.json`、`S1/target-rules.json`、`S1/composite-chain-candidates.json`、`S1/capability-graph.json`、`S1/capability-candidates.json`、`S1/semantic-path-evidence.json`、`S1/semantic-path-candidates.json`、`S1/semantic-guard-evidence.json`、`S1/semantic-guard-candidates.json`、`S1/threat-model.json` | G0 死代码、G1 可达性 |
 | S2 | 候选矩阵、可证伪研究计划、受控一致性复核与跨产物研究策略：surface × entry × input × mechanism | `S2/candidate-matrix.json`、`S2/experiment-plans.json`、`S2/research-strategy.json` | — |
 | S3 | 带 file:line 证据的源码审计、Source→Sink hints、residuals | `S3/audit-notes.json`、`S3/residuals.json` | G1b 默认配置门控 |
 | S4 | PoC 矩阵：版本 × safe mode × 前置条件；可选 authz、有界状态/并发、能力 transition、一致性复核契约与重放/差分实验室 | `S4/matrix-runs/<c>/cells.json`、`S4/execution-status.json`、`S4/authz-matrix.json`、`S4/runtime-lab.json` | G4 运行时证据 |

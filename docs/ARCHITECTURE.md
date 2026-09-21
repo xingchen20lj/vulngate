@@ -48,6 +48,25 @@ callback, or sanitizer-semantic proof. It does not copy source text, and all
 rows and derived candidates remain `claim_status=not-a-finding` for S2/S3/S4
 follow-up.
 
+The next bounded layer is `semantic-guard-evidence-v1`. It derives two review
+signals from the same flow: branch posture (`terminating-guard-likely`,
+`nested-branch-likely`, `non-branch-check`, or unresolved) and subject/object
+binding (`overlap`, `mismatch`, or unresolved). A mismatch is useful when a
+permission check appears to inspect one identifier while the sink operates on
+another, but it is not proof of an authorization bypass. The layer remains
+lexical, does not prove dominance, path feasibility, object identity, tenant
+equality, or return/exception semantics, and writes only bounded tokens and
+locations. `semantic-guard-candidates.json` is a deterministic S2 research
+lead pool; all rows remain `not-a-finding` with
+`requires_manual_dataflow=true`.
+
+Inspect it with:
+
+```bash
+python3 scripts/agent_cli.py semantic-guards <target> \
+  --workspace <audit-dir> --show-candidates --json
+```
+
 S8 also emits a bounded `research-strategy-guidance-v1` view. It joins only
 strategy observation metadata, the latest review status, and explicit variant
 coverage, then maps them to finite next-action classes. Guidance can adjust

@@ -49,6 +49,7 @@
 | 32 | 主动议程执行反馈与预算闭环 | 已实现（bounded agenda outcome feedback） | `research-agenda-outcome-v1`、`research-agenda-outcomes` CLI、S8 outcome、下一轮 agenda outcome fields | 将上一轮 selected 队列与实际 schedule、S4/S8 观测对齐，区分 new-information、falsifier、no-new-information、environment-gap、not-executed；用收益反馈调整下一轮优先级，不改变候选、CVSS、G4/G5 |
 | 33 | 结果自适应研究预算分配 | 已实现（bounded outcome-cost adaptive budget） | `research-budget-v1`、`research-budget` CLI、S8 surface budget、agenda budget hints、replay pack provenance | 按 research surface 汇总成本、信息增益、环境缺口和无信息重复；产生 recovery/exploit/explore/cooldown 策略并影响下一轮有限预算，保留探索与假设，不改变候选、CVSS、G4/G5 |
 | 34 | 语义路径证据与有限同符号数据流 | 已实现（bounded semantic path evidence） | `semantic-path-evidence-v1`、`semantic-path-evidence.json`、`semantic-path-candidates.json`、`semantic-paths` CLI | 区分控制在 sink 前/后/同一行及语义块关系；对同符号参数/简单别名给出 direct/propagated/not-traced，跨符号明确 unresolved；不复制源码、不升级 candidate/CVSS/G4/G5 |
+| 35 | 语义守卫姿态与主体绑定 | 已实现（bounded semantic guard evidence） | `semantic-guard-evidence-v1`、`semantic-guard-evidence.json`、`semantic-guard-candidates.json`、`semantic-guards` CLI | 区分 terminating/nested/non-branch/未解析分支姿态及 overlap/mismatch/unresolved 主体绑定；只生成 `not-a-finding` 研究线索，不声称 branch dominance、对象身份或授权绕过 |
 
 ## 已实现基础：可证伪实验规划
 
@@ -534,3 +535,12 @@ S2→S4→S8 的单向契约：
 - 对 static control map 已经认为存在控制、但顺序/语义块未对齐的路径，生成 `semantic-control-order`；对中高风险同符号路径未能闭合参数到 sink 的线索，生成 `semantic-dataflow-gap`。这些候选进入 S2 静态候选池，并保持稳定 ID、`requires_manual_dataflow=true` 和明确代码位置；
 - 产物不保存源码原文，不建模 branch dominance、类型、virtual dispatch、DI、reflection、callback 或 sanitizer 语义。所有行、summary 和候选保持 `claim_status=not-a-finding`、`confidence=heuristic-nearby`、`evidence_type=static-inferred`，S3/S4 仍必须补真实路径、授权和 typed-effect 证据；
 - 可用 `python3 scripts/agent_cli.py semantic-paths <target> --workspace <audit-dir> --show-candidates --json` 查看。覆盖索引发现缺少该 artifact 时会自动重建，autonomous/config-driven 两条管线使用同一份候选源。
+
+## 阶段 35 初步实现：语义守卫姿态与主体绑定
+
+阶段 34 已经能回答控制是否位于 sink 之前、同一有限语义块，以及有限的同符号参数是否接近 sink；但顶级代码审计还需要把“附近的检查”拆成两个更可操作的复核问题：它是否看起来在拒绝路径上保护了 sink 所在分支？它检查的主体或对象是否就是 sink 实际操作的那个？阶段 35 增加独立的 `semantic-guard-evidence-v1`：
+
+- 对每条 semantic flow 记录有限的 branch posture：`terminating-guard-likely`、`nested-branch-likely`、`non-branch-check`、`branch-unresolved`、`after-sink` 与 `cross-symbol-unverified`；这只是源码形状证据，不证明 dominance、路径可行性或返回/异常语义；
+- 对控制和 sink 的有限 identifier token 做 subject/object binding：`overlap`、`mismatch`、`unresolved`、`cross-symbol-unverified`。`mismatch` 只表示值得人工追踪“检查了 A、操作了 B”，不表示已经存在越权；
+- 对满足基础控制图前置条件的路径生成 `semantic-subject-binding` 与 `semantic-branch-posture` 线索，写入完整静态候选池，同时保留稳定 ID、位置、`requires_manual_dataflow=true` 和 `claim_status=not-a-finding`；
+- 产物与 CLI 为 `state/<target>/coverage/semantic-guard-evidence.json`、`semantic-guard-candidates.json` 和 `python3 scripts/agent_cli.py semantic-guards <target> --workspace <audit-dir> --show-candidates --json`。两条 pipeline 共用同一份索引；后续可用 CFG、类型、DI 和运行时授权证据替换启发式层，而不改变既有闸门。

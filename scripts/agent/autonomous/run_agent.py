@@ -425,6 +425,7 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
     """
     from ..analysis import capability_graph as capability
     from ..analysis import coverage as cov
+    from ..analysis import semantic_guards as semantic_guard
     from ..analysis import semantic_paths as semantic
     from ..analysis import threat_model as threat_model_analysis
     from ..analysis.inventory import (CoverageStore, build_inventory,
@@ -433,10 +434,13 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
     store = CoverageStore(ctx.root, ctx.cfg.name)
     if (store.path(capability.CAPABILITY_GRAPH_INDEX).exists()
             and store.path(threat_model_analysis.THREAT_MODEL_INDEX).exists()
-            and store.path(semantic.SEMANTIC_PATH_INDEX).exists()):
+            and store.path(semantic.SEMANTIC_PATH_INDEX).exists()
+            and store.path(semantic_guard.SEMANTIC_GUARD_INDEX).exists()):
         return {"rebuilt": False, "graph": capability.load_capability_graph(store),
                 "candidates": capability.load_capability_candidates(store),
                 "semantic": semantic.load_semantic_evidence(store),
+                "semantic_guards": semantic_guard.load_semantic_guards(store),
+                "semantic_guard_candidates": semantic_guard.load_semantic_guard_candidates(store),
                 "threat_model": threat_model_analysis.load_threat_model(
                     ctx.root, ctx.cfg.name)}
 
@@ -457,6 +461,8 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
                 "graph": capability.load_capability_graph(store),
                 "candidates": capability.load_capability_candidates(store),
                 "semantic": semantic.load_semantic_evidence(store),
+                "semantic_guards": semantic_guard.load_semantic_guards(store),
+                "semantic_guard_candidates": semantic_guard.load_semantic_guard_candidates(store),
                 "threat_model": threat_model_analysis.load_threat_model(
                     ctx.root, ctx.cfg.name),
                 "root": str(target_root)}
@@ -464,6 +470,8 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
         return {"rebuilt": False,
                 "error": "%s: %s" % (type(exc).__name__, exc),
                 "graph": {}, "candidates": [], "semantic": {},
+                "semantic_guards": {},
+                "semantic_guard_candidates": [],
                 "threat_model": {}}
 
 
@@ -1655,6 +1663,10 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                        capability_state.get("candidates") or [])
     ctx.write_artifact(round_no, "S1", "threat-model.json",
                        capability_state.get("threat_model") or {})
+    ctx.write_artifact(round_no, "S1", "semantic-guard-evidence.json",
+                       capability_state.get("semantic_guards") or {})
+    ctx.write_artifact(round_no, "S1", "semantic-guard-candidates.json",
+                       capability_state.get("semantic_guard_candidates") or [])
     if capability_state.get("error"):
         ctx.write_artifact(round_no, "S1", "capability-graph-error.json", {
             "error": capability_state["error"]})

@@ -44,6 +44,10 @@ Usage:
                            [--module <prefix>] [--lang zh|en]
   agent_cli.py capability <target> [--workspace <dir>] [--rebuild]
                              [--show-candidates] [--json]
+  agent_cli.py semantic-paths <target> [--workspace <dir>] [--rebuild]
+                               [--show-candidates] [--json]
+  agent_cli.py semantic-guards <target> [--workspace <dir>] [--rebuild]
+                                [--show-candidates] [--json]
   agent_cli.py threat-model <target> [--workspace <dir>] [--rebuild]
                                 [--json]
   agent_cli.py spawn-probe --workspace <dir> --target <name> --round <N>
@@ -1313,7 +1317,7 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     need_build = args.rebuild or any(
         not store.path(name).exists()
         for name in ("source-inventory", "symbol-index", "flow-index",
-                     "semantic-path-evidence"))
+                     "semantic-path-evidence", "semantic-guard-evidence"))
     if need_build:
         root = Path(args.root).resolve() if args.root else (
             workspace / "targets" / target)
@@ -1347,6 +1351,8 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     callgraph_summary = store.read("call-graph-summary") or {}
     flow_summary = store.read("flow-summary") or {}
     semantic_summary = (store.read("semantic-path-evidence") or {}).get("summary") or {}
+    semantic_guard_summary = (store.read("semantic-guard-evidence") or {}).get(
+        "summary") or {}
     if callgraph_summary or flow_summary:
         print("\n%s" % ("跨过程分析" if args.lang == "zh" else "Cross-procedural analysis"))
         print("─" * 46)
@@ -1379,6 +1385,18 @@ def cmd_coverage(args: argparse.Namespace) -> int:
         print("  taint %s  verdicts %s"
               % (semantic_summary.get("taint_status") or {},
                  semantic_summary.get("semantic_verdicts") or {}))
+    if semantic_guard_summary:
+        print("\n%s" % ("语义守卫证据" if args.lang == "zh"
+                        else "Semantic guard evidence"))
+        print("─" * 46)
+        print("  flows %s  branch gaps %s  subject gaps %s  candidates %s"
+              % (semantic_guard_summary.get("flows", 0),
+                 semantic_guard_summary.get("flows_with_branch_gaps", 0),
+                 semantic_guard_summary.get("flows_with_subject_binding_gaps", 0),
+                 semantic_guard_summary.get("candidates", 0)))
+        print("  postures %s  binding %s"
+              % (semantic_guard_summary.get("branch_postures") or {},
+                 semantic_guard_summary.get("subject_binding") or {}))
     if args.schedule:
         from agent.analysis import scheduler as sched
         plan_payload = sched.load_schedule(store)
@@ -1764,6 +1782,55 @@ def cmd_semantic_paths(args: argparse.Namespace) -> int:
 
     print(semantic.render_semantic_paths_text(evidence, args.lang, limit=args.limit))
     if args.show_candidates and not args.json:
+        print("\n%s" % ("待验证线索详情" if args.lang == "zh"
+                        else "Verification lead details"))
+        print("─" * 52)
+        for candidate in candidates[:max(0, args.limit)]:
+            print("  %-22s %s" % (candidate.get("candidate_id", ""),
+                                  candidate.get("hypothesis", "")))
+    if rebuilt is not None:
+        print("\n[index rebuilt from %s]" % rebuilt["root"])
+    return 0
+
+
+def cmd_semantic_guards(args: argparse.Namespace) -> int:
+    """Show bounded branch-posture and subject-binding evidence.
+
+    These rows help an expert choose the next trace, but do not prove branch
+    dominance, object identity, an authorization bypass, or any finding.
+    """
+    from agent.analysis import semantic_guards as semantic_guard
+
+    try:
+        workspace, store, rebuilt, _ = _ensure_coverage_analysis(
+            args, (semantic_guard.SEMANTIC_GUARD_INDEX,))
+    except FileNotFoundError as exc:
+        _out({"error": "target source root not found", "root": str(exc),
+              "hint": "pass --root <src root> (with --rebuild) or run S1 first"})
+        return 2
+
+    evidence = semantic_guard.load_semantic_guards(store)
+    candidates = semantic_guard.load_semantic_guard_candidates(store)
+    if args.limit_candidates:
+        candidates = candidates[:args.limit_candidates]
+    payload: Dict[str, Any] = {
+        "target": args.target,
+        "workspace": str(workspace),
+        "summary": evidence.get("summary") or {},
+        "candidates": candidates,
+        "claim_status": evidence.get("claim_status", "not-a-finding"),
+        "limitations": evidence.get("limitations") or [],
+    }
+    if rebuilt is not None:
+        payload["rebuilt"] = rebuilt
+    if args.json:
+        payload["flows"] = (evidence.get("flows") or [])[:max(0, args.limit)]
+        _out(payload)
+        return 0
+
+    print(semantic_guard.render_semantic_guards_text(
+        evidence, args.lang, limit=args.limit))
+    if args.show_candidates:
         print("\n%s" % ("待验证线索详情" if args.lang == "zh"
                         else "Verification lead details"))
         print("─" * 52)
@@ -2457,6 +2524,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_analysis_args(sem)
     sem.set_defaults(fn=cmd_semantic_paths)
+
+    sg = sub.add_parser(
+        "semantic-guards",
+        help="bounded branch-posture and subject/object binding evidence; "
+             "all outputs are research leads, not findings",
+    )
+    _add_analysis_args(sg)
+    sg.set_defaults(fn=cmd_semantic_guards)
 
     tm = sub.add_parser(
         "threat-model",

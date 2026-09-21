@@ -14,6 +14,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   cross-symbol data flow, branch dominance, and all claim promotion to S3/S4.
 - Added `agent_cli.py semantic-paths` and merged semantic path leads into the
   static S2 candidate pool.
+- Added `semantic-guard-evidence-v1` and `semantic-guard-candidates.json`.
+  S1 now records bounded branch posture and subject/object binding evidence for
+  semantic flows, including terminating-guard, nested-branch, non-branch-check,
+  overlap, mismatch, and unresolved states; all leads remain `not-a-finding`.
+- Added `agent_cli.py semantic-guards` and merged guard leads into the static
+  S2 candidate pool. The new layer does not claim branch dominance, object
+  identity, authorization correctness, or a vulnerability.
 
 ### Fixed
 

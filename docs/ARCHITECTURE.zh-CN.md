@@ -226,6 +226,19 @@ S2 排序和 S3/S4 的下一步验证。产物为 `state/<target>/coverage/seman
 `semantic-path-candidates.json`，可用 `python3 scripts/agent_cli.py semantic-paths <target> --workspace <audit-dir> --json`
 查看。
 
+在此之上，`semantic-guard-evidence-v1` 增加两个有限的专家复核信号：分支姿态
+（`terminating-guard-likely`、`nested-branch-likely`、`non-branch-check` 或 unresolved）以及
+subject/object 绑定（`overlap`、`mismatch` 或 unresolved）。例如权限检查看起来检查了一个
+标识符，而 sink 实际操作另一个对象时，`mismatch` 可帮助优先安排人工追踪；但它绝不是授权绕过
+证明。该层仍是词法启发式，不证明 branch dominance、路径可达性、对象/租户身份或返回/异常语义，
+只保存有限 token 和位置；`semantic-guard-candidates.json` 只是确定性的 S2 研究线索，所有行都保持
+`not-a-finding` 与 `requires_manual_dataflow=true`。
+
+```bash
+python3 scripts/agent_cli.py semantic-guards <target> \
+  --workspace <audit-dir> --show-candidates --json
+```
+
 ## 两种运行模式
 
 | 模式 | 推理方 | 配置 | 典型用途 |

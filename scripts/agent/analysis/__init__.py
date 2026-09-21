@@ -29,6 +29,8 @@ Module map:
 ``scheduler``   coverage-aware candidate scheduling (§13/§14)
 ``differential`` sibling/differential analysis: where a family disagrees (§12)
 ``capability_graph`` bounded capability-primitive composition and research paths
+``semantic_paths`` bounded source-local control-order and same-symbol data-flow evidence
+``semantic_guards`` bounded branch-posture and subject/object binding evidence
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ __all__ = [
     "languages",
     "models",
     "scheduler",
+    "semantic_guards",
     "semantic_paths",
     "symbols",
 ]

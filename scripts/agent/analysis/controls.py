@@ -798,7 +798,7 @@ def load_control_candidates(store: Any) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def static_candidates(store: Any) -> List[Dict[str, Any]]:
-    """Every index-derived candidate: controls, differential, capability paths.
+    """Every index-derived candidate: controls, differential, paths, guards.
 
     Both are already persisted by :func:`agent.analysis.inventory.build_inventory`,
     so this is a read -- it never re-derives, and it never consults an LLM.
@@ -824,6 +824,10 @@ def static_candidates(store: Any) -> List[Dict[str, Any]]:
     # module-import cycle.
     from . import semantic_paths as semantic_path_analysis
     candidates.extend(semantic_path_analysis.load_semantic_candidates(store))
+    # Guard posture/binding leads are the next bounded semantic layer.  Keep
+    # them read-only here; inventory owns their deterministic construction.
+    from . import semantic_guards as semantic_guard_analysis
+    candidates.extend(semantic_guard_analysis.load_semantic_guard_candidates(store))
     return candidates
 
 

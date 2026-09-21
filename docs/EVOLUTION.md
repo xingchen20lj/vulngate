@@ -29,6 +29,33 @@ The candidate pool consumes these leads after the control, differential, and
 capability candidates. The order is deterministic and the raw source text is
 not copied into the artifact.
 
+## Unreleased semantic guard evidence
+
+The semantic path layer can show that a control is near a sink, but a senior
+reviewer still needs two sharper questions: does the source shape look like a
+rejecting guard for the sink's branch, and does the control mention the same
+subject/object that the sink operates on? S1 now persists
+`semantic-guard-evidence-v1` and `semantic-guard-candidates.json` for those
+bounded questions.
+
+The artifact records `terminating-guard-likely`, `nested-branch-likely`,
+`non-branch-check`, `branch-unresolved`, and explicit cross-symbol states, plus
+`overlap`, `mismatch`, `unresolved`, and `cross-symbol-unverified` subject
+binding. It does not prove control-flow dominance, path feasibility, type or
+tenant identity, or authorization correctness. Every row remains
+`claim_status=not-a-finding`, and each derived lead requires manual data-flow
+review. Use:
+
+```bash
+python3 scripts/agent_cli.py semantic-guards <target> \
+  --workspace <audit-dir> --show-candidates --json
+```
+
+The guard candidates are read-only additions to the same deterministic S2
+pool. They are intentionally separate from semantic path evidence so later
+CFG/type/DI improvements can replace the heuristic layer without changing the
+existing artifact contract.
+
 ## Analysis coverage
 
 The engine now records the complete production-source universe, explicit skip
