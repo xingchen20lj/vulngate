@@ -254,10 +254,11 @@ python3 scripts/agent_cli.py semantic-guards <target> \
   --workspace <audit-dir> --show-candidates --json
 ```
 
-`semantic-call-evidence-v1` 补上语义路径/守卫层主动保留的跨符号缺口：对 flow 上每条
+`semantic-call-evidence-v2` 补上语义路径/守卫层主动保留的跨符号缺口：对 flow 上每条
 call edge 记录调用点、实参到形参的绑定、被污染的 callee 参数和返回形状提示，再比较这些
 有限标识符是否到达 sink 参数。`bound` 只是帮助安排下一步追踪的静态证据，`not-bound` 和
-`unresolved` 仍是人工复核线索，不是安全结论。该层不解析 overload、virtual dispatch、DI、
+`unresolved` 仍是人工复核线索，不是安全结论。Java 调用点使用仅 JDK parse 的 facts，并将 parser
+标签保留在 provenance；适配器不做类型分析、类加载、annotation processing 或目标执行。该层不解析 overload、virtual dispatch、DI、
 reflection、callback、async、类型转换、变换语义、分支支配或路径可行性，也不保存源码原文；
 `semantic-call-candidates.json` 保持 `not-a-finding` 与 `requires_manual_dataflow=true`。
 
@@ -280,10 +281,10 @@ python3 scripts/agent_cli.py semantic-controlflow <target> \
   --workspace <audit-dir> --show-candidates --json
 ```
 
-`semantic-ast-evidence-v1` 是 Python 目标的语法感知补充层：每个有界 Python 文件只解析一次，记录
+`semantic-ast-evidence-v2` 是 Python/Java 目标的语法感知补充层：Python 使用 `ast`，Java 只消费 JDK parse facts，记录
 分支归属、函数/类作用域、负向条件形状、直接终止语句、`else`/异常备用路径和解析失败。它把反复的
-行号区间猜测替换为可引用的 AST 结构见证，但仍不声称完整 CFG、dominance/SSA、类型或运行时证明。
-不支持的语言和语法错误会作为明确缺口保留；`semantic-ast-candidates.json` 只包含
+行号区间猜测替换为可引用的 AST 结构见证，但仍不声称完整 CFG、dominance/SSA、类型/dispatch 或运行时证明。
+不支持的语言、Java 解析上限和语法错误会作为明确缺口保留；`semantic-ast-candidates.json` 只包含
 `not-a-finding`、`requires_manual_dataflow=true` 的研究线索，不保存源码原文或 AST dump。
 
 ```bash

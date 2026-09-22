@@ -385,6 +385,47 @@ def _python_symbols(unit: ParsedUnit) -> List[models.SymbolRecord]:
     return output
 
 
+def _java_symbols(unit: ParsedUnit) -> List[models.SymbolRecord]:
+    """Turn compiler-parser declarations into the stable symbol model.
+
+    Java overloads intentionally remain ambiguous to the name-resolved call
+    graph.  We nevertheless keep their syntax records distinct rather than
+    silently merge two declarations into one node; the line suffix is used
+    only when the compiler parser exposes duplicate qualified names.
+    """
+    declarations = unit.select("symbol")
+    duplicates = Counter(str(s.attributes.get("qualified_name") or "")
+                         for s in declarations)
+    namespace = next((str(f.attributes.get("namespace") or "")
+                      for f in declarations if f.attributes.get("namespace")), "")
+    common = dict(language="java", file=unit.file, producer="java-ast",
+                  parser=unit.parser, parse_status=unit.status,
+                  source_revision=unit.source_revision, confidence="ast",
+                  claim_status="not-a-finding")
+    output = [models.SymbolRecord(symbol_id=_symbol_id("java", unit.file),
+                                  start_line=1, end_line=max(1, unit.line_count),
+                                  kind=FILE_KIND, name=namespace or unit.file,
+                                  namespace=namespace, **common)]
+    for fact in declarations:
+        attributes = fact.attributes
+        qualified = str(attributes.get("qualified_name") or fact.name or unit.file)
+        duplicate = duplicates[qualified] > 1
+        suffix = "@%d:%d" % (fact.line, fact.column) if duplicate else ""
+        kind = str(attributes.get("symbol_kind") or "method")
+        parameters = [str(item) for item in (attributes.get("parameters") or [])
+                      if str(item)]
+        output.append(models.SymbolRecord(
+            symbol_id=_symbol_id("java", qualified + suffix),
+            start_line=fact.line, end_line=max(fact.line, fact.end_line),
+            name=fact.name, kind=kind,
+            class_name=str(attributes.get("class_name") or ""),
+            namespace=str(attributes.get("namespace") or namespace),
+            parameters=parameters,
+            analysis_gaps=["duplicate-definition"] if duplicate else [],
+            **common))
+    return output
+
+
 def extract_symbols(root: Path, rel_paths: Sequence[str],
                     source_filter: Optional[SourceFilter] = None,
                     frontend_session: Optional[FrontendSession] = None
@@ -418,13 +459,20 @@ def extract_symbols(root: Path, rel_paths: Sequence[str],
         language = suffix_owner_language(rel)
         if language is None:
             continue
-        parsed = frontend_session.parse(rel) if language == "python" else None
+        parsed = frontend_session.parse(rel) if language in {"python", "java"} else None
         if parsed is not None and parsed.status == "parsed":
-            symbols.extend(_python_symbols(parsed))
+            if language == "python":
+                symbols.extend(_python_symbols(parsed))
+            else:
+                symbols.extend(_java_symbols(parsed))
             continue
         if parsed is not None:
             read_failures[rel] = "analysis-gap:%s" % parsed.status
             if parsed.status in {"source-outside-root", "source-unreadable"}:
+                # Preserve the long-standing read-failure contract for a path
+                # that could not be opened at all.  Parser-specific gaps still
+                # use ``analysis-gap:*`` once bytes reached the frontend.
+                read_failures[rel] = "unreadable"
                 continue
         lines = read_source_lines(root / rel, flt.max_file_bytes)
         if lines is None:

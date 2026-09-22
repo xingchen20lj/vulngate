@@ -117,12 +117,46 @@ def _is_source_critical(record: Dict[str, Any]) -> bool:
                  or bool(record.get("controls"))))
 
 
+def _audit_status(scope: Optional[Dict[str, Any]], high_risk_uncovered: int
+                  ) -> Dict[str, Any]:
+    """State machine for coverage closure, separate from vulnerability status.
+
+    ``coverage-closed`` says only that this inventory's high-risk residual is
+    empty.  It does not claim a vulnerability, runtime effect, novelty result,
+    CVSS result or S4/G4 completion.  Invalid or unknown scope is a hard
+    blocker even when the resulting index happens to have zero denominators.
+    """
+    scope = dict(scope or {})
+    scope_present = bool(scope)
+    scope_valid = bool(scope.get("valid", True))
+    blockers: List[str] = []
+    if scope_present and not scope_valid:
+        blockers.append("scope-invalid")
+        blockers.extend(str(item) for item in scope.get("analysis_gaps") or []
+                       if item)
+        state = "scope-invalid"
+    elif high_risk_uncovered:
+        blockers.append("high-risk-uncovered:%d" % int(high_risk_uncovered))
+        state = "partial-coverage"
+    else:
+        state = "coverage-closed"
+    return {
+        "state": state,
+        "scope_id": str(scope.get("scope_id") or ""),
+        "scope_valid": scope_valid,
+        "scope_present": scope_present,
+        "blockers": blockers,
+        "claim_status": "not-a-finding",
+    }
+
+
 # ---------------------------------------------------------------------------
 # metric computation
 # ---------------------------------------------------------------------------
 
 def compute_coverage(indices: Dict[str, List[Dict[str, Any]]],
-                     uncovered_probe: bool = True) -> Dict[str, Any]:
+                     uncovered_probe: bool = True,
+                     scope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Compute every coverage ratio from the persisted indices."""
     sources = indices.get("source-inventory") or []
     entries = indices.get("entry-index") or []
@@ -178,6 +212,7 @@ def compute_coverage(indices: Dict[str, List[Dict[str, Any]]],
         "validation_coverage": val_cov,
         "runtime_verification_coverage": runtime_cov,
     }
+    audit_status = _audit_status(scope, uncovered_hist.get("high", 0))
     return {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "counts": {
@@ -213,7 +248,8 @@ def compute_coverage(indices: Dict[str, List[Dict[str, Any]]],
                                      and metrics[name] >= target}
                        for name, target in ACCEPTANCE_TARGETS.items()},
         "high_risk_uncovered": uncovered_hist.get("high", 0),
-        "stop_condition_met": uncovered_hist.get("high", 0) == 0,
+        "stop_condition_met": audit_status["state"] == "coverage-closed",
+        "audit_status": audit_status,
         "uncovered_regions": uncovered,
     }
 
@@ -700,7 +736,9 @@ def load_coverage_inputs(workspace, target: str) -> Dict[str, List[Dict[str, Any
 
 def refresh_candidate_coverage(store: CoverageStore,
                                workspace, target: str,
-                               round_no: Optional[int] = None) -> Dict[str, Any]:
+                               round_no: Optional[int] = None,
+                               extra_rows: Optional[Sequence[Dict[str, Any]]] = None,
+                               ) -> Dict[str, Any]:
     """Re-derive candidate coverage from the round ledgers, then recompute.
 
     Ledgers are the durable record of what was decided (``ledger/<target>/
@@ -714,11 +752,36 @@ def refresh_candidate_coverage(store: CoverageStore,
     round number at all.  The symptom was a round whose candidates came back
     byte-identical to the previous round's, with nothing flagged as already
     covered.
+
+    ``extra_rows`` lets S8 derive its closure state from the verdicts it has
+    just produced *before* the durable ledger is written.  They are treated as
+    an in-memory overlay for the current round, never as a substitute for a
+    ledger.  This prevents an S8 report from claiming closure based on a stale
+    coverage summary while retaining the ledger as the authoritative record.
     """
     import json as _json
 
     ledger_root = (workspace / "ledger" / target)
-    rows: List[Dict[str, Any]] = []
+    rows_by_identity: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+    def add_row(row: Dict[str, Any], number: int) -> None:
+        """Keep one deterministic verdict per round/candidate identity.
+
+        Modern ledgers contain ``rows`` and an ``excluded`` view derived from
+        those rows.  Reading both used to duplicate coverage evidence.  An
+        explicit current-round row should additionally supersede an already
+        persisted row with the same identity, which makes retries idempotent.
+        """
+        item = dict(row)
+        item.setdefault("_round", number)
+        candidate = str(item.get("candidate_id") or item.get("research_key")
+                        or item.get("id") or "")
+        if not candidate:
+            candidate = _json.dumps(item, ensure_ascii=False, sort_keys=True,
+                                    default=str)
+        identity = (str(item.get("_round") or number), candidate)
+        rows_by_identity[identity] = item
+
     if ledger_root.exists():
         for path in sorted(ledger_root.glob("round-*/ledger.json")):
             try:
@@ -728,12 +791,20 @@ def refresh_candidate_coverage(store: CoverageStore,
             number = int(payload.get("round") or 0)
             if round_no is not None and number > int(round_no):
                 continue
-            for key in ("rows", "excluded"):
-                for row in payload.get(key) or []:
-                    if isinstance(row, dict):
-                        row = dict(row)
-                        row.setdefault("_round", number)
-                        rows.append(row)
+            # ``excluded`` is a legacy fallback / presentation subset.  A
+            # modern ledger's ``rows`` already contains its decisions.
+            ledger_rows = payload.get("rows")
+            if not isinstance(ledger_rows, list):
+                ledger_rows = payload.get("excluded") or []
+            for row in ledger_rows:
+                if isinstance(row, dict):
+                    add_row(row, number)
+    overlay_round = int(round_no) if round_no is not None else 0
+    for row in extra_rows or []:
+        if isinstance(row, dict):
+            add_row(row, overlay_round)
+
+    rows = [rows_by_identity[key] for key in sorted(rows_by_identity)]
     indices = load_coverage_inputs(workspace, target)
     records = build_candidate_coverage(rows, indices)
     store.write_records("candidate-coverage", records)
@@ -742,10 +813,26 @@ def refresh_candidate_coverage(store: CoverageStore,
                       ("security-control-index", "security-control-index"),
                       ("flow-index", "flow-index")):
         store.write(name, indices.get(key) or [])
-    summary = compute_coverage(indices)
+    inventory_summary = store.read("inventory-summary") or {}
+    scope = (inventory_summary.get("scope") if isinstance(inventory_summary, dict)
+             else None)
+    if not isinstance(scope, dict):
+        # ``compute_coverage`` remains usable as a pure function in unit tests,
+        # but a persisted coverage report without an inventory contract must
+        # never announce closure merely because its denominators are empty.
+        scope = {
+            "schema_version": "coverage-scope-v1",
+            "scope_id": "",
+            "valid": False,
+            "analysis_gaps": ["inventory-scope-missing"],
+            "claim_status": "not-a-finding",
+        }
+    summary = compute_coverage(indices, scope=scope)
     store.write("coverage-summary", summary)
     store.write_records("uncovered-regions", [models.UncoveredRegion.from_dict(r)
                                               for r in summary["uncovered_regions"]])
     return {"candidates": len(records), "marks": marks,
             "high_risk_uncovered": summary["high_risk_uncovered"],
-            "coverage": summary["metrics"]}
+            "coverage": summary["metrics"],
+            "audit_status": summary["audit_status"],
+            "stop_condition_met": summary["stop_condition_met"]}

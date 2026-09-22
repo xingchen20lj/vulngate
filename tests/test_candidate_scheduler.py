@@ -524,6 +524,46 @@ class DuplicateTests(ScheduleFixture):
             self.assertEqual("", score.duplicate_of)
 
 
+class CandidateIntakeTests(unittest.TestCase):
+    """A broad static inventory is queued, never treated as one round's work."""
+
+    def test_large_pool_is_bounded_and_rotates_without_mutating_the_source(self):
+        pool = [{
+            "candidate_id": "exec-%03d" % index,
+            "category": "exec",
+            "code_location": ["src/Runner.java:%d" % (index + 1)],
+        } for index in range(40)]
+
+        first, first_meta = SCH.bounded_candidate_intake(
+            pool, slots=1, round_no=1, window_size=8)
+        second, second_meta = SCH.bounded_candidate_intake(
+            pool, slots=1, round_no=2, window_size=8)
+
+        self.assertEqual(40, len(pool))
+        self.assertEqual(8, len(first))
+        self.assertEqual(8, len(second))
+        self.assertEqual(32, first_meta["deferred_intake_candidates"])
+        self.assertEqual("not-scheduled-yet",
+                         first_meta["deferred_intake_status"])
+        self.assertEqual("not-a-finding", first_meta["claim_status"])
+        self.assertEqual(first_meta["pool_digest"], second_meta["pool_digest"])
+        self.assertFalse({row["candidate_id"] for row in first}
+                         & {row["candidate_id"] for row in second})
+
+    def test_window_keeps_category_diversity_when_capacity_allows(self):
+        pool = ([{"candidate_id": "exec-%02d" % index, "category": "exec"}
+                 for index in range(20)] +
+                [{"candidate_id": "parser-%02d" % index, "category": "parser"}
+                 for index in range(20)])
+        active, meta = SCH.bounded_candidate_intake(
+            pool, slots=1, round_no=1, window_size=6)
+        self.assertEqual(6, len(active))
+        self.assertEqual({"exec", "parser"},
+                         {row["category"] for row in active})
+        self.assertEqual(3, meta["categories"]["exec"]["active"])
+        self.assertEqual(3, meta["categories"]["parser"]["active"])
+
+
 # ---------------------------------------------------------------------------
 # 3. stratified selection (spec §13.3)
 # ---------------------------------------------------------------------------

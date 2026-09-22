@@ -51,10 +51,11 @@ class TargetConfig:
     poc_src_dir: Optional[str] = None
     entry_points: List[Dict[str, Any]] = field(default_factory=list)
     candidates: List[Dict[str, Any]] = field(default_factory=list)
-    # Per-round candidate budget (spec §13).  0 keeps the pre-PR3 behaviour of
-    # auditing every configured candidate; a positive value caps the round and
-    # lets the scheduler choose which ones, deferring the rest with a reason.
-    max_candidates: int = 0
+    # Per-round candidate budget (spec §13).  A positive value is the explicit
+    # work budget.  ``0`` is accepted as a legacy spelling for the scheduler's
+    # finite default; it must never expand into "audit the whole pool" because
+    # static evidence inventories can contain tens of thousands of leads.
+    max_candidates: int = 8
     # Index-derived candidates (spec §11/§12 plus capability paths) enter the
     # round's pool automatically: an unguarded path, sibling control
     # differential, and explicit primitive chain are exactly the "high value

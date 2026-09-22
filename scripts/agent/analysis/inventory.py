@@ -26,7 +26,7 @@ Storage layout follows spec §3::
     ├── semantic-guard-evidence.json semantic-guard-candidates.json (guard evidence)
     ├── semantic-call-evidence.json semantic-call-candidates.json (call binding)
     ├── semantic-controlflow-evidence.json semantic-controlflow-candidates.json (branch evidence)
-    ├── semantic-ast-evidence.json semantic-ast-candidates.json (Python AST evidence)
+    ├── semantic-ast-evidence.json semantic-ast-candidates.json (syntax AST evidence)
     ├── semantic-transform-evidence.json semantic-transform-candidates.json (transform binding)
     ├── semantic-python-binding-evidence.json semantic-python-binding-candidates.json (AST value binding)
     ├── evidence-provenance.json (raw/derived evidence lineage and correlation)
@@ -45,6 +45,7 @@ empty, so ``coverage-summary.json`` can always state which indices it had.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import time
@@ -71,7 +72,8 @@ from . import threat_model as threat_model_analysis
 from .callgraph import build_call_graph
 from .dataflow import build_flow_index
 from .languages import (JVM_LANGUAGES, ExcludedDir, SourceFilter, classify_file,
-                        scan_tree, source_globs, suffix_owner_language)
+                        resolve_source_dirs, scan_tree, source_globs,
+                        suffix_owner_language)
 from .symbols import (FILE_KIND, extract_symbols, index_security_surfaces,
                       relink_records)
 
@@ -292,6 +294,12 @@ FRAMEWORK_HINTS: List[Tuple[str, str]] = [
 #: Uncovered-region risk grading for sinks (spec §5.6).
 SEVERITY_RANK: Dict[str, int] = {"high": 2, "medium": 1, "low": 0}
 
+# A coverage report is meaningful only for the source root, source-directory
+# selection and enumeration policy that produced its indices.  Keep this as a
+# small extension of the existing inventory summary rather than a new planner
+# artifact: every coverage consumer already reads that summary.
+COVERAGE_SCOPE_VERSION = "coverage-scope-v1"
+
 
 # ---------------------------------------------------------------------------
 # store
@@ -342,6 +350,117 @@ class CoverageStore:
         if not self.base.exists():
             return []
         return sorted(p.stem for p in self.base.glob("*.json"))
+
+
+def _scope_digest(value: Any) -> str:
+    """Stable digest for a public, source-free scope descriptor."""
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def build_coverage_scope(root: Path,
+                         source_dirs: Optional[Sequence[str]] = None,
+                         source_filter: Optional[SourceFilter] = None,
+                         target_type: Optional[str] = None,
+                         files: Optional[Sequence[models.SourceFileRecord]] = None,
+                         excluded_dirs: Optional[Sequence[Dict[str, Any]]] = None
+                         ) -> Dict[str, Any]:
+    """Build the persisted scope contract for one coverage inventory.
+
+    Scope identity intentionally excludes source contents.  It answers whether
+    two reports were produced from the *same declared universe*, while the
+    optional universe digest proves what that declaration enumerated at build
+    time.  A stale source tree is therefore not misrepresented as a changed
+    source root, and callers can choose an explicit rebuild policy separately.
+    """
+    root = Path(root).resolve()
+    flt = source_filter or SourceFilter()
+    _bases, canonical_dirs, invalid = resolve_source_dirs(root, source_dirs)
+    requested = sorted({str(value or "").strip() for value in (source_dirs or [])})
+    if not requested:
+        requested = ["."]
+    analysis_gaps = sorted({str(row.get("reason") or "") for row in invalid
+                            if row.get("reason")})
+    identity = {
+        "root": str(root),
+        "source_dirs": canonical_dirs,
+        "requested_source_dirs": requested,
+        "invalid_source_dirs": invalid,
+        "filter": flt.as_dict(),
+        "target_type": str(target_type or ""),
+    }
+    universe = []
+    for record in files or []:
+        row = record.as_dict() if hasattr(record, "as_dict") else dict(record)
+        universe.append({
+            "file": str(row.get("file") or ""),
+            "size": int(row.get("size") or 0),
+            "production": bool(row.get("production")),
+            "skip_reason": str(row.get("skip_reason") or ""),
+        })
+    universe.sort(key=lambda row: row["file"])
+    exclusions = [dict(row) for row in (excluded_dirs or [])
+                  if isinstance(row, dict)]
+    exclusions.sort(key=lambda row: (str(row.get("rel_path") or ""),
+                                     str(row.get("reason") or "")))
+    return {
+        "schema_version": COVERAGE_SCOPE_VERSION,
+        **identity,
+        "scope_id": "scope-" + _scope_digest(identity)[:24],
+        "valid": not bool(invalid),
+        "analysis_gaps": analysis_gaps,
+        "source_universe_digest": "universe-" + _scope_digest({
+            "files": universe, "excluded_dirs": exclusions})[:24],
+        "source_file_count": len(universe),
+        "excluded_dir_count": len(exclusions),
+        "claim_status": "not-a-finding",
+    }
+
+
+def coverage_scope_status(store: CoverageStore, root: Path,
+                          source_dirs: Optional[Sequence[str]] = None,
+                          source_filter: Optional[SourceFilter] = None,
+                          target_type: Optional[str] = None) -> Dict[str, Any]:
+    """Compare a requested scope with the inventory that is on disk.
+
+    A missing legacy descriptor is deliberately unusable for a caller that
+    supplied a root/scope: reuse would otherwise revive the broad/narrow scope
+    mismatch this contract exists to prevent.  Callers that merely render an
+    existing report can omit scope inputs and retain backward compatibility.
+    """
+    summary = store.read("inventory-summary") or {}
+    actual = summary.get("scope") if isinstance(summary, dict) else None
+    expected = build_coverage_scope(root, source_dirs, source_filter,
+                                    target_type)
+    if not isinstance(actual, dict):
+        return {
+            "status": "missing", "usable": False, "expected": expected,
+            "actual": {}, "mismatches": ["scope-metadata-missing"],
+        }
+    if actual.get("schema_version") != COVERAGE_SCOPE_VERSION:
+        return {
+            "status": "legacy", "usable": False, "expected": expected,
+            "actual": actual, "mismatches": ["scope-schema-version"],
+        }
+    fields = ("root", "source_dirs", "requested_source_dirs",
+              "invalid_source_dirs", "filter", "target_type")
+    mismatches = [field for field in fields
+                  if actual.get(field) != expected.get(field)]
+    if mismatches:
+        return {
+            "status": "mismatch", "usable": False, "expected": expected,
+            "actual": actual, "mismatches": mismatches,
+        }
+    if not bool(actual.get("valid")):
+        return {
+            "status": "invalid", "usable": False, "expected": expected,
+            "actual": actual, "mismatches": [],
+        }
+    return {
+        "status": "matched", "usable": True, "expected": expected,
+        "actual": actual, "mismatches": [],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -692,6 +811,10 @@ class InventoryResult:
     target: str
     generated_at: str
     filter: Dict[str, Any]
+    #: Canonical source root/configuration that produced all indices below.
+    #: It is persisted in ``inventory-summary.json`` and consumed by coverage
+    #: and pipeline resume logic; it is not an evidence-producing analysis.
+    scope: Dict[str, Any] = field(default_factory=dict)
     files: List[models.SourceFileRecord] = field(default_factory=list)
     excluded_dirs: List[Dict[str, Any]] = field(default_factory=list)
     entries: List[models.EntryRecord] = field(default_factory=list)
@@ -823,6 +946,11 @@ class InventoryResult:
             "semantic_binding_candidates": len(self.semantic_binding_candidates),
             "evidence_provenance": self.evidence_provenance.get("summary", {}),
             "records_relinked": self.relinked,
+            "scope": {
+                "scope_id": self.scope.get("scope_id", ""),
+                "valid": bool(self.scope.get("valid", False)),
+                "analysis_gaps": list(self.scope.get("analysis_gaps") or []),
+            },
         }
 
     def as_dict(self) -> Dict[str, Any]:
@@ -832,6 +960,7 @@ class InventoryResult:
             "generated_at": self.generated_at,
             "elapsed_ms": self.elapsed_ms,
             "filter": self.filter,
+            "scope": dict(self.scope),
             "counts": self.counts(),
             "excluded_dirs": list(self.excluded_dirs),
             "files": [f.as_dict() for f in self.files],
@@ -891,7 +1020,10 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
     files = universe.records
     production_rels = [r.file for r in files if r.production]
 
-    bases = list(source_dirs) if source_dirs else None
+    # Use the same normalized roots for the source universe and every catalog
+    # scan.  In particular, an explicit but invalid source directory yields an
+    # empty catalog plus a scope gap; it must never broaden into a root scan.
+    _scope_bases, bases, _scope_invalid = resolve_source_dirs(root, source_dirs)
     entries = build_entry_index(root, production_rels, flt, target_type,
                                 scan_bases=bases)
     sinks = build_sink_index(root, production_rels, flt, scan_bases=bases)
@@ -936,7 +1068,8 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
         # innermost symbol before anything keys on it.
         relinked = relink_records(symbol_records,
                                   list(entries) + list(sinks) + list(controls))
-        graph = build_call_graph(root, symbol_records, flt)
+        graph = build_call_graph(root, symbol_records, flt,
+                                 frontend_session=frontend_session)
         call_edges = graph.edges
         callgraph_summary = graph.summary()
         flow_index = build_flow_index(root, symbol_records, graph, entries,
@@ -972,7 +1105,8 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
             root, semantic_dict)
         semantic_guard_candidates = list(semantic_guard_dict.get("candidates") or [])
         semantic_call_dict = semantic_call_analysis.build_semantic_call_evidence(
-            root, entries, sinks, flows, symbol_records, call_edges)
+            root, entries, sinks, flows, symbol_records, call_edges,
+            frontend_session=frontend_session)
         semantic_call_candidates = list(semantic_call_dict.get("candidates") or [])
         semantic_controlflow_dict = (
             semantic_controlflow_analysis.build_semantic_controlflow_evidence(
@@ -995,7 +1129,7 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
         evidence_provenance_dict = evidence_provenance_analysis.build_evidence_provenance(
             root=root,
             entries=entries, sinks=sinks, controls=controls, symbols=symbol_records,
-            flows=flows,
+            flows=flows, call_edges=call_edges,
             artifacts={
                 "semantic_paths": semantic_dict,
                 "semantic_guards": semantic_guard_dict,
@@ -1045,7 +1179,11 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
     return InventoryResult(
         root=str(root), target=target or root.name,
         generated_at=datetime.now().isoformat(timespec="seconds"),
-        filter=flt.as_dict(), files=files,
+        filter=flt.as_dict(),
+        scope=build_coverage_scope(
+            root, source_dirs, flt, target_type, files,
+            [d.as_dict() for d in universe.excluded_dirs]),
+        files=files,
         excluded_dirs=[d.as_dict() for d in universe.excluded_dirs],
         entries=entries, sinks=sinks, controls=controls,
         symbols=symbol_records, call_edges=call_edges, flows=flows,
@@ -1202,7 +1340,8 @@ def persist_inventory(store: CoverageStore, result: InventoryResult,
         "filter": result.filter, "counts": result.counts(),
         "excluded_dirs": result.excluded_dirs,
         "target_type": target_type or "",
-        "source_dirs": None,
+        "source_dirs": list(result.scope.get("source_dirs") or []),
+        "scope": dict(result.scope),
     }))
     return written
 

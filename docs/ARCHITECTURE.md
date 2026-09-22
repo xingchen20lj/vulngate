@@ -88,11 +88,13 @@ python3 scripts/agent_cli.py semantic-guards <target> \
   --workspace <audit-dir> --show-candidates --json
 ```
 
-`semantic-call-evidence-v1` adds the bounded interprocedural bridge that the
+`semantic-call-evidence-v2` adds the bounded interprocedural bridge that the
 path and guard layers intentionally leave open. For each call-graph edge on a
 flow it records the call-site, argument-to-parameter binding, tainted callee
 parameters, and a return-shape hint; it then reports whether those bounded
-identifiers reach the sink argument. `bound` is useful positive static
+identifiers reach the sink argument. Java callsites use JDK parse-only facts
+and preserve their parser label in provenance; the adapter performs no type
+analysis, class loading, annotation processing, or target execution. `bound` is useful positive static
 evidence for choosing a trace, while `not-bound` and `unresolved` are manual
 review leads, not safety claims. The layer does not resolve overloads, virtual
 dispatch, DI, reflection, callbacks, async flow, types, transformations,
@@ -128,12 +130,13 @@ python3 scripts/agent_cli.py semantic-controlflow <target> \
   --workspace <audit-dir> --show-candidates --json
 ```
 
-`semantic-ast-evidence-v1` is the syntax-aware companion for Python targets.
-It parses each bounded Python file once and records branch membership, function
-or class scope, negative-test shape, direct terminal statements, alternate
+`semantic-ast-evidence-v2` is the syntax-aware companion for Python and Java
+targets. Python uses `ast`; Java consumes only JDK parse-mode facts. It records
+branch membership, function or class scope, negative-test shape, direct terminal statements, alternate
 `else`/exception paths, and parse failures. This replaces repeated line-range
 guessing with a citable AST witness while deliberately stopping short of a
-complete CFG, dominance/SSA, type or runtime proof. Unsupported languages and
+complete CFG, dominance/SSA, type/dispatch or runtime proof. Unsupported languages,
+Java parser limits, and
 syntax errors remain explicit gaps; `semantic-ast-candidates.json` contains
 only `not-a-finding` research leads with `requires_manual_dataflow=true` and
 does not store source text or AST dumps.

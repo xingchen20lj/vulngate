@@ -415,6 +415,22 @@ class BenchmarkTests(unittest.TestCase):
         self.assertTrue(any("must contain vulnerable/fixed" in error
                             for error in errors))
 
+    def test_historical_cve_manifest_rejects_cross_arm_baseline_drift(self):
+        manifest_path = ROOT / "benchmarks" / "historical" / "historical-cve-v1.json"
+        gold = load_benchmark_json(manifest_path)
+        broken = json.loads(json.dumps(gold))
+        broken["cases"][0]["arms"][2]["revision"]["commit"] = (
+            broken["cases"][0]["fixed_revision"]["commit"])
+        broken["cases"][0]["reference_evidence"] = [
+            row for row in broken["cases"][0]["reference_evidence"]
+            if row.get("kind") != "fix"
+        ]
+        errors = validate_manifest(broken)
+        self.assertTrue(any("safe-sibling arm revision is not anchored" in error
+                            for error in errors))
+        self.assertTrue(any("requires advisory/source/fix" in error
+                            for error in errors))
+
     def test_manifest_rejects_unknown_research_surface(self):
         bad = {
             "schema_version": "research-benchmark-v1",

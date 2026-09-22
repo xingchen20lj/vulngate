@@ -18,6 +18,12 @@ entry/sink locations, preconditions, effect class, severity range, official
 references, safe sibling, and a four-point version matrix. Raw exploit payloads
 and source snippets are intentionally absent.
 
+Manifest validation requires advisory, source, and fix references; it also
+requires the vulnerable, fixed, safe-sibling, and environment-gap arms to stay
+anchored to the declared vulnerable/fixed commits and to appear in the version
+matrix. This prevents an apparently complete benchmark from comparing unrelated
+revisions.
+
 The sample run is a static calibration fixture. It demonstrates candidate
 precision/recall, time-to-candidate, and gap preservation; it does not claim
 that any CVE has been confirmed. A future runtime harness may submit a second

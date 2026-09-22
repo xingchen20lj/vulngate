@@ -35,7 +35,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 # --- spec §6.3 -------------------------------------------------------------
 #: Canonical suffix -> language table.  Order matters: the first language that
@@ -386,6 +386,53 @@ def _count_files(directory: Path, cap: int = MAX_EXCLUDED_DIR_SCAN,
     return total, False
 
 
+def resolve_source_dirs(root: Path, source_dirs: Optional[Sequence[str]] = None
+                        ) -> Tuple[List[Path], List[str], List[Dict[str, str]]]:
+    """Resolve the configured audit roots without silently widening scope.
+
+    An omitted source-root list intentionally means the target root.  An
+    *explicit* list that contains a typo or an outside path is different: the
+    audit must retain that as a scope gap instead of falling back to the whole
+    repository and making the resulting coverage look authoritative.
+
+    Returns ``(bases, canonical_dirs, invalid_dirs)``.  ``canonical_dirs`` is
+    rooted at ``root`` and suitable for a persisted scope contract; it is not a
+    user-facing path echo and deliberately never includes outside paths.
+    """
+    root = Path(root).resolve()
+    requested = list(source_dirs or [])
+    if not requested:
+        return [root], ["."], []
+
+    bases: List[Path] = []
+    canonical: List[str] = []
+    invalid: List[Dict[str, str]] = []
+    seen = set()
+    for raw in requested:
+        text = str(raw or "").strip()
+        if not text:
+            invalid.append({"path": text, "reason": "source-dir-missing"})
+            continue
+        try:
+            candidate = (root / text).resolve()
+            relative = candidate.relative_to(root).as_posix() or "."
+        except (OSError, ValueError):
+            invalid.append({"path": text, "reason": "source-dir-outside-root"})
+            continue
+        if not candidate.exists():
+            invalid.append({"path": text, "reason": "source-dir-missing"})
+            continue
+        if relative in seen:
+            continue
+        seen.add(relative)
+        bases.append(candidate)
+        canonical.append(relative)
+    bases.sort(key=lambda path: path.as_posix())
+    canonical.sort()
+    invalid.sort(key=lambda row: (row["path"], row["reason"]))
+    return bases, canonical, invalid
+
+
 def scan_tree(root: Path, source_filter: Optional[SourceFilter] = None,
               source_dirs: Optional[Sequence[str]] = None
               ) -> Tuple[List[Tuple[Path, str]], List[ExcludedDir]]:
@@ -404,18 +451,7 @@ def scan_tree(root: Path, source_filter: Optional[SourceFilter] = None,
     flt = source_filter or SourceFilter()
     exclusions = flt.effective_excludes()
 
-    if source_dirs:
-        bases: List[Path] = []
-        for rel in source_dirs:
-            candidate = (root / str(rel)).resolve()
-            if candidate.exists() and (str(candidate) == str(root)
-                                       or str(candidate).startswith(str(root) + os.sep)):
-                bases.append(candidate)
-        if not bases:
-            _files, excluded = scan_tree(root, flt, None)
-            return _files, excluded
-    else:
-        bases = [root]
+    bases, _canonical, _invalid = resolve_source_dirs(root, source_dirs)
 
     files: List[Tuple[Path, str]] = []
     excluded: List[ExcludedDir] = []

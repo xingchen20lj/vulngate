@@ -33,7 +33,7 @@ Module map:
 ``semantic_guards`` bounded branch-posture and subject/object binding evidence
 ``semantic_calls`` bounded one-hop interprocedural argument/return evidence
 ``semantic_controlflow`` bounded branch-dominance and alternate-path evidence
-``semantic_frontend`` shared syntax interface, Python AST and bounded content cache
+``semantic_frontend`` shared Python/Java syntax interface and bounded content cache
 ``semantic_ast`` bounded Python-AST branch and scope evidence
 ``semantic_bindings`` bounded Python-AST value-binding evidence with explicit
                        non-Python adapter gaps

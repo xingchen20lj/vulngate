@@ -397,18 +397,18 @@ def _persist_coverage_inventory(root: Path, name: str, dest: Path,
     """
     from ..analysis import coverage as cov
     from ..analysis.inventory import (CoverageStore, build_inventory,
-                                      load_inventory, persist_inventory)
+                                      persist_inventory)
     try:
         result = build_inventory(dest, source_dirs, target=name, target_type=target_type)
         store = CoverageStore(root, name)
         written = persist_inventory(store, result, target_type=target_type)
-        # Summarize from the *persisted* indices rather than the in-memory
-        # records: the earlier version passed ``flow-index: []`` and so reported
-        # flow_coverage over an empty set, disagreeing with the state S2's
-        # scheduler reads back from disk.
-        summary = cov.compute_coverage(load_inventory(store))
-        store.write("coverage-summary", summary)
-        return {"written": written, "counts": result.counts()}
+        # Derive from persisted records and ledger state, including the scope
+        # contract written by ``persist_inventory``.  A missing/invalid source
+        # root therefore remains visible as ``scope-invalid`` rather than
+        # becoming an empty-denominator success.
+        refresh = cov.refresh_candidate_coverage(store, root, name)
+        return {"written": written, "counts": result.counts(),
+                "coverage": refresh, "scope": result.scope}
     except Exception as exc:  # pragma: no cover - inventory is best-effort here
         # Never block target preparation on the coverage layer; the gap is
         # recorded rather than silently swallowed.
@@ -435,10 +435,17 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
     from ..analysis import evidence_provenance as evidence_provenance_analysis
     from ..analysis import threat_model as threat_model_analysis
     from ..analysis.inventory import (CoverageStore, build_inventory,
-                                      load_inventory, persist_inventory)
+                                      coverage_scope_status, persist_inventory)
 
     store = CoverageStore(ctx.root, ctx.cfg.name)
-    if (store.path(capability.CAPABILITY_GRAPH_INDEX).exists()
+    target_root, _effective_source_dirs = _target_source_scope(ctx)
+    # Keep the configured (rather than normalized) spellings for the persisted
+    # contract so a missing/outside path remains a visible scope gap.
+    source_dirs = list(ctx.cfg.source_dirs or [])
+    scope_status = coverage_scope_status(
+        store, target_root, source_dirs or None,
+        target_type=ctx.cfg.target_type)
+    required_ready = (store.path(capability.CAPABILITY_GRAPH_INDEX).exists()
             and store.path(threat_model_analysis.THREAT_MODEL_INDEX).exists()
             and store.path(semantic.SEMANTIC_PATH_INDEX).exists()
             and store.path(semantic_guard.SEMANTIC_GUARD_INDEX).exists()
@@ -447,8 +454,18 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
             and store.path(semantic_ast.SEMANTIC_AST_INDEX).exists()
             and store.path(semantic_transform.SEMANTIC_TRANSFORM_INDEX).exists()
             and store.path(semantic_binding.SEMANTIC_BINDING_INDEX).exists()
-            and store.path(evidence_provenance_analysis.EVIDENCE_PROVENANCE_INDEX).exists()):
-        return {"rebuilt": False, "graph": capability.load_capability_graph(store),
+            and store.path(evidence_provenance_analysis.EVIDENCE_PROVENANCE_INDEX).exists())
+    # An invalid contract is already an explicit audit result.  Rebuilding it
+    # every autonomous round cannot repair a typo; missing/legacy/mismatched
+    # contracts must be rebuilt before static evidence is reused.
+    scope_requires_rebuild = scope_status["status"] in {
+        "missing", "legacy", "mismatch",
+    }
+    if required_ready and not scope_requires_rebuild:
+        refresh = cov.refresh_candidate_coverage(store, ctx.root, ctx.cfg.name)
+        return {"rebuilt": False, "coverage": refresh,
+                "scope": scope_status,
+                "graph": capability.load_capability_graph(store),
                 "candidates": capability.load_capability_candidates(store),
                 "semantic": semantic.load_semantic_evidence(store),
                 "semantic_guards": semantic_guard.load_semantic_guards(store),
@@ -467,20 +484,19 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
                 "threat_model": threat_model_analysis.load_threat_model(
                     ctx.root, ctx.cfg.name)}
 
-    target_root = ctx.root / "targets" / ctx.cfg.name
-    if not target_root.exists():
-        target_root = ctx.root
-    source_dirs = list(ctx.cfg.source_dirs or [])
-    if target_root != ctx.root and source_dirs and not any(
-            (target_root / source_dir).exists() for source_dir in source_dirs):
-        target_root = ctx.root
     try:
         result = build_inventory(target_root, source_dirs or None,
                                  target=ctx.cfg.name,
                                  target_type=ctx.cfg.target_type)
         persist_inventory(store, result, target_type=ctx.cfg.target_type)
-        store.write("coverage-summary", cov.compute_coverage(load_inventory(store)))
-        return {"rebuilt": True,
+        refresh = cov.refresh_candidate_coverage(store, ctx.root, ctx.cfg.name)
+        return {"rebuilt": True, "coverage": refresh, "scope": {
+                    "before": scope_status["status"],
+                    "after": coverage_scope_status(
+                        store, target_root, source_dirs or None,
+                        target_type=ctx.cfg.target_type)["status"],
+                    "claim_status": "not-a-finding",
+                },
                 "graph": capability.load_capability_graph(store),
                 "candidates": capability.load_capability_candidates(store),
                 "semantic": semantic.load_semantic_evidence(store),
@@ -529,7 +545,14 @@ class AutoCtx:
         self.cfg = cfg
         self.llm = llm
         self.offline = offline
-        self.max_candidates = max_candidates
+        try:
+            candidate_budget = int(max_candidates)
+        except (TypeError, ValueError):
+            candidate_budget = 0
+        # Autonomous mode historically accepts this CLI value directly.  Keep
+        # a finite fallback instead of letting ``0`` erase the work budget or
+        # become an implicit unbounded pool.
+        self.max_candidates = candidate_budget if candidate_budget > 0 else 4
         self.max_rounds = max_rounds
         self.fuzz_budget = fuzz_budget
         self.fuzz_seed = fuzz_seed
@@ -601,6 +624,25 @@ class AutoCtx:
         return dict(value)
 
 
+def _target_source_scope(ctx: "AutoCtx") -> Tuple[Path, List[str]]:
+    """Resolve the autonomous target's source universe once, without widening.
+
+    Prepared targets live below ``targets/<name>`` while older configurations
+    may intentionally use the workspace as their root.  In both forms,
+    explicit invalid source dirs yield an empty direct-scan scope and are
+    recorded by the inventory contract; they never fall back to scanning the
+    plugin workspace.
+    """
+    from ..analysis.languages import resolve_source_dirs
+
+    target_root = ctx.root / "targets" / ctx.cfg.name
+    if not target_root.exists():
+        target_root = ctx.root
+    _bases, source_dirs, _invalid = resolve_source_dirs(
+        target_root, ctx.cfg.source_dirs)
+    return target_root, source_dirs
+
+
 def _fmt_entries(entries: List[Dict[str, Any]]) -> str:
     return "\n".join(
         "- %s (%s, %s, untrusted=%s)"
@@ -624,9 +666,10 @@ def learn_api_hint(ctx: AutoCtx) -> str:
     PoC generation does not mix up library versions (e.g. Jackson 2 vs 3)."""
     if ctx.cfg.api_hint:
         return ctx.cfg.api_hint
-    srcs = ", ".join(ctx.cfg.source_dirs)
-    src_block = surface_block(ctx.cfg.entry_points, ctx.cfg.source_dirs,
-                              ctx.root, max_chars=5000)
+    source_root, source_dirs = _target_source_scope(ctx)
+    srcs = ", ".join(source_dirs)
+    src_block = surface_block(ctx.cfg.entry_points, source_dirs,
+                              source_root, max_chars=5000)
     if ctx.cfg.target_type == "web-app":
         user = (
             "目标应用：%s\n源码目录：%s\nHTTP 入口清单：\n%s\n\n"
@@ -698,10 +741,20 @@ def schedule_candidates(ctx: AutoCtx, round_no: int,
     instead of looking scheduled.
     """
     from ..analysis import scheduler as sched
+    active_candidates, candidate_intake = sched.bounded_candidate_intake(
+        candidates, slots=ctx.max_candidates, round_no=round_no,
+        pinned=pinned or ())
+    ctx.write_artifact(round_no, "S2", "candidate-intake.json", candidate_intake)
     selected, plan, note = sched.round_selection(
-        ctx.root, ctx.cfg.name, candidates, ctx.max_candidates,
+        ctx.root, ctx.cfg.name, active_candidates, ctx.max_candidates,
         round_no=round_no, pinned=pinned or (),
         benchmark_feedback=ctx.benchmark_feedback())
+    if candidate_intake["deferred_intake_candidates"]:
+        intake_note = ("candidate intake %d/%d active; %d queued for rotation"
+                       % (candidate_intake["active_candidates"],
+                          candidate_intake["pool_candidates"],
+                          candidate_intake["deferred_intake_candidates"]))
+        note = "; ".join(item for item in (note, intake_note) if item)
     if plan is not None:
         ctx.write_artifact(round_no, "S2", "research-strategy.json",
                            plan.research_strategy)
@@ -720,9 +773,10 @@ def _attach_experiment_plans(ctx: AutoCtx, round_no: int,
                              ) -> List[Dict[str, Any]]:
     """Attach and persist bounded, falsifiable research plans for S2 candidates.
 
-    A fresh round passes the full pre-schedule pool so deferred candidates keep
-    their research plan. A resumed round has only the checkpointed selection,
-    which is treated as the scheduled subset.
+    Production rounds pass only the scheduled selection: generating detailed
+    experiment plans for every queued static lead defeats the candidate budget.
+    ``pool`` remains an explicit compatibility/testing override for callers
+    that intentionally need a full planning preview.
     """
     versions = sorted({str(j.get("version")) for j in ctx.cfg.jars
                        if j.get("version")})
@@ -815,8 +869,9 @@ def propose_candidates(ctx: AutoCtx, round_no: int,
         selected, _ = schedule_candidates(ctx, round_no, list(ctx.cfg.candidates))
         return selected
     versions = ", ".join(sorted({j.get("version") for j in ctx.cfg.jars}))
-    src_block = surface_block(ctx.cfg.entry_points, ctx.cfg.source_dirs,
-                              ctx.root, max_chars=8000)
+    source_root, source_dirs = _target_source_scope(ctx)
+    src_block = surface_block(ctx.cfg.entry_points, source_dirs,
+                              source_root, max_chars=8000)
     coverage_block = _coverage_prompt_block(ctx, round_no)
     carry_text = ""
     if carryover:
@@ -919,9 +974,10 @@ def propose_candidates(ctx: AutoCtx, round_no: int,
 
 def audit_candidate(ctx: AutoCtx, cand: Dict[str, Any]) -> Dict[str, Any]:
     """S3: LLM static audit for one candidate."""
-    srcs = ", ".join(ctx.cfg.source_dirs)
-    src_block = candidate_block(cand, ctx.cfg.entry_points, ctx.cfg.source_dirs,
-                                ctx.root, max_chars=8000)
+    source_root, source_dirs = _target_source_scope(ctx)
+    srcs = ", ".join(source_dirs)
+    src_block = candidate_block(cand, ctx.cfg.entry_points, source_dirs,
+                                source_root, max_chars=8000)
     flow_hints = match_source_sink_paths(
         getattr(ctx, "_source_sink_graph", []), cand)
     experiment_plan = json.dumps(
@@ -960,8 +1016,9 @@ def generate_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
     class_name = cand.get("poc_class") or cand["candidate_id"]
     versions = ", ".join(sorted({j.get("version") for j in ctx.cfg.jars}))
     pre = "; ".join(cand.get("preconditions") or ["无"])
-    src_block = candidate_block(cand, ctx.cfg.entry_points, ctx.cfg.source_dirs,
-                                ctx.root, max_chars=6000)
+    source_root, source_dirs = _target_source_scope(ctx)
+    src_block = candidate_block(cand, ctx.cfg.entry_points, source_dirs,
+                                source_root, max_chars=6000)
     experiment_plan = json.dumps(
         cand.get("experiment_plan") or {}, ensure_ascii=False, indent=2)[:6000]
     user = (
@@ -1109,8 +1166,9 @@ def generate_shell_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
     """S4a-web: LLM writes a bash HTTP PoC (observation contract in prompt)."""
     versions = ", ".join(sorted({v for v in ctx.cfg.target_urls}))
     pre = "; ".join(cand.get("preconditions") or ["无"])
-    src_block = candidate_block(cand, ctx.cfg.entry_points, ctx.cfg.source_dirs,
-                                ctx.root, max_chars=6000)
+    source_root, source_dirs = _target_source_scope(ctx)
+    src_block = candidate_block(cand, ctx.cfg.entry_points, source_dirs,
+                                source_root, max_chars=6000)
     user = (
         "候选：%s\n攻击面：%s\n入口：%s\n逻辑：%s\n前置条件：%s\n"
         "可用目标版本(base URL 来自 env.md)：%s\n\n"
@@ -1663,28 +1721,33 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
 
     store = CheckpointStore(ctx.root, ctx.cfg.name, round_no)
     force = getattr(ctx, "force", False)
+    source_root, source_dirs = _target_source_scope(ctx)
 
     # ---- S1 artifacts: attack surface (deterministic, refreshed cheaply) --
     # Baseline #1/#2: danger call-site map + entry danger-hit counts feed the
     # LLM prompts (via source_evidence) and the G0/G1 reachability notes.
     _danger = []
     for _pat, _label in DANGER_PATTERNS:
-        for _h in grep_hits(_pat, ctx.cfg.source_dirs, ctx.root, max_lines=6):
+        for _h in grep_hits(_pat, source_dirs, source_root, max_lines=6):
             _danger.append({"label": _label, "file": _h["file"],
                             "line": _h["line"], "text": _h["text"]})
     ctx.write_artifact(round_no, "S1", "attack-surface.json", {
         "entries": ctx.cfg.entry_points,
         "danger_sites": _danger,
         "danger_site_count": len(_danger),
+        "source_root": str(source_root),
+        "source_dirs": source_dirs,
+        "claim_status": "not-a-finding",
     })
     patch_history = analyze_patch_history(ctx.root, max_count=30)
-    ctx._source_sink_graph = build_source_sink_graph(ctx.cfg.source_dirs, ctx.root)
+    ctx._source_sink_graph = build_source_sink_graph(source_dirs, source_root)
+    profile_cfg = dataclasses.replace(ctx.cfg, source_dirs=source_dirs)
     ctx._project_profile = build_project_profile(
-        ctx.cfg, ctx.root, danger_site_count=len(_danger),
+        profile_cfg, source_root, danger_site_count=len(_danger),
         source_sink_path_count=len(ctx._source_sink_graph),
         security_fix_count=len(patch_history))
     target_rule_hits = collect_target_rule_hits(
-        ctx.cfg.target_type, ctx.cfg.source_dirs, ctx.root)
+        ctx.cfg.target_type, source_dirs, source_root)
     chain_hints = composite_chain_hints(ctx._source_sink_graph)
     chain_candidates = composite_chain_candidates(chain_hints)
     ctx.write_artifact(round_no, "S1", "security-fix-history.json", patch_history)
@@ -1790,7 +1853,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         if not candidates:
             print("[round-%02d] no candidates; stopping" % round_no)
             return {"next_candidates": []}
-        experiment_plans = _attach_experiment_plans(ctx, round_no, candidates, merged)
+        experiment_plans = _attach_experiment_plans(ctx, round_no, candidates)
         ctx.write_artifact(round_no, "S2", "candidate-matrix.json",
                            {"candidate_count": len(candidates),
                             "schedule_note": schedule_note,

@@ -370,6 +370,10 @@ class CallEdge:
     callee_name: str = ""
     producer: str = "regex"
     evidence_type: str = "static-observed"
+    parser: str = "regex-fallback"
+    parse_status: str = "not-parsed"
+    source_revision: str = ""
+    analysis_gaps: List[str] = field(default_factory=list)
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -382,6 +386,10 @@ class CallEdge:
             "line": self.line,
             "producer": self.producer,
             "evidence_type": self.evidence_type,
+            "parser": self.parser,
+            "parse_status": self.parse_status,
+            "source_revision": self.source_revision,
+            "analysis_gaps": list(self.analysis_gaps),
         }
 
     @classmethod

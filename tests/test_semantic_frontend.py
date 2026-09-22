@@ -168,9 +168,40 @@ class SemanticFrontendTests(unittest.TestCase):
         self.assertEqual("parsed", unit.status)
         name = self.source("class A {}", "A.java")
         session = sf.FrontendSession(self.root)
-        self.assertEqual("unsupported-language", session.parse(name).status)
+        java = session.parse(name)
+        self.assertIn(java.status, {"parsed", "java-parser-unavailable"})
+        self.assertEqual("javac-ast", java.parser)
         self.assertEqual("source-unreadable", session.parse("missing.py").status)
         self.assertEqual("source-outside-root", session.parse("../outside.py").status)
+
+    def test_java_frontend_emits_parse_only_structural_facts(self):
+        if not sf.JavaFrontend.available():
+            self.skipTest("JDK parser unavailable on this host")
+        unit = sf.JavaFrontend().parse(
+            "A.java", b"package p; class A { static { throw new Error(\"must-not-run\"); } "
+            b"String helper(String value) { if (!allowed(value)) return value; "
+            b"String copy = value; return sink(copy); } }\n")
+        self.assertEqual("parsed", unit.status)
+        self.assertEqual("javac-ast", unit.parser)
+        self.assertTrue(unit.select("symbol"))
+        self.assertTrue(unit.select("call"))
+        self.assertTrue(unit.select("assignment"))
+        branch = unit.select("branch")[0]
+        self.assertTrue(branch.attributes["negative_test"])
+        helper = next(item for item in unit.select("symbol") if item.name == "helper")
+        self.assertEqual(["value"], list(helper.attributes["parameters"]))
+        payload = json.dumps([fact.as_dict() for fact in unit.facts])
+        self.assertNotIn("must-not-run", payload)
+        self.assertTrue(all(fact.as_dict()["claim_status"] == "not-a-finding"
+                            for fact in unit.facts))
+
+    def test_java_parse_error_discards_partial_facts(self):
+        if not sf.JavaFrontend.available():
+            self.skipTest("JDK parser unavailable on this host")
+        unit = sf.JavaFrontend().parse("Broken.java", b"class Broken { void f( { }")
+        self.assertEqual("parse-failed", unit.status)
+        self.assertFalse(unit.facts)
+        self.assertIsNone(unit.tree)
 
     def test_special_files_and_symlink_loops_are_gaps_not_blocking_reads(self):
         os.mkfifo(self.root / "pipe.py")

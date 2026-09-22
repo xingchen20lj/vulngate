@@ -103,6 +103,30 @@ class EvidenceProvenanceTests(unittest.TestCase):
         after = self.build()["candidate_provenance"]["a"]
         self.assertNotEqual(before["evidence_ids"], after["evidence_ids"])
 
+    def test_parser_backed_call_edge_is_a_revision_bound_source_fact(self):
+        worker = models.SymbolRecord("worker", "java", "app.py", 2, 4,
+                                     "method", "worker", parser="javac-ast",
+                                     parse_status="parsed", confidence="ast")
+        edge = models.CallEdge("symbol", "worker", file="app.py", line=2,
+                               callee_name="worker", producer="java-ast",
+                               parser="javac-ast", parse_status="parsed")
+        flow = models.FlowRecord("edge-flow", "entry", "symbol", "sink",
+                                 ["symbol", "worker"])
+        graph = ep.build_evidence_provenance(
+            root=self.root, entries=self.entries, sinks=self.sinks,
+            controls=self.controls, symbols=self.symbols + [worker],
+            flows=[flow], call_edges=[edge], artifacts={}, candidates={})
+        records = graph["records"]
+        edge_record = next(row for row in records
+                           if row.get("fact_kind") == "call-edge")
+        self.assertEqual("javac-ast", edge_record["parser"])
+        self.assertEqual("parsed", edge_record["parse_status"])
+        flow_record = next(row for row in records
+                           if row.get("flow_id") == "edge-flow"
+                           and row["evidence_type"] == "source-sink-flow")
+        self.assertIn(edge_record["evidence_id"], flow_record["source_fact_ids"])
+        self.assertFalse(flow_record["provenance_gaps"])
+
     def test_missing_facts_files_and_upstream_stay_explicit(self):
         for overrides in ({"sinks": []}, {"artifacts": {}}):
             metadata = self.build(**overrides)["candidate_provenance"]["b"]

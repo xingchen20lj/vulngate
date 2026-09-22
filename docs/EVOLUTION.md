@@ -175,7 +175,7 @@ The previous layers intentionally left every cross-symbol input as unresolved.
 That was safe, but it made the next expert action underspecified: a reviewer
 could see an entry-to-sink call path without knowing which call-site argument
 was supposed to become the callee parameter. S1 now persists
-`semantic-call-evidence-v1` and `semantic-call-candidates.json`.
+`semantic-call-evidence-v2` and `semantic-call-candidates.json`.
 
 For every edge on a bounded flow it records the call-site location, callee
 parameter names, bounded argument identifier tokens, direct/propagated/literal
@@ -184,7 +184,9 @@ bound parameter. It then compares the propagated parameter set with the sink
 argument and distinguishes `bound`, `not-bound`, `unresolved`, and
 `not-applicable`.
 
-This is deliberately a one-hop lexical bridge, not an interprocedural proof:
+Python uses its syntax frontend; Java facts use JDK parse mode only, with no
+type analysis, class loading, annotation processing, compilation, or target
+execution. This is deliberately bounded syntax evidence, not an interprocedural proof:
 overloads, virtual dispatch, DI, reflection, callbacks, async edges, type
 conversion, sanitizer semantics, branch dominance, and path feasibility remain
 manual checks. No raw source line, payload, or process output is stored. Every
@@ -234,13 +236,14 @@ python3 scripts/agent_cli.py semantic-controlflow <target> \
 The layer is kept separate from semantic guard evidence so a future AST/CFG
 resolver can replace the structural heuristic without weakening existing gates.
 
-## Unreleased Python AST structural evidence
+## Unreleased syntax AST structural evidence
 
 The bounded control-flow layer is deliberately language-agnostic, but its
 brace/indent intervals cannot give a syntax-level witness for Python function
 scope, `else`/exception membership, or a direct `return`/`raise` rejection
-shape. S1 now persists `semantic-ast-evidence-v1` and
-`semantic-ast-candidates.json` for Python files.
+shape. S1 now persists `semantic-ast-evidence-v2` and
+`semantic-ast-candidates.json` for Python and Java files. Python uses `ast`;
+Java uses JDK parse-only facts.
 
 The layer parses each file once, then records only normalized node kinds,
 branch IDs, line spans, scope spans, terminal-shape metadata, and parser

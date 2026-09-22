@@ -579,6 +579,9 @@ class ResearchMemoryTests(unittest.TestCase):
         round_consistency_rechecks = (self.root / "state" / "target" /
                                       "round-01" / "S8" /
                                       "research-consistency-rechecks.json")
+        round_coverage_closure = (self.root / "state" / "target" /
+                                  "round-01" / "S8" /
+                                  "coverage-closure.json")
         round_budget = (self.root / "state" / "target" / "round-01" / "S8"
                         / "research-budget.json")
         target_portfolio = self.root / "state" / "target" / "research-portfolio.json"
@@ -609,6 +612,7 @@ class ResearchMemoryTests(unittest.TestCase):
         self.assertTrue(round_consistency.exists())
         self.assertTrue(round_consistency_actions.exists())
         self.assertTrue(round_consistency_rechecks.exists())
+        self.assertTrue(round_coverage_closure.exists())
         self.assertTrue(round_budget.exists())
         self.assertTrue(target_pack.exists())
         self.assertTrue(target_consistency.exists())
@@ -660,6 +664,11 @@ class ResearchMemoryTests(unittest.TestCase):
         self.assertEqual("not-a-finding",
                          json.loads(target_pack.read_text(
                              encoding="utf-8"))["claim_status"])
+        closure = json.loads(round_coverage_closure.read_text(encoding="utf-8"))
+        self.assertEqual("scope-invalid", closure["state"])
+        self.assertFalse(closure["stop_condition_met"])
+        self.assertEqual("not-a-finding", closure["claim_status"])
+        self.assertEqual(closure, result["coverage"])
         portfolio = json.loads(target_portfolio.read_text(encoding="utf-8"))
         self.assertEqual("research-portfolio-v1", portfolio["schema_version"])
         self.assertEqual("not-a-finding", portfolio["claim_status"])

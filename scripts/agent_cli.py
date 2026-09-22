@@ -63,7 +63,9 @@ Usage:
   agent_cli.py threat-model <target> [--workspace <dir>] [--rebuild]
                                 [--json]
   agent_cli.py spawn-probe --workspace <dir> --target <name> --round <N>
-                           --status ok|degraded [--reply <agent-reply>]
+                           (--prepare | --status ok|degraded) [--reply <agent-reply>]
+  agent_cli.py parallel-receipt --workspace <dir> --target <name> --round <N>
+                           --candidate <id> (--prepare | --status <state> | --verify)
   agent_cli.py staging-exec --authorized-staging --host <ECS> --user <user> ...
   agent_cli.py staging-copy --authorized-staging --host <ECS> --source <file> ...
 """
@@ -71,9 +73,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -133,6 +137,8 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
 
 
 def cmd_source_map(args: argparse.Namespace) -> int:
+    from agent.analysis.languages import resolve_source_dirs
+
     root = Path(args.root).resolve()
     if args.preset and args.preset not in se.SOURCE_MAP_PRESETS:
         _out({"error": "unknown preset %r; choose from %s"
@@ -140,7 +146,13 @@ def cmd_source_map(args: argparse.Namespace) -> int:
         return 2
     pattern = args.pattern or se.SOURCE_MAP_PRESETS.get(args.preset, se.SOURCE_MAP_PRESETS["parsers"])
     globs = None if args.globs == "all" else ["*.java"]
-    source_dirs = [d for d in ("src", "src/main/java") if (root / d).exists()] or ["."]
+    # A root may be a multi-module project: choosing ``src`` merely because it
+    # exists silently omits sibling Java modules.  The source map is a bounded
+    # *display* scan, but its scope still needs one explicit contract.  With no
+    # user-provided source dir, scan the declared root; invalid explicit paths
+    # produce no fallback scan and are visible in the response.
+    _bases, source_dirs, invalid_source_dirs = resolve_source_dirs(
+        root, list(args.source_dir or []) or None)
     hits = se.grep_hits(pattern, source_dirs, root, max_lines=args.max_hits, globs=globs)
     entries = []
     for h in hits:
@@ -150,7 +162,10 @@ def cmd_source_map(args: argparse.Namespace) -> int:
         entries.append({"file": h["file"], "line": h["line"], "text": h["text"], "api": api})
     _out({"root": str(root), "pattern": pattern, "count": len(entries),
           "entries": entries[:args.max_hits],
-          "globs": globs or se.DEFAULT_SOURCE_GLOBS})
+          "globs": globs or se.DEFAULT_SOURCE_GLOBS,
+          "source_dirs": source_dirs,
+          "invalid_source_dirs": invalid_source_dirs,
+          "claim_status": "not-a-finding"})
     return 0
 
 
@@ -1319,6 +1334,7 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     """
     from agent.analysis import coverage as cov
     from agent.analysis.inventory import (CoverageStore, build_inventory,
+                                          coverage_scope_status,
                                           persist_inventory)
 
     workspace = Path(args.workspace).resolve()
@@ -1326,16 +1342,48 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     store = CoverageStore(workspace, target)
     payload: Dict[str, Any] = {"target": target, "workspace": str(workspace)}
 
-    need_build = args.rebuild or any(
-        not store.path(name).exists()
-        for name in ("source-inventory", "symbol-index", "flow-index",
-                     "semantic-path-evidence", "semantic-guard-evidence",
-                     "semantic-call-evidence", "semantic-controlflow-evidence",
-                     "semantic-ast-evidence", "semantic-transform-evidence",
-                     "semantic-python-binding-evidence", "evidence-provenance"))
+    missing_indices = [
+        name for name in (
+            "source-inventory", "symbol-index", "flow-index",
+            "semantic-path-evidence", "semantic-guard-evidence",
+            "semantic-call-evidence", "semantic-controlflow-evidence",
+            "semantic-ast-evidence", "semantic-transform-evidence",
+            "semantic-python-binding-evidence", "evidence-provenance",
+        ) if not store.path(name).exists()
+    ]
+    need_build = args.rebuild or bool(missing_indices)
+
+    # A caller that supplies a source root, source dir, or target type is
+    # asking for a particular audit universe.  Never silently render a prior
+    # broad/narrow inventory in response.  When no root is supplied, prefer
+    # the root persisted with the current scope over guessing ``targets/<id>``.
+    scope_requested = bool(args.root or args.source_dir or args.target_type is not None)
+    prior_inventory = store.read("inventory-summary") or {}
+    prior_scope = (prior_inventory.get("scope")
+                   if isinstance(prior_inventory, dict) else None)
+    root_text = (args.root or
+                 (prior_scope.get("root") if isinstance(prior_scope, dict) else None)
+                 or str(workspace / "targets" / target))
+    root = Path(root_text).resolve()
+    scope_check = None
+    if scope_requested and store.path("inventory-summary").exists():
+        if not root.exists():
+            _out({"error": "target source root not found", "root": str(root),
+                  "hint": "pass --root <src root> with the requested scope"})
+            return 2
+        scope_check = coverage_scope_status(
+            store, root, list(args.source_dir or []) or None,
+            target_type=args.target_type)
+        payload["scope_check"] = {
+            "status": scope_check["status"],
+            "usable": scope_check["usable"],
+            "mismatches": scope_check["mismatches"],
+        }
+        need_build = need_build or not scope_check["usable"]
+
     if need_build:
-        root = Path(args.root).resolve() if args.root else (
-            workspace / "targets" / target)
+        # Keep the original "target root missing" behaviour for a first build,
+        # while also making a scope mismatch a normal, visible rebuild reason.
         if not root.exists():
             _out({"error": "target source root not found",
                   "root": str(root),
@@ -1346,13 +1394,23 @@ def cmd_coverage(args: argparse.Namespace) -> int:
         result = build_inventory(root, source_dirs or None, target=target,
                                  target_type=args.target_type)
         persist_inventory(store, result, target_type=args.target_type)
-        payload["rebuilt"] = {"root": str(root), "source_dirs": source_dirs,
-                              "counts": result.counts()}
+        payload["rebuilt"] = {
+            "root": str(root), "source_dirs": source_dirs,
+            "counts": result.counts(), "missing_indices": missing_indices,
+            "reason": ("explicit-rebuild" if args.rebuild else
+                       "scope-contract" if scope_check is not None else
+                       "missing-index"),
+        }
+        payload["scope"] = result.scope
 
     if not args.no_refresh:
         payload["refresh"] = cov.refresh_candidate_coverage(store, workspace, target)
 
     summary = store.read("coverage-summary") or {}
+    if "scope" not in payload:
+        current_inventory = store.read("inventory-summary") or {}
+        if isinstance(current_inventory, dict) and isinstance(current_inventory.get("scope"), dict):
+            payload["scope"] = current_inventory["scope"]
     regions = _filter_regions(summary.get("uncovered_regions") or [], args)
 
     if args.json:
@@ -1449,8 +1507,8 @@ def cmd_coverage(args: argparse.Namespace) -> int:
         print("  relations %s"
               % (semantic_controlflow_summary.get("relations") or {}))
     if semantic_ast_summary:
-        print("\n%s" % ("Python AST 结构证据" if args.lang == "zh"
-                        else "Python AST structural evidence"))
+        print("\n%s" % ("语法 AST 结构证据" if args.lang == "zh"
+                        else "Syntax AST structural evidence"))
         print("─" * 46)
         print("  flows %s  controls %s  parsed files %s/%s  candidates %s"
               % (semantic_ast_summary.get("flows", 0),
@@ -1605,8 +1663,16 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         _out({"error": "candidate pool is empty", "target": args.target})
         return 2
     slots = args.slots or config_slots or sched.DEFAULT_SLOTS
+    try:
+        slots = int(slots)
+    except (TypeError, ValueError):
+        slots = sched.DEFAULT_SLOTS
+    if slots <= 0:
+        slots = sched.DEFAULT_SLOTS
     if args.limit_pool:
         pool = pool[:args.limit_pool]
+    active_pool, candidate_intake = sched.bounded_candidate_intake(
+        pool, slots=slots, round_no=args.round)
 
     benchmark_feedback = {}
     if args.benchmark_result:
@@ -1622,7 +1688,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             return 2
 
     selected, plan, note = sched.round_selection(
-        workspace, args.target, pool, slots, round_no=args.round,
+        workspace, args.target, active_pool, slots, round_no=args.round,
         refresh=not args.no_refresh, benchmark_feedback=benchmark_feedback)
     if plan is None:
         _out({"error": note, "target": args.target,
@@ -1633,6 +1699,8 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         payload = plan.as_dict()
         payload["note"] = note
         payload["pool_size"] = len(pool)
+        payload["active_pool_size"] = len(active_pool)
+        payload["candidate_intake"] = candidate_intake
         payload["scheduled_candidates"] = [
             {k: c.get(k) for k in ("candidate_id", "surface", "entry",
                                    "input_shape", "logic")} for c in selected]
@@ -1644,6 +1712,12 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     print(("候选池 %d → 本轮 %d（延后 %d）" if args.lang == "zh"
            else "pool %d -> round %d (deferred %d)")
           % (len(pool), len(selected), len(plan.deferred)))
+    if candidate_intake["deferred_intake_candidates"]:
+        print(("候选准入窗口 %d/%d；其余 %d 个待后续轮次" if args.lang == "zh"
+               else "candidate intake window %d/%d; %d remain queued")
+              % (candidate_intake["active_candidates"],
+                 candidate_intake["pool_candidates"],
+                 candidate_intake["deferred_intake_candidates"]))
     if plan.pinned:
         print(("钉住（运行时证据）：" if args.lang == "zh" else "pinned (runtime evidence): ")
               + ", ".join(plan.pinned))
@@ -1708,16 +1782,35 @@ def _ensure_coverage_analysis(args: argparse.Namespace,
     ``cmd_coverage`` does.
     """
     from agent.analysis.inventory import (CoverageStore, build_inventory,
+                                          coverage_scope_status,
                                           persist_inventory)
 
     workspace = Path(args.workspace).resolve()
     store = CoverageStore(workspace, args.target)
     missing = [name for name in required if not store.path(name).exists()]
-    if not (getattr(args, "rebuild", False) or missing):
+    scope_requested = bool(getattr(args, "root", None)
+                           or getattr(args, "source_dir", [])
+                           or getattr(args, "target_type", None) is not None)
+    prior_inventory = store.read("inventory-summary") or {}
+    prior_scope = (prior_inventory.get("scope")
+                   if isinstance(prior_inventory, dict) else None)
+    root_text = (getattr(args, "root", None) or
+                 (prior_scope.get("root") if isinstance(prior_scope, dict) else None)
+                 or str(workspace / "targets" / args.target))
+    root = Path(root_text).resolve()
+    scope_check = None
+    if scope_requested and store.path("inventory-summary").exists():
+        if not root.exists():
+            raise FileNotFoundError(root)
+        scope_check = coverage_scope_status(
+            store, root, list(getattr(args, "source_dir", []) or []) or None,
+            target_type=getattr(args, "target_type", None))
+
+    needs_rebuild = (getattr(args, "rebuild", False) or bool(missing)
+                     or (scope_check is not None and not scope_check["usable"]))
+    if not needs_rebuild:
         return workspace, store, None, ""
 
-    root = Path(args.root).resolve() if getattr(args, "root", None) else (
-        workspace / "targets" / args.target)
     if not root.exists():
         raise FileNotFoundError(root)
 
@@ -1735,7 +1828,11 @@ def _ensure_coverage_analysis(args: argparse.Namespace,
                              fix_history=fix_history)
     persist_inventory(store, result, target_type=getattr(args, "target_type", None))
     rebuilt = {"root": str(root), "source_dirs": source_dirs,
-               "counts": result.counts(), "missing_indices": missing}
+               "counts": result.counts(), "missing_indices": missing,
+               "reason": ("explicit-rebuild" if getattr(args, "rebuild", False) else
+                          "scope-contract" if scope_check is not None else
+                          "missing-index"),
+               "scope": result.scope}
     return workspace, store, rebuilt, note
 
 
@@ -2414,44 +2511,254 @@ def _filter_regions(regions: List[Dict[str, Any]],
 
 
 def cmd_spawn_probe(args: argparse.Namespace) -> int:
-    """Record the S4 spawn preflight probe result (deterministic bookkeeping).
+    """Prepare or verify a challenge-bound S4 spawn preflight probe.
 
-    The host decides ok/degraded from observed heartbeat/reply; this command
-    only persists the decision in a uniform schema so round summaries and
-    degradation records are consistent across hosts.
-
-    0.2.13+: symptom classification makes the degraded record diagnosable:
-      - no-heartbeat-greeting-only : sub-agent woke up but replied a generic
-        greeting ("ready to help", "waiting for task") -> spawn message
-        delivery failure (environment-level), NOT a probe protocol problem;
-      - no-heartbeat-timeout       : no heartbeat, no useful reply at all;
-      - followup-retried-failed    : one followup re-delivery was attempted
-        and still no heartbeat.
+    A host-created heartbeat file or a generic greeting cannot establish that
+    a spawned agent received the task.  ``--prepare`` therefore creates a
+    fresh, nonce-named heartbeat target and an exact reply challenge.  A later
+    ``--status ok`` succeeds only when both artifacts carry that nonce; an
+    invalid success request is downgraded to sequential mode and exits nonzero.
     """
     from datetime import datetime
     from agent.memory.state import CheckpointStore
 
     store = CheckpointStore(Path(args.workspace), args.target, args.round)
-    ok = args.status == "ok"
-    heartbeat = store.base / "S4" / "spawn-probe.heartbeat"
-    symptom = getattr(args, "symptom", None) or ("ok" if ok else "no-heartbeat-timeout")
+    if getattr(args, "prepare", False):
+        token = str(getattr(args, "token", "") or secrets.token_urlsafe(18))
+        token = re.sub(r"[^A-Za-z0-9_-]", "", token)[:96]
+        if len(token) < 12:
+            _out({"error": "probe token must contain at least 12 URL-safe characters"})
+            return 2
+        heartbeat = store.base / "S4" / ("spawn-probe-%s.heartbeat" % token)
+        payload = {
+            "schema_version": "spawn-probe-challenge-v1",
+            "stage": "S4",
+            "probe": "spawn-preflight",
+            "token": token,
+            "heartbeat_file": str(heartbeat),
+            "expected_heartbeat": "PROBE %s" % token,
+            "expected_reply": "PROBE-DONE %s" % token,
+            "issued_at": datetime.now().isoformat(timespec="seconds"),
+            "claim_status": "not-a-finding",
+        }
+        out = store.write_artifact("S4", "spawn-probe-challenge.json", payload)
+        _out({"written_to": str(out), "heartbeat_file": str(heartbeat),
+              "token": token, "expected_reply": payload["expected_reply"],
+              "claim_status": "not-a-finding"})
+        return 0
+
+    if not getattr(args, "status", None):
+        _out({"error": "--status is required unless --prepare is used"})
+        return 2
+    challenge = store.read_artifact("S4", "spawn-probe-challenge.json")
+    challenge = challenge if isinstance(challenge, dict) else {}
+    token = str(challenge.get("token") or "")
+    heartbeat = Path(str(challenge.get("heartbeat_file") or
+                         (store.base / "S4" / "spawn-probe.heartbeat")))
+    expected_heartbeat = str(challenge.get("expected_heartbeat") or "")
+    expected_reply = str(challenge.get("expected_reply") or "")
+    heartbeat_lines: List[str] = []
+    try:
+        if heartbeat.is_file():
+            heartbeat_lines = heartbeat.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        heartbeat_lines = []
+    heartbeat_valid = bool(expected_heartbeat and
+                           expected_heartbeat in [line.strip() for line in heartbeat_lines])
+    reply = str(args.reply or "")
+    reply_valid = bool(expected_reply and reply.strip() == expected_reply)
+    challenge_valid = bool(token and expected_heartbeat and expected_reply)
+    requested_ok = args.status == "ok"
+    verified = bool(challenge_valid and heartbeat_valid and reply_valid)
+    ok = bool(requested_ok and verified)
+    requested_symptom = getattr(args, "symptom", None)
+    if ok:
+        symptom = "ok"
+    elif requested_ok and not challenge_valid:
+        symptom = "challenge-missing"
+    elif requested_ok:
+        symptom = "probe-contract-invalid"
+    else:
+        symptom = requested_symptom or "no-heartbeat-timeout"
     payload = {
+        "schema_version": "spawn-probe-v2",
         "stage": "S4",
         "probe": "spawn-preflight",
-        "status": args.status,
+        "status": "ok" if ok else "degraded",
         "symptom": symptom,
         "observed": {
             "heartbeat_file": str(heartbeat),
             "heartbeat_seen": heartbeat.exists(),
+            "heartbeat_line_count": len(heartbeat_lines),
+            "heartbeat_token_valid": heartbeat_valid,
+            "reply_token_valid": reply_valid,
+            "challenge_present": bool(challenge),
+            "challenge_valid": challenge_valid,
+            "challenge_token": token,
             "wait_seconds": args.wait_seconds,
-            "agent_reply": args.reply or "",
+            "agent_reply": reply,
             "followup_retried": bool(getattr(args, "followup_retried", False)),
         },
         "decision": "parallel-per-candidate" if ok else "host-sequential-whole-round",
         "recorded_at": datetime.now().isoformat(timespec="seconds"),
+        "claim_status": "not-a-finding",
     }
     out = store.write_artifact("S4", "spawn-probe.json", payload)
-    _out({"written_to": str(out), "decision": payload["decision"]})
+    _out({"written_to": str(out), "decision": payload["decision"],
+          "status": payload["status"], "symptom": symptom,
+          "verified": verified, "claim_status": "not-a-finding"})
+    return 0 if not requested_ok or ok else 2
+
+
+def _parallel_candidate_id(value: Any) -> str:
+    """Return a path-safe bounded candidate identifier, or an empty string."""
+    candidate = str(value or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", candidate):
+        return ""
+    return candidate
+
+
+def _parallel_artifact(store: Any, candidate: str,
+                       value: Any) -> Optional[Dict[str, Any]]:
+    """Validate one declared S4 matrix artifact without retaining its content."""
+    raw = str(value or "").replace("\\", "/").lstrip("/")
+    expected_prefix = "S4/matrix-runs/%s/" % candidate
+    if not raw.startswith(expected_prefix):
+        return None
+    try:
+        path = (store.base / raw).resolve()
+        path.relative_to(store.base.resolve())
+    except (OSError, ValueError):
+        return None
+    if not path.is_file():
+        return None
+    try:
+        size = path.stat().st_size
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+    if size <= 0:
+        return None
+    return {"path": raw, "sha256": digest, "size": size}
+
+
+def cmd_parallel_receipt(args: argparse.Namespace) -> int:
+    """Challenge-bind each spawned S4 candidate to a durable matrix receipt.
+
+    Preflight proves task delivery once. This narrower per-candidate contract
+    prevents a later generic reply from being mistaken for completed runtime
+    work: completion is valid only when a fresh challenge and matrix digest
+    agree. It records evidence metadata only, never a vulnerability result.
+    """
+    from datetime import datetime
+    from agent.memory.state import CheckpointStore
+
+    candidate = _parallel_candidate_id(getattr(args, "candidate", ""))
+    if not candidate:
+        _out({"error": "candidate must be a path-safe id (1-80 chars)"})
+        return 2
+    store = CheckpointStore(Path(args.workspace), args.target, args.round)
+    receipt_name = "parallel-receipt-%s.json" % candidate
+    challenge_name = "parallel-receipt-%s.challenge.json" % candidate
+    expected_artifact = "S4/matrix-runs/%s/cells.json" % candidate
+
+    if getattr(args, "prepare", False):
+        token = str(getattr(args, "token", "") or secrets.token_urlsafe(18))
+        token = re.sub(r"[^A-Za-z0-9_-]", "", token)[:96]
+        if len(token) < 12:
+            _out({"error": "receipt token must contain at least 12 URL-safe characters"})
+            return 2
+        payload = {
+            "schema_version": "parallel-receipt-challenge-v1",
+            "stage": "S4",
+            "candidate_id": candidate,
+            "token": token,
+            "expected_artifact": expected_artifact,
+            "issued_at": datetime.now().isoformat(timespec="seconds"),
+            "claim_status": "not-a-finding",
+        }
+        out = store.write_artifact("S4", challenge_name, payload)
+        _out({"written_to": str(out), "candidate_id": candidate,
+              "token": token, "expected_artifact": expected_artifact,
+              "claim_status": "not-a-finding"})
+        return 0
+
+    challenge = store.read_artifact("S4", challenge_name)
+    challenge = challenge if isinstance(challenge, dict) else {}
+    challenge_valid = bool(
+        challenge.get("schema_version") == "parallel-receipt-challenge-v1"
+        and challenge.get("candidate_id") == candidate
+        and isinstance(challenge.get("token"), str)
+        and len(challenge.get("token")) >= 12
+        and challenge.get("expected_artifact") == expected_artifact)
+
+    if getattr(args, "verify", False):
+        receipt = store.read_artifact("S4", receipt_name)
+        receipt = receipt if isinstance(receipt, dict) else {}
+        artifacts = receipt.get("artifacts") if isinstance(
+            receipt.get("artifacts"), list) else []
+        valid_artifacts = []
+        for item in artifacts[:8]:
+            if not isinstance(item, dict):
+                continue
+            checked = _parallel_artifact(store, candidate, item.get("path"))
+            if checked and checked == {key: item.get(key) for key in checked}:
+                valid_artifacts.append(checked)
+        expected_present = any(row["path"] == expected_artifact
+                               for row in valid_artifacts)
+        verified = bool(
+            challenge_valid
+            and receipt.get("schema_version") == "parallel-receipt-v1"
+            and receipt.get("candidate_id") == candidate
+            and receipt.get("token") == challenge.get("token")
+            and receipt.get("status") == "completed"
+            and expected_present)
+        _out({
+            "candidate_id": candidate,
+            "verified": verified,
+            "decision": ("accept-runtime-artifacts" if verified else
+                         "preserve-partial-and-run-host-sequentially"),
+            "challenge_valid": challenge_valid,
+            "receipt_status": receipt.get("status", "missing"),
+            "expected_artifact_present": expected_present,
+            "valid_artifact_count": len(valid_artifacts),
+            "claim_status": "not-a-finding",
+        })
+        return 0 if verified else 2
+
+    status = str(getattr(args, "status", "") or "").lower()
+    if status not in {"received", "completed", "partial"}:
+        _out({"error": "--status received|completed|partial is required unless --prepare/--verify"})
+        return 2
+    supplied_token = str(getattr(args, "token", "") or "")
+    artifact_rows = []
+    for value in (getattr(args, "artifact", None) or [])[:8]:
+        checked = _parallel_artifact(store, candidate, value)
+        if checked and checked not in artifact_rows:
+            artifact_rows.append(checked)
+    expected_present = any(row["path"] == expected_artifact
+                           for row in artifact_rows)
+    if not challenge_valid or supplied_token != challenge.get("token"):
+        _out({"error": "receipt challenge missing or token mismatch",
+              "candidate_id": candidate})
+        return 2
+    if status == "completed" and not expected_present:
+        _out({"error": "completed receipt requires %s" % expected_artifact,
+              "candidate_id": candidate, "claim_status": "not-a-finding"})
+        return 2
+    payload = {
+        "schema_version": "parallel-receipt-v1",
+        "stage": "S4",
+        "candidate_id": candidate,
+        "token": supplied_token,
+        "status": status,
+        "artifacts": artifact_rows,
+        "recorded_at": datetime.now().isoformat(timespec="seconds"),
+        "claim_status": "not-a-finding",
+    }
+    out = store.write_artifact("S4", receipt_name, payload)
+    _out({"written_to": str(out), "candidate_id": candidate, "status": status,
+          "artifact_count": len(artifact_rows), "claim_status": "not-a-finding"})
     return 0
 
 
@@ -2467,6 +2774,8 @@ def build_parser() -> argparse.ArgumentParser:
     sm.add_argument("--pattern", default=None)
     sm.add_argument("--preset", default=None, choices=sorted(se.SOURCE_MAP_PRESETS))
     sm.add_argument("--max-hits", type=int, default=200)
+    sm.add_argument("--source-dir", action="append", default=[],
+                    help="explicit source subdirectory to scan (repeatable)")
     sm.add_argument("--globs", default="all", choices=["all", "java"],
                     help="'all' scans Java+Clojure+Python+Go+JS/etc.; 'java' restricts to *.java")
     sm.set_defaults(fn=cmd_source_map)
@@ -2958,12 +3267,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser(
         "spawn-probe",
-        help="record S4 spawn preflight probe result (ok | degraded)",
+        help="prepare or verify a challenge-bound S4 spawn preflight probe",
     )
     sp.add_argument("--workspace", required=True)
     sp.add_argument("--target", required=True)
     sp.add_argument("--round", type=int, required=True)
-    sp.add_argument("--status", choices=["ok", "degraded"], required=True)
+    sp.add_argument("--prepare", action="store_true",
+                    help="create a fresh nonce-bound heartbeat/reply challenge")
+    sp.add_argument("--token", default="",
+                    help="optional URL-safe probe token for --prepare")
+    sp.add_argument("--status", choices=["ok", "degraded"], default=None)
     sp.add_argument("--reply", default="", help="observed sub-agent reply (raw)")
     sp.add_argument(
         "--symptom",
@@ -2972,6 +3285,8 @@ def build_parser() -> argparse.ArgumentParser:
             "no-heartbeat-greeting-only",
             "no-heartbeat-timeout",
             "followup-retried-failed",
+            "challenge-missing",
+            "probe-contract-invalid",
         ],
         default=None,
         help="degraded-mode symptom classification (0.2.13+)",
@@ -2984,6 +3299,23 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--wait-seconds", type=int, default=90,
                     help="probe wait budget in seconds (default 90)")
     sp.set_defaults(fn=cmd_spawn_probe)
+
+    pr = sub.add_parser(
+        "parallel-receipt",
+        help="prepare, record, or verify a challenge-bound S4 candidate receipt",
+    )
+    pr.add_argument("--workspace", required=True)
+    pr.add_argument("--target", required=True)
+    pr.add_argument("--round", type=int, required=True)
+    pr.add_argument("--candidate", required=True)
+    pr.add_argument("--prepare", action="store_true")
+    pr.add_argument("--verify", action="store_true")
+    pr.add_argument("--token", default="")
+    pr.add_argument("--status", choices=["received", "completed", "partial"],
+                    default=None)
+    pr.add_argument("--artifact", action="append", default=[],
+                    help="S4/matrix-runs/<candidate>/ artifact produced by this worker")
+    pr.set_defaults(fn=cmd_parallel_receipt)
     return p
 
 

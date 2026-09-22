@@ -158,12 +158,14 @@ def research_question_key(candidate):
 def build_evidence_provenance(
         entries: Sequence[Any] = (), sinks: Sequence[Any] = (),
         controls: Sequence[Any] = (), symbols: Sequence[Any] = (),
-        flows: Sequence[Any] = (), artifacts: Optional[Mapping[str, Any]] = None,
+        flows: Sequence[Any] = (), call_edges: Sequence[Any] = (),
+        artifacts: Optional[Mapping[str, Any]] = None,
         candidates: Optional[Mapping[str, Sequence[Mapping[str, Any]]]] = None,
         target: str = "", root: Optional[Path] = None) -> Dict[str, Any]:
     artifacts = artifacts or {}
     revisions = _SourceRevisions(root)
     records, raw, flow_records = {}, {}, {}
+    edges_by_pair = defaultdict(list)
     layers = defaultdict(lambda: defaultdict(set))
     details = defaultdict(lambda: defaultdict(set))
 
@@ -179,6 +181,9 @@ def build_evidence_provenance(
         row = dict(producer=producer, evidence_type=kind, source_fact_ids=sources,
                    parent_evidence_ids=parents, independence_group=group,
                    confidence=str(payload.get("confidence") or "unknown"),
+                   parser=str(payload.get("parser") or ""),
+                   parse_status=str(payload.get("parse_status") or ""),
+                   analysis_gaps=_unique(payload.get("analysis_gaps") or []),
                    file=file, line=line, span=span, schema_version=EVIDENCE_PROVENANCE_VERSION,
                    claim_status=CLAIM_STATUS, provenance_gaps=_unique(inherited),
                    payload_digest=_digest(payload), **extra)
@@ -214,6 +219,34 @@ def build_evidence_provenance(
             for rid, row in by_kind[kind].items():
                 controls_by_symbol[row.get("symbol_id")].append(rid)
 
+    edge_rows = sorted(map(_dict, call_edges), key=lambda row: (
+        str(row.get("caller") or ""), str(row.get("callee") or ""),
+        str(row.get("file") or ""), str(row.get("line") or ""), _digest(row)))
+    edge_variants = defaultdict(set)
+    for row in edge_rows:
+        edge_key = "%s->%s@%s:%s" % (
+            str(row.get("caller") or ""), str(row.get("callee") or ""),
+            str(row.get("file") or ""), str(row.get("line") or ""))
+        edge_variants[edge_key].add(_digest(row))
+    for row in edge_rows:
+        caller, callee = str(row.get("caller") or ""), str(row.get("callee") or "")
+        edge_key = "%s->%s@%s:%s" % (
+            caller, callee, str(row.get("file") or ""), str(row.get("line") or ""))
+        revision, gaps = revisions.get(str(row.get("file") or ""))
+        gaps = list(gaps)
+        if row.get("source_revision") and revision and row["source_revision"] != revision:
+            gaps.append("source-revision-mismatch:call-edge:%s" % edge_key)
+        if not caller or not callee:
+            gaps.append("call-edge-endpoint-missing:%s" % edge_key)
+        if len(edge_variants[edge_key]) > 1:
+            gaps.append("ambiguous-call-edge-id:%s" % edge_key)
+        eid = emit(str(row.get("producer") or "callgraph"), "source-fact", row,
+                   gaps=gaps, source_revision=revision, fact_kind="call-edge",
+                   fact_id=edge_key)
+        raw["call-edge", edge_key] = eid
+        if caller and callee:
+            edges_by_pair[caller, callee].append(eid)
+
     for flow in sorted(map(_dict, flows), key=lambda r: (str(r.get("flow_id")), _digest(r))):
         fid = str(flow.get("flow_id") or "")
         if not fid:
@@ -224,8 +257,16 @@ def build_evidence_provenance(
         keys += [("symbol", s) for s in symbols_on_path]
         identity_sources = _unique(raw[k] for k in keys if k in raw)
         gaps = ["missing-%s:%s" % k for k in keys if k not in raw]
+        path = [str(item) for item in (flow.get("path") or []) if str(item)]
+        edge_sources = []
+        for caller, callee in zip(path, path[1:]):
+            observed = edges_by_pair.get((caller, callee), [])
+            if not observed:
+                gaps.append("missing-call-edge:%s:%s" % (caller, callee))
+            edge_sources.extend(observed)
+        identity_sources = _unique(identity_sources + edge_sources)
         keys += [("control", c) for s in symbols_on_path for c in controls_by_symbol.get(s, ())]
-        sources = _unique(raw[k] for k in keys if k in raw)
+        sources = _unique([raw[k] for k in keys if k in raw] + edge_sources)
         # Forward/backward aliases share lineage. This is conservative source
         # correlation, not a claim of statistical independence or path equality.
         group = "flow:" + _digest(identity_sources)[:32] if identity_sources else ""

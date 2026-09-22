@@ -220,6 +220,37 @@ class UncoveredRegionTests(unittest.TestCase):
         self.assertEqual(len(regions), 5)
 
 
+class CoverageStateMachineTests(unittest.TestCase):
+    """A clean-looking denominator cannot close an invalid audit scope."""
+
+    def test_invalid_scope_blocks_the_stop_condition_even_with_no_records(self):
+        summary = cov.compute_coverage(
+            indices(),
+            scope={
+                "schema_version": "coverage-scope-v1",
+                "scope_id": "scope-test",
+                "valid": False,
+                "analysis_gaps": ["source-dir-missing"],
+            },
+        )
+        self.assertFalse(summary["stop_condition_met"])
+        self.assertEqual("scope-invalid", summary["audit_status"]["state"])
+        self.assertIn("source-dir-missing", summary["audit_status"]["blockers"])
+
+    def test_high_risk_gap_leaves_the_audit_in_partial_coverage_state(self):
+        summary = cov.compute_coverage(
+            indices(sinks=[sink(severity="high")]),
+            scope={
+                "schema_version": "coverage-scope-v1",
+                "scope_id": "scope-test",
+                "valid": True,
+            },
+        )
+        self.assertFalse(summary["stop_condition_met"])
+        self.assertEqual("partial-coverage", summary["audit_status"]["state"])
+        self.assertIn("high-risk-uncovered:1", summary["audit_status"]["blockers"])
+
+
 class CandidateCoverageTests(unittest.TestCase):
     def test_candidate_marks_touched_regions_reviewed(self):
         data = indices(
@@ -337,6 +368,9 @@ class RefreshIntegrationTests(unittest.TestCase):
         self.assertIn("metrics", summary)
         self.assertEqual(summary["counts"]["sinks"], 1)
         self.assertGreaterEqual(summary["high_risk_uncovered"], 1)
+        self.assertEqual("scope-invalid", summary["audit_status"]["state"])
+        self.assertIn("inventory-scope-missing",
+                      summary["audit_status"]["blockers"])
 
     def test_uncovered_regions_are_persisted(self):
         store = self._write_indices()
@@ -344,6 +378,18 @@ class RefreshIntegrationTests(unittest.TestCase):
         regions = store.read_records("uncovered-regions")
         self.assertTrue(regions)
         self.assertTrue(all("region_id" in r and "kind" in r for r in regions))
+
+    def test_extra_current_round_rows_close_coverage_before_ledger_is_written(self):
+        store = self._write_indices()
+        result = cov.refresh_candidate_coverage(
+            store, self.workspace, "demo", round_no=1,
+            extra_rows=[{
+                "candidate_id": "C-current", "conclusion": "排除",
+                "code_location": ["src/A.java:10"],
+            }],
+        )
+        self.assertEqual(1, result["candidates"])
+        self.assertEqual("excluded", store.read_records("sink-index")[0]["review_state"])
 
 
 class AcceptanceContractTests(unittest.TestCase):

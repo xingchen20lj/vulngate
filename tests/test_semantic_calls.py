@@ -14,6 +14,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from agent.analysis import controls  # noqa: E402
 from agent.analysis import models  # noqa: E402
 from agent.analysis import semantic_calls  # noqa: E402
+from agent.analysis.semantic_frontend import FrontendSession, JavaFrontend  # noqa: E402
+from agent.analysis.symbols import extract_symbols  # noqa: E402
 from agent.analysis.inventory import CoverageStore  # noqa: E402
 
 
@@ -189,6 +191,50 @@ class SemanticCallEvidenceTests(unittest.TestCase):
         self.assertEqual("unresolved", row["sink_binding"]["status"])
         self.assertEqual("not-a-finding", row["claim_status"])
         self.assertEqual(0, evidence["summary"]["analysis_budget"]["processed_paths"])
+
+    def test_java_ast_binds_arguments_and_sink_tokens_across_two_calls(self):
+        if not JavaFrontend.available():
+            self.skipTest("JDK parser unavailable on this host")
+        root = Path(tempfile.mkdtemp(prefix="vulngate-java-calls-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        (root / "Api.java").write_text(
+            "package p;\nclass Api {\n"
+            "  void handler(String input) { worker(input); }\n"
+            "  void worker(String value) { sink(value); }\n"
+            "  void sink(String value) { Runtime.getRuntime().exec(value); }\n"
+            "}\n", encoding="utf-8")
+        session = FrontendSession(root)
+        symbols, failures = extract_symbols(root, ["Api.java"],
+                                            frontend_session=session)
+        self.assertFalse(failures)
+        methods = {record.name: record for record in symbols if record.kind == "method"}
+        entry = models.EntryRecord("entry", "http", "Api.java", 3,
+                                   methods["handler"].symbol_id, "query")
+        sink = models.SinkRecord("sink", "command-exec", "Api.java", 5,
+                                 methods["sink"].symbol_id, "exec", "exec(value)",
+                                 severity_hint="high")
+        flow = models.FlowRecord("flow", entry.entry_id, methods["handler"].symbol_id,
+                                 sink.sink_id, [methods["handler"].symbol_id,
+                                                methods["worker"].symbol_id,
+                                                methods["sink"].symbol_id])
+        edges = [
+            models.CallEdge(methods["handler"].symbol_id, methods["worker"].symbol_id,
+                            file="Api.java", line=3, callee_name="worker"),
+            models.CallEdge(methods["worker"].symbol_id, methods["sink"].symbol_id,
+                            file="Api.java", line=4, callee_name="sink"),
+        ]
+        evidence = semantic_calls.build_semantic_call_evidence(
+            root, [entry], [sink], [flow], symbols, edges,
+            frontend_session=session)
+        row = evidence["flows"][0]
+        self.assertTrue(all(step["callsite_parser"] == "javac-ast"
+                            for step in row["call_steps"]))
+        self.assertTrue(all(step["binding_status"] == "bound"
+                            for step in row["call_steps"]))
+        self.assertEqual("javac-ast", row["sink_parser"])
+        self.assertEqual("bound", row["sink_binding"]["status"])
+        self.assertEqual([], row["analysis_gaps"])
+        self.assertEqual("not-a-finding", evidence["claim_status"])
 
     def test_artifact_is_deterministic_bounded_and_enters_static_pool(self):
         root, entry, sink, flow, symbols, edges = self._fixture(

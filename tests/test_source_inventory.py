@@ -7,6 +7,9 @@ between "we scanned everything" and "we scanned a prefix and called it
 everything".
 """
 
+import contextlib
+import io
+import json
 import shutil
 import sys
 import tempfile
@@ -20,6 +23,7 @@ from agent.analysis import inventory as inv  # noqa: E402
 from agent.analysis import languages as lang  # noqa: E402
 from agent.analysis import models  # noqa: E402
 from agent.tools import source_evidence as se  # noqa: E402
+import agent_cli  # noqa: E402
 
 HAVE_RG = shutil.which("rg") is not None
 
@@ -353,6 +357,84 @@ class CoverageStoreTests(InventoryFixture):
                              len(result.files))
         finally:
             self._tmp2.cleanup()
+
+
+@unittest.skipUnless(HAVE_RG, "ripgrep is required for the inventory scan")
+class CoverageScopeContractTests(InventoryFixture):
+    """A coverage store is valid only for the scope that produced it.
+
+    These assertions prevent the particularly misleading failure mode where a
+    host first indexes a broad tree, later narrows the production source roots,
+    and then presents the old inventory as the current audit scope.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._workspace = tempfile.TemporaryDirectory()
+        self.addCleanup(self._workspace.cleanup)
+        write(self.root, "src/main/java/p/Prod.java", "class Prod {}\n")
+        write(self.root, "examples/Demo.java", "class Demo {}\n")
+
+    def test_persisted_scope_is_canonical_and_matches_its_source_root(self):
+        result = inv.build_inventory(self.root, ["src"], target="demo",
+                                     target_type="library")
+        store = inv.CoverageStore(Path(self._workspace.name), "demo")
+        inv.persist_inventory(store, result, target_type="library")
+
+        summary = store.read("inventory-summary")
+        scope = summary["scope"]
+        self.assertEqual("coverage-scope-v1", scope["schema_version"])
+        self.assertEqual(["src"], scope["source_dirs"])
+        self.assertTrue(scope["valid"])
+        self.assertTrue(scope["scope_id"])
+
+        matched = inv.coverage_scope_status(
+            store, self.root, ["src"], target_type="library")
+        self.assertEqual("matched", matched["status"])
+        self.assertTrue(matched["usable"])
+
+    def test_scope_change_is_detected_instead_of_reusing_a_broad_inventory(self):
+        result = inv.build_inventory(self.root, ["."], target="demo",
+                                     target_type="library")
+        store = inv.CoverageStore(Path(self._workspace.name), "demo")
+        inv.persist_inventory(store, result, target_type="library")
+
+        mismatch = inv.coverage_scope_status(
+            store, self.root, ["src"], target_type="library")
+        self.assertEqual("mismatch", mismatch["status"])
+        self.assertFalse(mismatch["usable"])
+        self.assertIn("source_dirs", mismatch["mismatches"])
+
+    def test_missing_or_outside_source_dir_is_an_explicit_scope_gap_not_root_fallback(self):
+        result = inv.build_inventory(self.root, ["missing", "../outside"],
+                                     target="demo", target_type="library")
+        self.assertEqual([], result.files)
+        self.assertFalse(result.scope["valid"])
+        self.assertEqual(["../outside", "missing"],
+                         [row["path"] for row in result.scope["invalid_source_dirs"]])
+        self.assertIn("source-dir-missing", result.scope["analysis_gaps"])
+        self.assertIn("source-dir-outside-root", result.scope["analysis_gaps"])
+
+
+@unittest.skipUnless(HAVE_RG, "ripgrep is required for the source-map scan")
+class SourceMapScopeTests(InventoryFixture):
+    """The display mapper must not let a convenient ``src`` hide siblings."""
+
+    def test_default_map_scope_is_the_root_not_the_first_src_directory(self):
+        write(self.root, "src/One.java", "class One { void run() { exec(x); } }\n")
+        write(self.root, "module-two/src/Two.java",
+              "class Two { void run() { exec(y); } }\n")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = agent_cli.main([
+                "source-map", "--root", str(self.root), "--preset", "exec",
+                "--max-hits", "20",
+            ])
+        self.assertEqual(0, code)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(["."], payload["source_dirs"])
+        self.assertIn("module-two/src/Two.java",
+                      {row["file"] for row in payload["entries"]})
 
 
 class ModelStateTests(unittest.TestCase):

@@ -33,6 +33,7 @@ Scoring is a weighted sum, per spec §13.1's "实际代码可以使用加权和"
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -102,6 +103,16 @@ DEFAULT_QUOTA: Dict[str, int] = {
     "authz": 2, "parser": 1, "file": 1, "ssrf": 1, "exec": 1, "dos": 1,
     "residual": 1,
 }
+
+# A candidate *pool* is evidence inventory, not a per-round work order.  The
+# active window bounds score computation and artifact size even when static
+# layers emit tens of thousands of leads.  All source candidates remain in
+# their producer artifacts; the intake artifact records the deterministic
+# window and the still-unscheduled count.
+CANDIDATE_INTAKE_SCHEMA_VERSION = "candidate-intake-v1"
+DEFAULT_CANDIDATE_INTAKE_MINIMUM = 64
+CANDIDATE_INTAKE_MULTIPLIER = 12
+MAX_CANDIDATE_INTAKE_WINDOW = 256
 
 #: Priority bands, as a fraction of the achievable total.
 BAND_HIGH = 0.65
@@ -583,6 +594,151 @@ def candidate_category(candidate: Dict[str, Any]) -> str:
         if re.search(pattern, text):
             return name
     return CATEGORY_FALLBACK
+
+
+def _candidate_intake_identity(candidate: Dict[str, Any]) -> str:
+    """Stable, non-secret identity used only for an intake window/digest."""
+    candidate_id = str(candidate.get("candidate_id") or "").strip()
+    if candidate_id:
+        return candidate_id
+    material = {
+        key: candidate.get(key) for key in (
+            "surface", "entry", "input_shape", "logic", "hypothesis",
+            "code_location", "flow_id", "sink_id", "control_id",
+        )
+    }
+    encoded = json.dumps(material, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"), default=str).encode("utf-8")
+    return "anonymous-" + hashlib.sha256(encoded).hexdigest()[:20]
+
+
+def bounded_candidate_intake(
+        candidates: Sequence[Dict[str, Any]], slots: int,
+        round_no: int = 0, window_size: Optional[int] = None,
+        pinned: Sequence[str] = (),
+        ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Return a deterministic, category-stratified active candidate window.
+
+    Candidate discovery can legitimately be broad; executing and fully scoring
+    every static lead in one round is neither an audit budget nor an evidence
+    claim.  This function preserves the complete upstream pool, selects a
+    finite rotating slice for the current round, and emits enough metadata to
+    prove what remains queued.  It does not mark intake-deferred candidates as
+    excluded, reviewed, or non-findings.
+
+    Each category receives a fair share of the window.  Within that category,
+    the start offset advances by its allocation on every round, so one large
+    producer cannot permanently starve later candidates behind a fixed prefix.
+    """
+    pool = [candidate for candidate in candidates if isinstance(candidate, dict)]
+    requested_slots = max(1, int(slots or DEFAULT_SLOTS))
+    if window_size is None:
+        window_size = max(DEFAULT_CANDIDATE_INTAKE_MINIMUM,
+                          requested_slots * CANDIDATE_INTAKE_MULTIPLIER)
+        window_size = min(MAX_CANDIDATE_INTAKE_WINDOW, window_size)
+    window = max(1, int(window_size))
+
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for candidate in pool:
+        groups.setdefault(candidate_category(candidate), []).append(candidate)
+    categories = sorted(groups)
+    for category in categories:
+        groups[category].sort(key=_candidate_intake_identity)
+
+    source_rows = [
+        {"candidate_id": _candidate_intake_identity(candidate),
+         "category": candidate_category(candidate)}
+        for candidate in pool
+    ]
+    source_rows.sort(key=lambda row: (row["category"], row["candidate_id"]))
+    source_digest = "pool-" + hashlib.sha256(json.dumps(
+        source_rows, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
+
+    capacity = min(window, len(pool))
+    allocations = {category: 0 for category in categories}
+    # Round-robin allocation, not a top-K prefix.  The loop is bounded by the
+    # small active window, never by the full (possibly 80k+) candidate pool.
+    while sum(allocations.values()) < capacity:
+        advanced = False
+        for category in categories:
+            if sum(allocations.values()) >= capacity:
+                break
+            if allocations[category] >= len(groups[category]):
+                continue
+            allocations[category] += 1
+            advanced = True
+        if not advanced:
+            break
+
+    round_index = max(0, int(round_no) - 1)
+    active: List[Dict[str, Any]] = []
+    category_meta: Dict[str, Dict[str, int]] = {}
+    for category in categories:
+        rows = groups[category]
+        allocation = allocations[category]
+        start = ((round_index * allocation) % len(rows)) if rows and allocation else 0
+        for offset in range(allocation):
+            active.append(rows[(start + offset) % len(rows)])
+        category_meta[category] = {
+            "total": len(rows), "active": allocation,
+            "deferred_intake": max(0, len(rows) - allocation),
+            "offset": start,
+        }
+
+    # Runtime-backed candidates (for example fuzz reproducers) must reach the
+    # scheduler even if a broad static category happened to fill the window.
+    # They still count against both the intake window and the later round slot
+    # budget; this is priority, not a way to bypass a budget.
+    by_id = {str(candidate.get("candidate_id") or ""): candidate
+             for candidate in pool if candidate.get("candidate_id")}
+    pinned_candidates = []
+    seen_pinned = set()
+    for candidate_id in pinned:
+        candidate_id = str(candidate_id)
+        if candidate_id in seen_pinned or candidate_id not in by_id:
+            continue
+        seen_pinned.add(candidate_id)
+        pinned_candidates.append(by_id[candidate_id])
+    pinned_ids = {str(candidate.get("candidate_id") or "")
+                  for candidate in pinned_candidates}
+    if pinned_candidates:
+        remaining = [candidate for candidate in active
+                     if str(candidate.get("candidate_id") or "") not in pinned_ids]
+        active = (pinned_candidates[:capacity] +
+                  remaining[:max(0, capacity - len(pinned_candidates))])
+    active_by_category = Counter(candidate_category(candidate) for candidate in active)
+    for category, detail in category_meta.items():
+        detail["active"] = int(active_by_category.get(category, 0))
+        detail["deferred_intake"] = max(0, detail["total"] - detail["active"])
+
+    active_rows = [
+        {"candidate_id": _candidate_intake_identity(candidate),
+         "category": candidate_category(candidate)}
+        for candidate in active
+    ]
+    active_rows.sort(key=lambda row: (row["category"], row["candidate_id"]))
+    active_digest = "active-" + hashlib.sha256(json.dumps(
+        active_rows, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
+    metadata = {
+        "schema_version": CANDIDATE_INTAKE_SCHEMA_VERSION,
+        "round": int(round_no),
+        "slots": requested_slots,
+        "window_limit": window,
+        "pool_candidates": len(pool),
+        "active_candidates": len(active),
+        "deferred_intake_candidates": max(0, len(pool) - len(active)),
+        "deferred_intake_status": "not-scheduled-yet",
+        "pool_digest": source_digest,
+        "active_digest": active_digest,
+        "active_candidate_ids": [row["candidate_id"] for row in active_rows],
+        "pinned_candidate_ids": [str(candidate.get("candidate_id") or "")
+                                 for candidate in pinned_candidates[:capacity]],
+        "categories": category_meta,
+        "claim_status": "not-a-finding",
+    }
+    return active, metadata
 
 
 def candidate_research_surface(candidate: Dict[str, Any]) -> str:
@@ -1430,9 +1586,56 @@ def _coverage_ratio(own: set, reviewed: set) -> float:
     return len(own & reviewed) / float(len(own))
 
 
+@dataclass
+class _PoolDuplicateIndex:
+    """Indexes the two same-pool duplicate tests used during scoring."""
+
+    question_ids: Dict[Any, List[str]] = field(default_factory=dict)
+    legacy_locations: Dict[str, List[Tuple[str, frozenset]]] = field(
+        default_factory=dict)
+
+
+def _build_pool_duplicate_index(
+        pool: Optional[Sequence[Dict[str, Any]]]) -> _PoolDuplicateIndex:
+    """Build once per scored pool, avoiding quadratic peer scans.
+
+    The result preserves ``_near_duplicate_of`` semantics: provenance-backed
+    candidates compare only documented research questions, while legacy rows
+    compare only peers sharing at least one exact location before calculating
+    the Jaccard overlap.
+    """
+    from .evidence_provenance import research_question_key
+
+    questions: Dict[Any, List[str]] = {}
+    legacy: Dict[str, List[Tuple[str, frozenset]]] = {}
+    for candidate in pool or ():
+        if not isinstance(candidate, dict):
+            continue
+        candidate_id = str(candidate.get("candidate_id") or "")
+        if not candidate_id:
+            continue
+        question = research_question_key(candidate)
+        if question:
+            questions.setdefault(question, []).append(candidate_id)
+        if candidate.get("provenance_schema_version"):
+            continue
+        locations = frozenset(
+            "%s:%d" % (file, line)
+            for file, line in candidate_locations(candidate))
+        for location in locations:
+            legacy.setdefault(location, []).append((candidate_id, locations))
+    for question in questions:
+        questions[question] = sorted(set(questions[question]))
+    for location in legacy:
+        legacy[location].sort(key=lambda row: row[0])
+    return _PoolDuplicateIndex(question_ids=questions, legacy_locations=legacy)
+
+
 def _near_duplicate_of(candidate: Dict[str, Any], ctx: ScheduleContext,
                        pool: Optional[Sequence[Dict[str, Any]]] = None,
-                       link: Optional[LinkedRegions] = None) -> str:
+                       link: Optional[LinkedRegions] = None,
+                       duplicate_index: Optional[_PoolDuplicateIndex] = None,
+                       ) -> str:
     """The id this candidate duplicates, or ``""``.
 
     Complete provenance peers are first compared by source group AND a known
@@ -1461,11 +1664,19 @@ def _near_duplicate_of(candidate: Dict[str, Any], ctx: ScheduleContext,
     cid = str(candidate.get("candidate_id") or "")
     from .evidence_provenance import research_question_key
 
+    if duplicate_index is None and pool is not None:
+        duplicate_index = _build_pool_duplicate_index(pool)
+
     question = research_question_key(candidate)
     if question:
-        peers = [str(other.get("candidate_id")) for other in pool or ()
-                 if other.get("candidate_id") and str(other["candidate_id"]) < cid
-                 and research_question_key(other) == question]
+        if duplicate_index is not None:
+            peers = [other_id for other_id in
+                     duplicate_index.question_ids.get(question, ())
+                     if other_id < cid]
+        else:
+            peers = [str(other.get("candidate_id")) for other in pool or ()
+                     if other.get("candidate_id") and str(other["candidate_id"]) < cid
+                     and research_question_key(other) == question]
         if peers:
             return min(peers)
     own_sinks = {str(s.get("sink_id")) for s in link.sinks}
@@ -1491,21 +1702,33 @@ def _near_duplicate_of(candidate: Dict[str, Any], ctx: ScheduleContext,
     own_locations = {"%s:%d" % (f, n) for f, n in link.locations}
     if not own_locations:
         return ""
-    for other_candidate in pool or ():
-        other_id = str(other_candidate.get("candidate_id") or "")
-        if not other_id or other_id >= cid:
-            continue
-        if candidate.get("provenance_schema_version") or other_candidate.get("provenance_schema_version"):
-            continue
-        other_locations = {"%s:%d" % (f, n)
-                           for f, n in candidate_locations(other_candidate)}
-        if _jaccard(own_locations, other_locations) >= NEAR_DUPLICATE_OVERLAP:
-            return other_id
+    if not candidate.get("provenance_schema_version") and duplicate_index is not None:
+        peers: Dict[str, frozenset] = {}
+        for location in own_locations:
+            for other_id, other_locations in duplicate_index.legacy_locations.get(
+                    location, ()):
+                if other_id < cid:
+                    peers.setdefault(other_id, other_locations)
+        for other_id in sorted(peers):
+            if _jaccard(own_locations, set(peers[other_id])) >= NEAR_DUPLICATE_OVERLAP:
+                return other_id
+    else:
+        for other_candidate in pool or ():
+            other_id = str(other_candidate.get("candidate_id") or "")
+            if not other_id or other_id >= cid:
+                continue
+            if candidate.get("provenance_schema_version") or other_candidate.get("provenance_schema_version"):
+                continue
+            other_locations = {"%s:%d" % (f, n)
+                               for f, n in candidate_locations(other_candidate)}
+            if _jaccard(own_locations, other_locations) >= NEAR_DUPLICATE_OVERLAP:
+                return other_id
     return ""
 
 
 def score_candidate(candidate: Dict[str, Any], ctx: ScheduleContext,
-                    pool: Optional[Sequence[Dict[str, Any]]] = None
+                    pool: Optional[Sequence[Dict[str, Any]]] = None,
+                    duplicate_index: Optional[_PoolDuplicateIndex] = None,
                     ) -> CandidateScore:
     """Score one candidate against every weight in ``ctx.weights``.
 
@@ -1541,7 +1764,7 @@ def score_candidate(candidate: Dict[str, Any], ctx: ScheduleContext,
         before = total
         total = max(0.0, min(scale, total + requested))
         surface_guidance["applied_delta"] = round(total - before, 4)
-    duplicate = _near_duplicate_of(candidate, ctx, pool, link)
+    duplicate = _near_duplicate_of(candidate, ctx, pool, link, duplicate_index)
     if duplicate:
         total *= DUPLICATE_DAMPING
         evidence["duplicate"] = {"of": duplicate, "damping": DUPLICATE_DAMPING}
@@ -1661,7 +1884,8 @@ def score_candidates(candidates: Sequence[Dict[str, Any]], ctx: ScheduleContext
                      ) -> List[CandidateScore]:
     """Score every candidate, highest first; ties broken by candidate id."""
     pool = list(candidates)
-    scores = [score_candidate(c, ctx, pool) for c in pool]
+    duplicate_index = _build_pool_duplicate_index(pool)
+    scores = [score_candidate(c, ctx, pool, duplicate_index) for c in pool]
     scores.sort(key=lambda s: (-s.total, s.candidate_id))
     return scores
 

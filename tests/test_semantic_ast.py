@@ -17,6 +17,7 @@ from agent.analysis import semantic_ast  # noqa: E402
 from agent.analysis import semantic_controlflow  # noqa: E402
 from agent.analysis import semantic_guards  # noqa: E402
 from agent.analysis import semantic_paths  # noqa: E402
+from agent.analysis.semantic_frontend import JavaFrontend  # noqa: E402
 from agent.analysis.inventory import CoverageStore  # noqa: E402
 
 
@@ -107,6 +108,34 @@ class SemanticAstEvidenceTests(unittest.TestCase):
         self.assertEqual("ast-parse-failed", relation["relation"])
         self.assertEqual("syntax-error", relation["parse_status"])
         self.assertEqual(1, evidence["summary"]["candidates"])
+
+    def test_java_parser_records_terminating_guard_without_claiming_cfg_proof(self):
+        if not JavaFrontend.available():
+            self.skipTest("JDK parser unavailable on this host")
+        root = Path(tempfile.mkdtemp(prefix="vulngate-java-ast-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        (root / "Api.java").write_text(
+            "package p;\nclass Api {\n"
+            "  void handler(String value) {\n"
+            "    if (!hasPermission(value)) { return; }\n"
+            "    Runtime.getRuntime().exec(value);\n"
+            "  }\n}\n", encoding="utf-8")
+        controlflow = {"flows": [{
+            "flow_id": "java-flow", "entry_id": "entry", "sink_id": "sink",
+            "path": ["java:p.Api#handler"], "static_control_verdict": "partial",
+            "entry": {"file": "Api.java", "line": 3},
+            "sink": {"file": "Api.java", "line": 5, "category": "command-exec"},
+            "controls": [{"control_id": "auth", "file": "Api.java", "line": 4,
+                          "category": "authorization", "required_category": "authorization",
+                          "control_flow": {}}],
+        }]}
+        evidence = semantic_ast.build_semantic_ast_evidence(root, controlflow)
+        relation = evidence["flows"][0]["controls"][0]["ast_control_flow"]
+        self.assertEqual("javac-ast", relation["parser"])
+        self.assertEqual("parsed", relation["parse_status"])
+        self.assertEqual("ast-terminating-guard", relation["relation"])
+        self.assertEqual("not-a-finding", evidence["claim_status"])
+        self.assertIn("does not resolve types", " ".join(evidence["limitations"]))
 
     def test_artifact_is_deterministic_bounded_and_enters_static_pool(self):
         root, controlflow = self._fixture(

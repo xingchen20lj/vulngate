@@ -756,7 +756,9 @@ def _validate_historical_manifest(manifest: Dict[str, Any]) -> List[str]:
         if not _text(raw.get("vulnerable_mechanism"), 240):
             errors.append("%s has no vulnerable_mechanism" % prefix)
         for name in ("expected_entry", "expected_sink", "safe_sibling"):
-            if not _normal_location(raw.get(name)):
+            location = _normal_location(raw.get(name))
+            if (not location or not location.get("file")
+                    or not (location.get("symbol") or location.get("api"))):
                 errors.append("%s has no %s" % (prefix, name))
         if not _bounded_strings(raw.get("required_preconditions"), 16, 180):
             errors.append("%s has no required_preconditions" % prefix)
@@ -776,6 +778,9 @@ def _validate_historical_manifest(manifest: Dict[str, Any]) -> List[str]:
         references = _normal_references(raw.get("reference_evidence"))
         if not references:
             errors.append("%s has no HTTPS reference_evidence" % prefix)
+        elif {"advisory", "source", "fix"} - {
+                str(row.get("kind") or "").lower() for row in references}:
+            errors.append("%s reference_evidence requires advisory/source/fix" % prefix)
         matrix = raw.get("version_matrix")
         if (not isinstance(matrix, dict)
                 or set(("v1.0", "v1.1", "v1.2", "current")) - set(matrix)):
@@ -789,6 +794,7 @@ def _validate_historical_manifest(manifest: Dict[str, Any]) -> List[str]:
             continue
         roles = set()
         arm_ids = set()
+        arm_commits: Dict[str, str] = {}
         for arm_index, arm in enumerate(arms[:8]):
             arm_prefix = "%s arm[%d]" % (prefix, arm_index)
             if not isinstance(arm, dict):
@@ -807,6 +813,8 @@ def _validate_historical_manifest(manifest: Dict[str, Any]) -> List[str]:
                 errors.append("%s has invalid truth" % arm_prefix)
             if not _is_commit_sha(_normal_revision(arm.get("revision")).get("commit")):
                 errors.append("%s has no revision commit" % arm_prefix)
+            else:
+                arm_commits[role] = _normal_revision(arm.get("revision")).get("commit", "")
             status = _expected_status(arm, truth)
             if status == STATUS_MISSING:
                 errors.append("%s has invalid expected_status" % arm_prefix)
@@ -823,6 +831,26 @@ def _validate_historical_manifest(manifest: Dict[str, Any]) -> List[str]:
                 errors.append("%s has invalid precondition_class" % arm_prefix)
         if roles != required_roles:
             errors.append("%s must contain vulnerable/fixed/safe-sibling/environment-gap arms" % prefix)
+        vulnerable_commit = _normal_revision(raw.get("vulnerable_revision")).get("commit", "")
+        fixed_commit = _normal_revision(raw.get("fixed_revision")).get("commit", "")
+        expected_commits = {
+            "vulnerable": vulnerable_commit,
+            "fixed": fixed_commit,
+            "safe-sibling": vulnerable_commit,
+            "environment-gap": vulnerable_commit,
+        }
+        for role, expected_commit in expected_commits.items():
+            if expected_commit and arm_commits.get(role) != expected_commit:
+                errors.append("%s %s arm revision is not anchored to its baseline" %
+                              (prefix, role))
+        matrix_commits = {
+            _normal_revision((matrix or {}).get(name)).get("commit", "")
+            for name in ("v1.0", "v1.1", "v1.2", "current")
+        }
+        for name, commit in (("vulnerable_revision", vulnerable_commit),
+                             ("fixed_revision", fixed_commit)):
+            if commit and commit not in matrix_commits:
+                errors.append("%s %s is absent from version_matrix" % (prefix, name))
         if len(arms) > 8:
             errors.append("%s has too many arms" % prefix)
     return errors

@@ -24,11 +24,12 @@ import re
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from . import models
 from .languages import SourceFilter, read_source_lines
 from .symbols import FILE_KIND, NOT_A_SYMBOL
+from .semantic_frontend import FrontendSession, JAVA_AST_PARSER
 
 #: Identifiers that look like calls but never resolve to a project symbol.
 #: Kept short on purpose: resolution is name-based against the symbol index, so
@@ -71,10 +72,14 @@ class CallGraph:
 
     def summary(self) -> Dict[str, object]:
         propagation = Counter(edge.propagation for edge in self.edges)
+        parser = Counter(edge.parser for edge in self.edges)
+        producer = Counter(edge.producer for edge in self.edges)
         return {
             "nodes": len(self.symbol_ids),
             "edges": len(self.edges),
             "propagation": dict(sorted(propagation.items())),
+            "edge_parsers": dict(sorted(parser.items())),
+            "edge_producers": dict(sorted(producer.items())),
             "unresolved_calls": sum(self.unresolved.values()),
             "unresolved_names": len(self.unresolved),
             "ambiguous_names": len(self.ambiguous),
@@ -82,10 +87,12 @@ class CallGraph:
                                in sorted(self.unresolved.items(),
                                          key=lambda kv: (-kv[1], kv[0]))[:20]],
             "confidence": "heuristic-callgraph",
-            "producer": "regex",
+            "producer": "mixed" if len(producer) > 1 else
+                        (next(iter(producer), "regex")),
             "evidence_type": "static-inferred",
             "limitations": [
                 "name-based resolution; overloads collapse to one symbol",
+                "Java parser call locations are syntax facts only; type, overload, classpath and virtual-dispatch resolution remain absent",
                 "no virtual dispatch, DI container, reflection or async model",
                 "ambiguity yields no edge rather than a guess",
             ],
@@ -101,7 +108,7 @@ def _parameters(lines: Sequence[str], symbol: models.SymbolRecord) -> List[str]:
     ``start_line`` would splice route strings in as parameter names and make
     every argument appear attacker-controlled or not, at random.
     """
-    if symbol.parser == "ast":
+    if symbol.parser in {"ast", JAVA_AST_PARSER}:
         return list(symbol.parameters)
     if symbol.start_line < 1 or symbol.start_line > len(lines):
         return []
@@ -182,9 +189,28 @@ def _innermost_by_line(file_symbols: Sequence[models.SymbolRecord],
     return owners
 
 
+def _classify_ast_call(fact: Any, caller: models.SymbolRecord,
+                       params: Sequence[str]) -> str:
+    """Classify a Java parser call without re-reading source text."""
+    attributes = getattr(fact, "attributes", {}) or {}
+    if bool(attributes.get("constructor")):
+        return "constructor"
+    context = str(attributes.get("use_context") or "direct")
+    if context == "assigned":
+        return "field" if caller.kind in {"class", "interface", "enum", "record"} \
+            else "return-value"
+    argument_tokens = attributes.get("argument_tokens") or []
+    values = {str(token) for argument in argument_tokens
+              if isinstance(argument, (list, tuple)) for token in argument}
+    if values & {str(param) for param in params}:
+        return "argument"
+    return "direct"
+
+
 def build_call_graph(root: Path, symbols: Sequence[models.SymbolRecord],
                      source_filter: Optional[SourceFilter] = None,
-                     lines_cache: Optional[Dict[str, List[str]]] = None
+                     lines_cache: Optional[Dict[str, List[str]]] = None,
+                     frontend_session: Optional[FrontendSession] = None
                      ) -> CallGraph:
     """Build the call graph over ``symbols``.  Full scan, no edge cap."""
     root = Path(root).resolve()
@@ -211,6 +237,32 @@ def build_call_graph(root: Path, symbols: Sequence[models.SymbolRecord],
     ambiguous: Counter = Counter()
     edges: Dict[Tuple[str, str], models.CallEdge] = {}
 
+    def register_edge(caller: models.SymbolRecord, name: str, number: int,
+                      propagation: str, *, parser: str = "regex-fallback",
+                      parse_status: str = "not-parsed", source_revision: str = "",
+                      analysis_gaps: Optional[Sequence[str]] = None) -> None:
+        if name in NOT_A_SYMBOL or name in COMMON_BUILTINS or name == caller.name:
+            return
+        callee = _resolve(name, caller, by_file_class, by_file_name,
+                          by_name, ambiguous)
+        if callee is None:
+            unresolved[name] += 1
+            return
+        key = (caller.symbol_id, callee.symbol_id)
+        if key in edges:
+            # First sighting wins: the earliest call site is the most useful
+            # review anchor, independent of whether it came from regex or AST.
+            return
+        edges[key] = models.CallEdge(
+            caller=caller.symbol_id, callee=callee.symbol_id,
+            callee_name=name, confidence="heuristic-callgraph", file=caller.file,
+            line=number, propagation=propagation,
+            producer="java-ast" if parser == JAVA_AST_PARSER else "regex",
+            parser=parser, parse_status=parse_status,
+            source_revision=source_revision,
+            analysis_gaps=list(analysis_gaps or []),
+        )
+
     for rel, file_symbols in sorted(by_file.items()):
         lines: Optional[List[str]] = None
         if lines_cache is not None and rel in lines_cache:
@@ -221,6 +273,30 @@ def build_call_graph(root: Path, symbols: Sequence[models.SymbolRecord],
                 lines_cache[rel] = lines
         owners = _innermost_by_line(file_symbols, len(lines))
         params_cache: Dict[str, List[str]] = {}
+        java_unit = None
+        if frontend_session is not None and rel.lower().endswith(".java"):
+            candidate_unit = frontend_session.parse(rel)
+            if candidate_unit.parser == JAVA_AST_PARSER:
+                java_unit = candidate_unit
+        if java_unit is not None and java_unit.status == "parsed":
+            for fact in java_unit.select("call"):
+                number = int(fact.line or 0)
+                caller = owners[number] if 0 < number < len(owners) else None
+                if caller is None:
+                    continue
+                name = str(fact.attributes.get("leaf_name") or
+                           fact.name.rsplit(".", 1)[-1])
+                params = params_cache.get(caller.symbol_id)
+                if params is None:
+                    params = _parameters(lines, caller)
+                    params_cache[caller.symbol_id] = params
+                register_edge(caller, name, number,
+                              _classify_ast_call(fact, caller, params),
+                              parser=JAVA_AST_PARSER,
+                              parse_status=java_unit.status,
+                              source_revision=java_unit.source_revision,
+                              analysis_gaps=java_unit.analysis_gaps)
+            continue
         for number in range(1, len(lines) + 1):
             caller = owners[number]
             if caller is None:
@@ -241,26 +317,7 @@ def build_call_graph(root: Path, symbols: Sequence[models.SymbolRecord],
                 params = _parameters(lines, caller)
                 params_cache[caller.symbol_id] = params
             for name in sorted(names):
-                if name in NOT_A_SYMBOL or name in COMMON_BUILTINS:
-                    continue
-                if name == caller.name:
-                    continue
-                callee = _resolve(name, caller, by_file_class,
-                                  by_file_name, by_name, ambiguous)
-                if callee is None:
-                    unresolved[name] += 1
-                    continue
-                key = (caller.symbol_id, callee.symbol_id)
-                if key in edges:
-                    # First sighting wins: the earliest call site is the most
-                    # informative line to cite in the finding.
-                    continue
-                edges[key] = models.CallEdge(
-                    caller=caller.symbol_id, callee=callee.symbol_id,
-                    callee_name=name, confidence="heuristic-callgraph",
-                    file=rel, line=number,
-                    propagation=_classify(line, name, params),
-                )
+                register_edge(caller, name, number, _classify(line, name, params))
 
     graph.edges = [edges[key] for key in sorted(edges, key=lambda k: (k[0], k[1]))]
     for edge in graph.edges:

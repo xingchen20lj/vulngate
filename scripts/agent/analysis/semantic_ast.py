@@ -1,10 +1,11 @@
-"""Bounded Python-AST control-flow witnesses for security review.
+"""Bounded syntax-tree control-flow witnesses for security review.
 
 ``semantic_controlflow`` deliberately works for many brace/indent languages,
-but its intervals cannot tell whether a Python sink is in an ``else`` body,
-an exception handler, or a function-local statement that merely shares a line
+but its intervals cannot tell whether a sink is in an ``else`` body, an
+exception handler, or a function-local statement that merely shares a line
 range with another construct.  This module adds a syntax-aware bridge for
-Python files using the standard-library AST.
+Python files using the standard-library AST and Java files using the JDK
+compiler parser in parse-only mode.
 
 The result is still a review lead, not a CFG or a vulnerability proof.  It
 records branch membership, scope identity, negative-test shape, and explicit
@@ -22,12 +23,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import controls as control_rules
-from .semantic_frontend import FrontendSession, ParsedUnit, MAX_FILES, MAX_NODES
+from .semantic_frontend import (FrontendSession, ParsedUnit, SyntaxFact,
+                                MAX_FILES, MAX_NODES)
 
 
 SEMANTIC_AST_INDEX = "semantic-ast-evidence"
 SEMANTIC_AST_CANDIDATE_INDEX = "semantic-ast-candidates"
-SEMANTIC_AST_VERSION = "semantic-ast-evidence-v1"
+SEMANTIC_AST_VERSION = "semantic-ast-evidence-v2"
 CLAIM_STATUS = "not-a-finding"
 CONFIDENCE = "heuristic-nearby"
 EVIDENCE_TYPE = "static-inferred"
@@ -43,10 +45,11 @@ _CANDIDATE_RELATIONS = frozenset({
 _TERMINAL_NODES = (ast.Return, ast.Raise, ast.Break, ast.Continue)
 
 _LIMITATIONS = (
-    "Python AST membership is syntax-aware but does not implement a complete CFG, dominance, SSA or path-feasibility analysis",
+    "syntax-tree membership is syntax-aware but does not implement a complete CFG, dominance, SSA or path-feasibility analysis",
+    "Java uses JavacTask.parse only; it does not resolve types, overloads, virtual dispatch, classpaths, annotation semantics or runtime configuration",
     "terminal statements inside nested conditionals, loops, exception handlers and finally blocks are only structural witnesses",
     "dynamic dispatch, decorators, imports, monkey-patching, reflection, type identity, sanitizer semantics and runtime configuration remain unresolved",
-    "parse failures and unsupported languages are analysis gaps, never negative security evidence",
+    "parse failures, unavailable JDKs and unsupported languages are analysis gaps, never negative security evidence",
     "all rows and candidates are static review leads, never proof of a vulnerability or proof of safety",
 )
 
@@ -160,6 +163,8 @@ def _negative_test(node: Any) -> bool:
 
 
 def _node_kind(node: Any) -> str:
+    if isinstance(node, SyntaxFact):
+        return node.kind
     return type(node).__name__ if node is not None else ""
 
 
@@ -358,6 +363,137 @@ class _AstIndex:
         return result
 
 
+class _JavaAstIndex:
+    """Adapter over parse-only JDK facts with the same relation surface.
+
+    It deliberately exposes only structural syntax facts supplied by
+    :class:`JavaFrontend`: declaration ranges, branch body ranges and direct
+    terminal shape.  No type or control-flow resolution is inferred here.
+    """
+
+    def __init__(self, file_name: str, unit: ParsedUnit):
+        self.file_name = file_name
+        self.status = {"parse-failed": "syntax-error",
+                       "source-unreadable": "unreadable"}.get(unit.status,
+                                                                  unit.status)
+        self.error_kind = unit.error_kind
+        self.source_revision = unit.source_revision
+        self.analysis_gaps = list(unit.analysis_gaps)
+        self.parser = unit.parser
+        self.module_end = max(1, unit.line_count)
+        self.scopes: List[Dict[str, Any]] = []
+        self.branches: List[Dict[str, Any]] = []
+        self.nodes: List[SyntaxFact] = list(unit.facts)
+        self._scope_cache: Dict[int, Dict[str, Any]] = {}
+        self._branches_cache: Dict[int, List[Tuple[Dict[str, Any], str]]] = {}
+        self._control_cache: Dict[int, Optional[Dict[str, Any]]] = {}
+        self._node_cache: Dict[int, Optional[SyntaxFact]] = {}
+        if self.status != "parsed":
+            return
+        for fact in unit.select("symbol"):
+            kind = str(fact.attributes.get("symbol_kind") or "symbol")
+            self.scopes.append({"kind": kind, "start": fact.line,
+                                "end": max(fact.line, fact.end_line),
+                                "name": fact.name})
+        for index, fact in enumerate(unit.select("branch")):
+            attributes = fact.attributes
+            body = dict(attributes.get("body_span") or {})
+            alternate = dict(attributes.get("alternate_span") or {})
+            test = dict(attributes.get("test_span") or {})
+            scope = self.scope_at(fact.line)
+            parts = [("body", body), ("alternate", alternate)]
+            self.branches.append({
+                "branch_id": _stable("%s|%s|%s|%s" % (
+                    file_name, fact.line,
+                    str(attributes.get("branch_kind") or "branch"), index),
+                    "ast-branch"),
+                "kind": str(attributes.get("branch_kind") or "branch"),
+                "header_line": fact.line,
+                "scope": scope,
+                "parts": [{"part": name, "span": {
+                    "start": _int(value.get("start")),
+                    "end": _int(value.get("end"))}}
+                          for name, value in parts
+                          if _int(value.get("start"))],
+                "test_span": {"start": _int(test.get("start")),
+                              "end": _int(test.get("end"))},
+                "terminal": str(attributes.get("terminal") or "none"),
+                "negative_test": bool(attributes.get("negative_test")),
+            })
+
+    def scopes_at(self, line: int) -> List[Dict[str, Any]]:
+        scopes = [dict(scope) for scope in self.scopes
+                  if _contains((_int(scope.get("start")), _int(scope.get("end"))),
+                               line)]
+        scopes.sort(key=lambda item: (
+            _int(item.get("end")) - _int(item.get("start")),
+            -_int(item.get("start"))))
+        return scopes
+
+    def scope_at(self, line: int) -> Dict[str, Any]:
+        if line in self._scope_cache:
+            return dict(self._scope_cache[line])
+        scopes = self.scopes_at(line)
+        result = scopes[0] if scopes else {"kind": "module", "start": 1,
+                                            "end": self.module_end}
+        self._scope_cache[line] = dict(result)
+        return dict(result)
+
+    def branches_at(self, line: int) -> List[Tuple[Dict[str, Any], str]]:
+        if line in self._branches_cache:
+            return list(self._branches_cache[line])
+        hits: List[Tuple[Dict[str, Any], str]] = []
+        for branch in self.branches:
+            for part in branch.get("parts") or []:
+                span = part.get("span") or {}
+                if _contains((_int(span.get("start")), _int(span.get("end"))),
+                             line):
+                    hits.append((branch, str(part.get("part") or "")))
+                    break
+        hits.sort(key=lambda item: (
+            _int(item[0].get("scope", {}).get("end"))
+            - _int(item[0].get("scope", {}).get("start")),
+            -_int(item[0].get("header_line"))))
+        self._branches_cache[line] = list(hits)
+        return hits
+
+    def branch_for_control(self, line: int) -> Optional[Dict[str, Any]]:
+        if line in self._control_cache:
+            branch = self._control_cache[line]
+            return dict(branch) if branch else None
+        candidates = []
+        for branch in self.branches:
+            test = branch.get("test_span") or {}
+            if (_contains((_int(test.get("start")), _int(test.get("end"))), line)
+                    or _int(branch.get("header_line")) == line):
+                candidates.append(branch)
+        if candidates:
+            result = sorted(candidates, key=lambda item: (
+                _int(item.get("test_span", {}).get("end"))
+                - _int(item.get("test_span", {}).get("start")),
+                _int(item.get("header_line"))))[0]
+            self._control_cache[line] = dict(result)
+            return dict(result)
+        self._control_cache[line] = None
+        return None
+
+    def node_at(self, line: int) -> Optional[SyntaxFact]:
+        if line in self._node_cache:
+            return self._node_cache[line]
+        candidates = [fact for fact in self.nodes
+                      if fact.line <= line <= max(fact.line, fact.end_line)]
+        if not candidates:
+            self._node_cache[line] = None
+            return None
+        priority = {"call": 0, "branch": 1, "return": 2,
+                    "assignment": 3, "symbol": 4}
+        result = sorted(candidates, key=lambda fact: (
+            fact.end_line - fact.line, priority.get(fact.kind, 10),
+            -fact.line))[0]
+        self._node_cache[line] = result
+        return result
+
+
 def _public_branch(branch: Optional[Mapping[str, Any]], part: str = "") -> Dict[str, Any]:
     if not branch:
         return {}
@@ -372,7 +508,7 @@ def _public_branch(branch: Optional[Mapping[str, Any]], part: str = "") -> Dict[
     return result
 
 
-def _relation(index: _AstIndex, control: Mapping[str, Any],
+def _relation(index: Any, control: Mapping[str, Any],
               sink: Mapping[str, Any],
               fallback: Mapping[str, Any]) -> Dict[str, Any]:
     control_line = _int(control.get("line"))
@@ -495,12 +631,12 @@ def _candidate(flow: Mapping[str, Any], guard: Mapping[str, Any],
         "entry": str(entry.get("api") or entry.get("entry_id") or ""),
         "input_shape": str(entry.get("input_shape") or "unknown"),
         "logic": "ast-control-flow: %s" % relation_name,
-        "hypothesis": "Python 语法树显示安全控制与 sink 的分支关系仍未闭合；需人工补充真实 CFG、数据流和运行时证据",
+        "hypothesis": "语法树显示安全控制与 sink 的分支关系仍未闭合；需人工补充真实 CFG、数据流和运行时证据",
         "precondition_tier_hint": "app-cooperation"
         if relation_name in {"ast-cross-scope-unverified", "ast-parse-failed"}
         else "single-feature",
         "preconditions": [
-            "需确认 Python AST 所在文件、符号和运行配置对应实际执行路径",
+            "需确认语法树所在文件、符号和运行配置对应实际执行路径",
             "需验证异常、循环、装饰器、动态调用、主体绑定和 sink 效果",
         ],
         "poc_class": control_rules.poc_class_for(candidate_id),
@@ -537,10 +673,10 @@ def build_semantic_ast_evidence(
         root: Path, semantic_controlflow_evidence: Mapping[str, Any],
         frontend_session: Optional[FrontendSession] = None
         ) -> Dict[str, Any]:
-    """Build syntax-aware Python branch witnesses from control-flow rows."""
+    """Build syntax-aware Python/Java branch witnesses from control-flow rows."""
     root = Path(root).resolve()
     frontend_session = frontend_session or FrontendSession(root)
-    index_cache: "OrderedDict[str, _AstIndex]" = OrderedDict()
+    index_cache: "OrderedDict[str, Any]" = OrderedDict()
     parser_status_by_file: Dict[str, str] = {}
     flow_rows: List[Dict[str, Any]] = []
     candidates: List[Dict[str, Any]] = []
@@ -560,7 +696,10 @@ def build_semantic_ast_evidence(
             if file_name not in index_cache:
                 if len(index_cache) >= MAX_FILES:
                     index_cache.popitem(last=False)
-                index_cache[file_name] = _AstIndex(file_name, frontend_session.parse(file_name))
+                unit = frontend_session.parse(file_name)
+                index_cache[file_name] = (
+                    _JavaAstIndex(file_name, unit)
+                    if unit.parser == "javac-ast" else _AstIndex(file_name, unit))
             index_cache.move_to_end(file_name)
             files_seen.add(file_name)
             index = index_cache[file_name]
@@ -655,7 +794,7 @@ def render_semantic_ast_text(evidence: Mapping[str, Any], lang: str = "zh",
         if isinstance(evidence, Mapping) else []
     if lang == "en":
         lines = [
-            "Python AST control-flow evidence",
+            "Syntax AST control-flow evidence",
             "─" * 56,
             "  flows %s  controls %s  parsed files %s/%s  candidates %s"
             % (summary.get("flows", 0), summary.get("controls", 0),
@@ -666,7 +805,7 @@ def render_semantic_ast_text(evidence: Mapping[str, Any], lang: str = "zh",
         ]
     else:
         lines = [
-            "Python AST 控制流证据", "─" * 56,
+            "语法树控制流证据", "─" * 56,
             "  路径 %s  控制 %s  已解析文件 %s/%s  候选 %s" % (
                 summary.get("flows", 0), summary.get("controls", 0),
                 summary.get("parsed_files", 0), summary.get("files", 0),

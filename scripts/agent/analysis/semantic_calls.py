@@ -22,11 +22,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from . import controls as control_rules
+from .semantic_frontend import FrontendSession, ParsedUnit, JAVA_AST_PARSER
 
 
 SEMANTIC_CALL_INDEX = "semantic-call-evidence"
 SEMANTIC_CALL_CANDIDATE_INDEX = "semantic-call-candidates"
-SEMANTIC_CALL_VERSION = "semantic-call-evidence-v1"
+SEMANTIC_CALL_VERSION = "semantic-call-evidence-v2"
 CLAIM_STATUS = "not-a-finding"
 CONFIDENCE = "heuristic-nearby"
 EVIDENCE_TYPE = "static-inferred"
@@ -53,9 +54,11 @@ _LITERAL = re.compile(
     r"[\"'].*[\"']|[\[\]{(].*[\])}])$",
     re.IGNORECASE,
 )
+_SYNTAX_LITERAL = "<syntax-literal>"
 
 _LIMITATIONS = (
-    "call-site binding is a bounded lexical extraction and does not prove overload, type, virtual dispatch, DI, reflection, callback or async resolution",
+    "call-site binding uses bounded lexical extraction or Java parser syntax facts and does not prove overload, type, virtual dispatch, DI, reflection, callback or async resolution",
+    "Java parser facts come from parse-only JavacTask and do not resolve types, overloads, classpaths or target dispatch",
     "argument propagation does not prove that a callee returns, transforms, preserves or uses the bound value on every path",
     "return evidence is a source-shape hint and does not prove dominance, path feasibility or sanitizer semantics",
     "unresolved or not-bound states are manual source-review leads, never proof of a vulnerability or proof of safety",
@@ -338,6 +341,138 @@ def _sink_tokens(root: Path, sink: Mapping[str, Any],
     return "unresolved", fallback[:16]
 
 
+class _JavaSyntaxLookup:
+    """Read bounded Java syntax facts without re-reading source text.
+
+    ``None`` means the caller is not a Java AST record and must use the legacy
+    lexical path.  A non-parsed Java unit is deliberately an explicit gap: it
+    must not be silently replaced by a more permissive regex match.
+    """
+
+    def __init__(self, session: Optional[FrontendSession]):
+        self.session = session
+        self.units: Dict[str, ParsedUnit] = {}
+
+    def unit(self, file_name: Any) -> Optional[ParsedUnit]:
+        if self.session is None:
+            return None
+        file_name = str(file_name or "")
+        if not file_name or not file_name.lower().endswith(".java"):
+            return None
+        if file_name not in self.units:
+            self.units[file_name] = self.session.parse(file_name)
+        unit = self.units[file_name]
+        return unit if unit.parser == JAVA_AST_PARSER else None
+
+    @staticmethod
+    def _leaf(fact: Any) -> str:
+        return str(fact.attributes.get("leaf_name") or fact.name.rsplit(".", 1)[-1])
+
+    def call_arguments(self, file_name: Any, line: int, name: str
+                       ) -> Optional[Tuple[str, List[str], List[str]]]:
+        unit = self.unit(file_name)
+        if unit is None:
+            return None
+        if unit.status != "parsed":
+            return "unresolved", [], list(unit.analysis_gaps)
+        matches = [fact for fact in unit.select("call")
+                   if fact.line == line and self._leaf(fact) == name]
+        if len(matches) != 1:
+            return "unresolved", [], ["java-ast-callsite-unresolved"]
+        attributes = matches[0].attributes
+        raw_arguments = list(attributes.get("argument_tokens") or [])
+        kinds = list(attributes.get("argument_kinds") or [])
+        arguments = []
+        for position, raw in enumerate(raw_arguments):
+            tokens = [str(item) for item in raw if str(item)] \
+                if isinstance(raw, (list, tuple)) else []
+            kind = str(kinds[position] if position < len(kinds) else "")
+            arguments.append(_SYNTAX_LITERAL if kind == "literal"
+                             else " ".join(tokens))
+        return "resolved", arguments, []
+
+    def callsite_result(self, file_name: Any, line: int, name: str
+                        ) -> Optional[Tuple[str, List[str], List[str]]]:
+        unit = self.unit(file_name)
+        if unit is None:
+            return None
+        if unit.status != "parsed":
+            return "unresolved", [], list(unit.analysis_gaps)
+        matches = [fact for fact in unit.select("call")
+                   if fact.line == line and self._leaf(fact) == name]
+        if len(matches) != 1:
+            return "unresolved", [], ["java-ast-callsite-unresolved"]
+        attributes = matches[0].attributes
+        context = str(attributes.get("use_context") or "direct")
+        result = context if context in {"returned", "assigned"} else "discarded"
+        targets = [str(item) for item in (attributes.get("target_tokens") or [])
+                   if str(item)][:16]
+        return result, targets, []
+
+    def return_parameters(self, symbol: Any, params: Sequence[str]
+                          ) -> Optional[Tuple[List[str], int, Dict[str, str],
+                                                List[str], List[str]]]:
+        unit = self.unit(_field(symbol, "file", ""))
+        if unit is None:
+            return None
+        if unit.status != "parsed":
+            return [], 0, {}, [], list(unit.analysis_gaps)
+        start = _int(_field(symbol, "start_line", 1))
+        end = _int(_field(symbol, "end_line", unit.line_count))
+        origins: Dict[str, str] = {str(param): str(param) for param in params
+                                   if str(param)}
+        aliases: Dict[str, str] = {}
+        for fact in unit.select("assignment"):
+            if not start <= fact.line <= end:
+                continue
+            targets = [str(item) for item in
+                       (fact.attributes.get("target_tokens") or []) if str(item)]
+            values = [str(item) for item in
+                      (fact.attributes.get("value_tokens") or []) if str(item)]
+            if len(targets) != 1:
+                continue
+            target = targets[0]
+            if len(values) == 1 and values[0] in origins:
+                origins[target] = origins[values[0]]
+                aliases[target] = origins[target]
+            else:
+                origins.pop(target, None)
+                aliases.pop(target, None)
+        sites = 0
+        returned_aliases: Set[str] = set()
+        for fact in unit.select("return"):
+            if not start <= fact.line <= end:
+                continue
+            sites += 1
+            for token in fact.attributes.get("value_tokens") or []:
+                token = str(token)
+                if token in origins:
+                    returned_aliases.add(token)
+        returned = sorted({origins[token] for token in returned_aliases})[:16]
+        return returned, sites, dict(sorted(aliases.items())[:16]), \
+            sorted(returned_aliases)[:16], []
+
+    def sink_tokens(self, sink: Mapping[str, Any]
+                    ) -> Optional[Tuple[str, List[str], List[str]]]:
+        unit = self.unit(sink.get("file", ""))
+        if unit is None:
+            return None
+        if unit.status != "parsed":
+            return "unresolved", [], list(unit.analysis_gaps)
+        api = str(sink.get("api") or "")
+        name = api.rsplit(".", 1)[-1].rsplit("#", 1)[-1]
+        line = _int(sink.get("line"))
+        matches = [fact for fact in unit.select("call")
+                   if fact.line == line and self._leaf(fact) == name]
+        if len(matches) != 1:
+            return "unresolved", [], ["java-ast-sink-unresolved"]
+        tokens: Set[str] = set()
+        for argument in matches[0].attributes.get("argument_tokens") or []:
+            if isinstance(argument, (list, tuple)):
+                tokens.update(str(item) for item in argument if str(item))
+        return "resolved", sorted(tokens)[:16], []
+
+
 def _location(file_name: Any, line: Any) -> str:
     return "%s:%d" % (str(file_name or ""), _int(line)) if file_name else ""
 
@@ -419,7 +554,8 @@ def build_semantic_call_evidence(
         max_call_depth: int = DEFAULT_MAX_CALL_DEPTH,
         max_propagation_nodes: int = DEFAULT_MAX_PROPAGATION_NODES,
         max_propagation_paths: int = DEFAULT_MAX_PROPAGATION_PATHS,
-        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS) -> Dict[str, Any]:
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        frontend_session: Optional[FrontendSession] = None) -> Dict[str, Any]:
     """Build bounded call-site and tainted-parameter evidence for all flows.
 
     The result retains a row for every supplied flow.  If a depth/node/path or
@@ -452,6 +588,7 @@ def build_semantic_call_evidence(
 
     line_cache: Dict[str, Optional[List[str]]] = {}
     parameter_cache: Dict[str, List[str]] = {}
+    java_syntax = _JavaSyntaxLookup(frontend_session)
     flow_rows: List[Dict[str, Any]] = []
     candidates: List[Dict[str, Any]] = []
     callsite_counts: Counter = Counter()
@@ -553,10 +690,20 @@ def build_semantic_call_evidence(
                 edge_name = str(_field(callee, "name", "") or "")
             edge_file = str(_field(edge, "file", "") or "") if edge else ""
             edge_line = _int(_field(edge, "line", 0)) if edge else 0
-            caller_lines = _read_lines(root, edge_file or _field(caller, "file", ""),
-                                       line_cache)
-            callsite_status, arguments = _call_arguments(
-                caller_lines, edge_line, edge_name)
+            callsite_file = edge_file or str(_field(caller, "file", "") or "")
+            caller_lines = _read_lines(root, callsite_file, line_cache)
+            callsite_parser = "lexical"
+            step_gaps: List[str] = []
+            java_call = (java_syntax.call_arguments(callsite_file, edge_line, edge_name)
+                         if str(_field(caller, "parser", "")) == JAVA_AST_PARSER
+                         else None)
+            if java_call is None:
+                callsite_status, arguments = _call_arguments(
+                    caller_lines, edge_line, edge_name)
+            else:
+                callsite_status, arguments, java_gaps = java_call
+                callsite_parser = JAVA_AST_PARSER
+                step_gaps.extend(java_gaps)
             callsite_counts[callsite_status] += 1
             callee_parameters = _parameters(root, callee, parameter_cache,
                                             line_cache) if callee else []
@@ -567,14 +714,15 @@ def build_semantic_call_evidence(
             if callsite_status == "resolved":
                 for index, parameter in enumerate(callee_parameters):
                     argument = arguments[index] if index < len(arguments) else ""
-                    argument_tokens = _tokens(argument)
+                    argument_tokens = ([] if argument == _SYNTAX_LITERAL
+                                       else _tokens(argument))
                     tainted_tokens = sorted(set(argument_tokens) & current_taint)
                     if tainted_tokens:
                         binding_status = "direct" if len(argument_tokens) == 1 else "propagated"
                         callee_taint.add(parameter)
                     elif not argument:
                         binding_status = "unresolved"
-                    elif _LITERAL.match(argument.strip()):
+                    elif argument == _SYNTAX_LITERAL or _LITERAL.match(argument.strip()):
                         binding_status = "literal"
                     elif argument_tokens:
                         binding_status = "unresolved"
@@ -600,15 +748,33 @@ def build_semantic_call_evidence(
                 binding_status = "unresolved"
             if binding_status in {"unresolved", "arity-unresolved"}:
                 unresolved_steps += 1
-            result, target_tokens = _callsite_result(
-                caller_lines[edge_line - 1] if 0 < edge_line <= len(caller_lines) else "",
-                edge_name)
-            if callee:
-                returned_parameters, return_sites, alias_map, returned_aliases = (
-                    _return_parameters(root, callee, callee_parameters, line_cache))
+            java_result = (java_syntax.callsite_result(callsite_file, edge_line, edge_name)
+                           if callsite_parser == JAVA_AST_PARSER else None)
+            if java_result is None:
+                result, target_tokens = _callsite_result(
+                    caller_lines[edge_line - 1] if 0 < edge_line <= len(caller_lines) else "",
+                    edge_name)
             else:
-                returned_parameters, return_sites, alias_map, returned_aliases = (
-                    [], 0, {}, [])
+                result, target_tokens, result_gaps = java_result
+                step_gaps.extend(result_gaps)
+            return_parser = "lexical"
+            java_return = (java_syntax.return_parameters(callee, callee_parameters)
+                           if callee is not None and
+                           str(_field(callee, "parser", "")) == JAVA_AST_PARSER
+                           else None)
+            if java_return is None:
+                if callee:
+                    returned_parameters, return_sites, alias_map, returned_aliases = (
+                        _return_parameters(root, callee, callee_parameters, line_cache))
+                else:
+                    returned_parameters, return_sites, alias_map, returned_aliases = (
+                        [], 0, {}, [])
+            else:
+                (returned_parameters, return_sites, alias_map, returned_aliases,
+                 return_gaps) = java_return
+                return_parser = JAVA_AST_PARSER
+                step_gaps.extend(return_gaps)
+            analysis_gaps.extend(step_gaps)
             tainted_returns = sorted(set(returned_parameters) & callee_taint)
             if not returned_parameters:
                 return_status = "not-observed"
@@ -622,11 +788,11 @@ def build_semantic_call_evidence(
             step = {
                 "caller_symbol": caller_id,
                 "callee_symbol": callee_id,
-                "callsite": {"file": edge_file or str(
-                    _field(caller, "file", "") or ""), "line": edge_line},
+                "callsite": {"file": callsite_file, "line": edge_line},
                 "callee_name": edge_name,
                 "propagation": str(_field(edge, "propagation", "") or "") if edge else "",
                 "callsite_status": callsite_status,
+                "callsite_parser": callsite_parser,
                 "caller_parameters": caller_parameters[:16],
                 "callee_parameters": callee_parameters[:16],
                 "argument_bindings": bindings,
@@ -644,7 +810,9 @@ def build_semantic_call_evidence(
                                                alias_map[alias] in tainted_returns][:16],
                     "return_sites": return_sites,
                     "status": return_status,
+                    "parser": return_parser,
                 },
+                "analysis_gaps": sorted(set(step_gaps)),
                 "claim_status": CLAIM_STATUS,
                 "producer": "semantic-calls",
                 "confidence": CONFIDENCE,
@@ -659,7 +827,14 @@ def build_semantic_call_evidence(
             "file": str(_field(sink, "file", "") or "") if sink else "",
             "line": _int(_field(sink, "line", 0)) if sink else 0,
         }
-        sink_status, sink_variables = _sink_tokens(root, sink_dict, line_cache)
+        sink_parser = "lexical"
+        java_sink = java_syntax.sink_tokens(sink_dict)
+        if java_sink is None:
+            sink_status, sink_variables = _sink_tokens(root, sink_dict, line_cache)
+        else:
+            sink_status, sink_variables, sink_gaps = java_sink
+            sink_parser = JAVA_AST_PARSER
+            analysis_gaps.extend(sink_gaps)
         if len(path) <= 1:
             sink_binding_status = "not-applicable"
         elif not current_taint or not sink_variables:
@@ -695,6 +870,7 @@ def build_semantic_call_evidence(
             "binding_status": overall_binding,
             "sink": sink_dict,
             "sink_parse_status": sink_status,
+            "sink_parser": sink_parser,
             "sink_variables": sink_variables,
             "sink_binding": {
                 "status": sink_binding_status,
@@ -702,7 +878,7 @@ def build_semantic_call_evidence(
                 "sink_variables": sink_variables,
             },
             "unresolved_steps": unresolved_steps,
-            "analysis_gaps": analysis_gaps,
+            "analysis_gaps": sorted(set(analysis_gaps)),
             "analysis_budget": {
                 "max_call_depth": max_call_depth,
                 "max_propagation_nodes": max_propagation_nodes,

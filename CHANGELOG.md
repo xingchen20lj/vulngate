@@ -8,6 +8,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added scope-bound coverage closure and finite `candidate-intake-v1` scheduling:
+  the full static pool is retained, while only a rotating active window reaches
+  S2/S3/S4. Legacy `max_candidates: 0` now maps to a finite budget. Static
+  evidence remains `not-a-finding` and cannot alter S4/G4.
+- Added JDK parse-only Java facts to `semantic-ast-evidence-v2`,
+  `semantic-call-evidence-v2`, call-graph edges, and evidence provenance.
+  The adapter does not analyze, load, compile, process annotations, or execute
+  target code; unresolved types/dispatch and parse limits remain explicit gaps.
+- Added challenge-bound S4 delivery controls: `spawn-probe-v2` requires a
+  fresh nonce in both heartbeat and reply, and `parallel-receipt-v1` requires a
+  matching digest for each candidate's `matrix-runs/<id>/cells.json` before
+  runtime artifacts are accepted.
+- Historical CVE benchmark validation now requires advisory/source/fix
+  references and verifies that vulnerable, fixed, safe-sibling, and
+  environment-gap arms remain pinned to their declared baseline commits.
+
 - Added a shared `SemanticFrontend` syntax interface and bounded Python AST
   implementation, consumed by symbol extraction, AST control-flow witnesses
   and Python value binding. Source-digest caching avoids redundant parsing;

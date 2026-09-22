@@ -51,7 +51,7 @@ from ..analysis.research_budget import (
     write_research_budget,
 )
 from ..memory.state import CheckpointStore
-from ..analysis.languages import ALL_SUFFIXES
+from ..analysis.languages import ALL_SUFFIXES, resolve_source_dirs
 from ..sandbox.approval import ApprovalGate
 from ..sandbox.runner import CommandRunner
 from ..tools import search as srch
@@ -146,11 +146,24 @@ class StageContext:
         return dict(value)
 
 
+def _effective_source_dirs(ctx: StageContext) -> List[str]:
+    """Canonical source roots shared by S1 evidence and coverage indexing.
+
+    ``build_inventory`` records invalid configured roots as a scope gap instead
+    of widening to the workspace.  S1's direct grep helpers must use that same
+    decision; otherwise the coverage artifact and the source-evidence artifact
+    could honestly describe two different universes.
+    """
+    _bases, source_dirs, _invalid = resolve_source_dirs(
+        ctx.workspace, ctx.config.source_dirs)
+    return source_dirs
+
+
 def _gate_scan(ctx: StageContext) -> List[Dict[str, Any]]:
     keywords = ["SafeMode", "SupportAutoType", "checkAutoType", "maxLevel",
                 "readLength", "deny", "registerIfAbsent", "getObjectReader("]
     hits = []
-    for src in ctx.config.source_dirs:
+    for src in _effective_source_dirs(ctx):
         d = ctx.workspace / src
         if not d.exists():
             continue
@@ -211,7 +224,8 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
     from ..analysis import evidence_provenance as evidence_provenance_analysis
     from ..analysis import semantic_paths as semantic
     from ..analysis import threat_model as threat_model_analysis
-    from ..analysis.inventory import CoverageStore, build_inventory, persist_inventory
+    from ..analysis.inventory import (CoverageStore, build_inventory,
+                                      coverage_scope_status, persist_inventory)
 
     store = CoverageStore(ctx.workspace, ctx.target)
     required = ("source-inventory", "flow-index", "symbol-index",
@@ -227,8 +241,17 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
                 evidence_provenance_analysis.EVIDENCE_PROVENANCE_INDEX,
                 threat_model_analysis.THREAT_MODEL_INDEX)
     missing = [name for name in required if not store.path(name).exists()]
+    scope_before = coverage_scope_status(
+        store, ctx.workspace, ctx.config.source_dirs,
+        target_type=ctx.config.target_type)
+    # ``invalid`` is a meaningful persisted result: rebuilding the same typo
+    # every round adds cost without repairing the audit universe.  Missing,
+    # legacy, and mismatched contracts on the other hand are unsafe to reuse.
+    scope_requires_rebuild = scope_before["status"] in {
+        "missing", "legacy", "mismatch",
+    }
     built = False
-    if missing:
+    if missing or scope_requires_rebuild:
         result = build_inventory(ctx.workspace, ctx.config.source_dirs,
                                  target=ctx.target,
                                  target_type=ctx.config.target_type,
@@ -238,6 +261,19 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
     info = cov.refresh_candidate_coverage(store, ctx.workspace, ctx.target)
     info["rebuilt"] = built
     info["missing_indices"] = missing
+    scope_after = coverage_scope_status(
+        store, ctx.workspace, ctx.config.source_dirs,
+        target_type=ctx.config.target_type)
+    scope_actual = scope_after.get("actual") or {}
+    info["scope"] = {
+        "before": scope_before["status"],
+        "status": scope_after["status"],
+        "scope_id": scope_actual.get("scope_id", ""),
+        "valid": bool(scope_actual.get("valid", False)),
+        "analysis_gaps": list(scope_actual.get("analysis_gaps") or []),
+        "mismatches": scope_after.get("mismatches", []),
+        "claim_status": "not-a-finding",
+    }
     summary = store.read("call-graph-summary") or {}
     flow_summary = store.read("flow-summary") or {}
     control_summary = (store.read(ctl.CONTROL_MAP_INDEX) or {}).get("summary") or {}
@@ -424,6 +460,7 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
     versions) and a danger call-site map (danger patterns x file x line), with
     per-entry danger-hit counts as reachability clues.
     """
+    source_dirs = _effective_source_dirs(ctx)
     jars_info = []
     class_sets = {}
     for j in ctx.config.jars:
@@ -460,7 +497,7 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
     danger_sites = []
     per_file_hits: Dict[str, int] = {}
     for pat, label in DANGER_PATTERNS:
-        for h in grep_hits(pat, ctx.config.source_dirs, ctx.workspace, max_lines=8):
+        for h in grep_hits(pat, source_dirs, ctx.workspace, max_lines=8):
             fl = str(h["file"])
             per_file_hits[fl] = per_file_hits.get(fl, 0) + 1
             danger_sites.append({
@@ -505,9 +542,9 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
         entries.append(entry)
     gate_scan = _gate_scan(ctx)
     patch_history = analyze_patch_history(ctx.workspace, max_count=30)
-    source_sink_graph = build_source_sink_graph(ctx.config.source_dirs, ctx.workspace)
+    source_sink_graph = build_source_sink_graph(source_dirs, ctx.workspace)
     target_rule_hits = collect_target_rule_hits(
-        ctx.config.target_type, ctx.config.source_dirs, ctx.workspace)
+        ctx.config.target_type, source_dirs, ctx.workspace)
     chain_hints = composite_chain_hints(source_sink_graph)
     chain_candidates = composite_chain_candidates(chain_hints)
     project_profile = build_project_profile(
@@ -622,6 +659,7 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
             "target_rule_hit_count": len(target_rule_hits),
             "composite_chain_hint_count": len(chain_hints),
             "composite_chain_candidate_count": len(chain_candidates),
+            "source_dirs": source_dirs,
             "coverage": coverage_index,
             "project_profile": project_profile}
 
@@ -630,11 +668,11 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
     """Attack-surface matrix: entry x input shape x logic -> candidate cells.
 
     The candidate pool is *scheduled* rather than taken wholesale (spec §13):
-    S1 has just refreshed coverage, so the scheduler ranks the pool against it
-    and returns the round's `max_candidates` slots, quota-stratified.  The full
-    pool is left on ``ctx.config.candidates`` -- truncating it would delete the
-    fix-completeness candidates this stage just generated, and the next round
-    re-schedules the same pool against coverage that has since moved.
+    S1 has just refreshed coverage, so the scheduler ranks a finite,
+    category-rotating intake window and returns the round's `max_candidates`
+    slots, quota-stratified.  The complete static pool remains in its
+    target-scoped producer artifacts; intake-deferred leads are recorded as
+    queued, never silently deleted or marked reviewed.
 
     PR4 adds the index-derived candidates (spec §11/§12 and semantic path
     evidence) to that same pool: an unguarded path, a sibling control
@@ -668,7 +706,19 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
         existing_ids.add(cid)
         generated_chain.append(candidate)
     pool, static_added = _merge_static_candidates(ctx, list(ctx.config.candidates))
-    selected, plan, schedule_note = _schedule_round(ctx, pool)
+    from ..analysis import scheduler as sched
+    slots = _candidate_budget(ctx)
+    active_pool, candidate_intake = sched.bounded_candidate_intake(
+        pool, slots=slots, round_no=ctx.round_no)
+    ctx.store.write_artifact("S2", "candidate-intake.json", candidate_intake)
+    selected, plan, schedule_note = _schedule_round(ctx, active_pool, slots)
+    if candidate_intake["deferred_intake_candidates"]:
+        intake_note = ("candidate intake %d/%d active; %d queued for rotation"
+                       % (candidate_intake["active_candidates"],
+                          candidate_intake["pool_candidates"],
+                          candidate_intake["deferred_intake_candidates"]))
+        schedule_note = "; ".join(
+            item for item in (schedule_note, intake_note) if item)
     selected_ids = {str(c.get("candidate_id")) for c in selected}
     versions = sorted({str(j.get("version")) for j in ctx.config.jars
                        if j.get("version")})
@@ -680,7 +730,7 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
     scheduled_strategy = plan.research_strategy if plan is not None else {}
     consistency_actions = load_research_consistency_actions(
         ctx.workspace, ctx.target)
-    for cand in pool:
+    for cand in selected:
         candidate_action = action_for_research_key(
             consistency_actions, research_key(cand), cand.get("candidate_id"))
         research_plan = plan_candidate_experiments(
@@ -738,6 +788,8 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
               "static_candidates": static_added,
               "candidates": selected,
               "pool_size": len(pool),
+              "active_pool_size": len(active_pool),
+              "candidate_intake": candidate_intake,
               "schedule_note": schedule_note,
               "benchmark_feedback": {
                   "benchmark_id": benchmark_feedback.get("benchmark_id", ""),
@@ -763,6 +815,11 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
                            .get("item_count", 0)),
             "claim_status": "not-a-finding",
         }
+    # Keep direct stage callers aligned with the full pipeline: S3-S8 must
+    # consume exactly the scheduled work order, never the broad discovery
+    # pool that S2 used to form its intake window.  The full pool remains
+    # represented by the static producer artifacts and candidate-intake.json.
+    ctx.config.candidates = selected
     return result
 
 
@@ -792,8 +849,19 @@ def _merge_static_candidates(ctx: StageContext, pool: List[Dict[str, Any]]
     return merged, added
 
 
+def _candidate_budget(ctx: StageContext) -> int:
+    """Resolve a finite per-round budget, including legacy ``0`` configs."""
+    from ..analysis import scheduler as sched
+
+    try:
+        configured = int(getattr(ctx.config, "max_candidates", 0) or 0)
+    except (TypeError, ValueError):
+        configured = 0
+    return configured if configured > 0 else sched.DEFAULT_SLOTS
+
+
 def _schedule_round(ctx: StageContext,
-                    pool: List[Dict[str, Any]]
+                    pool: List[Dict[str, Any]], slots: Optional[int] = None
                     ) -> "tuple[List[Dict[str, Any]], Any, str]":
     """Run the coverage-aware scheduler for one round, never raising.
 
@@ -803,12 +871,13 @@ def _schedule_round(ctx: StageContext,
     pre-PR3 behaviour and returns the reason, because losing the ordering must
     not cost the round its audit.
 
-    The slot count is ``config.max_candidates``, or the whole pool when unset:
-    this stage's budget has always been "however many candidates the operator
-    configured", and inventing a cap here would silently drop configured work.
+    The slot count is always finite.  A legacy/unset ``max_candidates=0`` maps
+    to the scheduler default rather than expanding into the entire static
+    candidate pool.  Candidates outside the active intake window remain in
+    their source artifacts with an explicit queued count.
     """
     from ..analysis import scheduler as sched
-    slots = int(getattr(ctx.config, "max_candidates", 0) or 0) or len(pool)
+    slots = int(slots if slots is not None else _candidate_budget(ctx))
     try:
         return sched.round_selection(
             ctx.workspace, ctx.target, pool, slots,
@@ -1743,6 +1812,51 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
                 "replacement_zero_gain_rounds", 1),
             "claim_status": "not-a-finding",
         }
+    # A ledger is durable only after this call, but the rows above are already
+    # the exact current-round decisions.  Overlay them so S8's closure record
+    # cannot accidentally describe the previous round's coverage.  This is a
+    # coverage state machine, not a finding gate: it neither promotes a static
+    # lead nor relaxes the S4/G4 runtime requirement for confirmation.
+    try:
+        from ..analysis import coverage as cov
+        from ..analysis.inventory import CoverageStore
+
+        coverage_store = CoverageStore(ctx.workspace, ctx.target)
+        coverage_refresh = cov.refresh_candidate_coverage(
+            coverage_store, ctx.workspace, ctx.target, round_no=ctx.round_no,
+            extra_rows=rows)
+        coverage_summary = coverage_store.read("coverage-summary") or {}
+        coverage_closure = {
+            "artifact": "state/%s/coverage/coverage-summary.json" % ctx.target,
+            "state": (coverage_summary.get("audit_status") or {}).get(
+                "state", "coverage-unknown"),
+            "scope_id": (coverage_summary.get("audit_status") or {}).get(
+                "scope_id", ""),
+            "scope_valid": (coverage_summary.get("audit_status") or {}).get(
+                "scope_valid", False),
+            "blockers": list((coverage_summary.get("audit_status") or {}).get(
+                "blockers") or []),
+            "high_risk_uncovered": coverage_refresh.get(
+                "high_risk_uncovered", 0),
+            "stop_condition_met": bool(coverage_refresh.get(
+                "stop_condition_met", False)),
+            "claim_status": "not-a-finding",
+        }
+    except Exception as exc:  # pragma: no cover - preserve a completed ledger
+        coverage_closure = {
+            "artifact": "state/%s/coverage/coverage-summary.json" % ctx.target,
+            "state": "coverage-refresh-error",
+            "scope_id": "",
+            "scope_valid": False,
+            "blockers": ["coverage-refresh-error:%s" % type(exc).__name__],
+            "high_risk_uncovered": None,
+            "stop_condition_met": False,
+            "claim_status": "not-a-finding",
+        }
+    metrics["覆盖状态"] = coverage_closure["state"]
+    metrics["高风险未覆盖数"] = coverage_closure["high_risk_uncovered"]
+    summary["coverage_closure"] = coverage_closure
+    ctx.store.write_artifact("S8", "coverage-closure.json", coverage_closure)
     out_dir = write_round_artifacts(ctx.workspace, ctx.target, ctx.round_no, rows, excluded,
                                     summary, lang=ctx.config.output_lang)
     return {"ledger_dir": str(out_dir.relative_to(ctx.workspace)), "rows": len(rows),
@@ -1761,6 +1875,7 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
             "research_replay_calibration": summary[
             "research_replay_calibration"],
             "research_replay_pack": summary["research_replay_pack"],
+            "coverage": coverage_closure,
             "research_replay_cohort": summary.get(
                 "research_replay_cohort", {
                     "claim_status": "not-a-finding"}),

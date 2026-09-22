@@ -65,13 +65,14 @@ This skill is an explicit request to use sub-agents for bounded S4/S5 work when 
 
 1. **S4:** one sub-agent per candidate, maximum three concurrent sub-agents.
 2. **S5:** one bounded sub-agent for upstream tracker/public-disclosure collection.
-3. **Mandatory S4 preflight probe:** run the spawn probe before any candidate-level spawn. Probe protocol is in `skills/vulngate-audit/spawn-probe-task.md`.
-4. Probe succeeds when the heartbeat appears within 90 seconds. Persist success with `agent_cli.py spawn-probe ... --status ok` and continue spawning.
-5. If the heartbeat does not appear, retry the same probe task once through follow-up (≤60 seconds). If it still fails, persist `--status degraded` plus the actual sub-agent reply and a symptom such as `no-heartbeat-greeting-only`, `no-heartbeat-timeout`, or `followup-retried-failed`. Run the rest of the round host-sequentially and do not retry candidate-level spawning or S5 spawning.
+3. **Mandatory S4 preflight probe:** run `agent_cli.py spawn-probe --prepare` before any candidate-level spawn, then send the emitted nonce-bound heartbeat path and token using `skills/vulngate-audit/spawn-probe-task.md`. The host must never create the heartbeat.
+4. Probe succeeds only when, within 90 seconds, the worker writes exactly `PROBE <token>` and replies exactly `PROBE-DONE <token>`; persist that observed reply with `agent_cli.py spawn-probe ... --status ok --reply "PROBE-DONE <token>"`. Any validation failure means sequential mode.
+5. If the nonce-bound probe fails, retry the same probe task once through follow-up (≤60 seconds). If it still fails, persist `--status degraded` plus the actual sub-agent reply and a symptom such as `no-heartbeat-greeting-only`, `no-heartbeat-timeout`, or `followup-retried-failed`. Run the rest of the round host-sequentially and do not retry candidate-level spawning or S5 spawning.
 6. Generic replies such as “ready to help”, “waiting for task”, “no task has come through”, or their equivalents indicate message-delivery failure when no heartbeat exists; record the raw reply rather than replacing it with an inference.
 7. If the probe passed but a later spawn tool explicitly fails, degrade sequentially and record the error plus retry count.
-8. Sub-agents return **raw evidence only**. They never decide Novelty, severity, or final conclusions.
-9. Never invent “spawn unavailable” to skip parallelism. If the user explicitly asks not to spawn, record that user constraint in the round summary.
+8. For every parallel S4 candidate, the host first runs `parallel-receipt --prepare --candidate <id>` and sends the token to that worker. A worker may mark `completed` only after it writes `S4/matrix-runs/<id>/cells.json` and records its digest with `parallel-receipt --status completed`; the host must run `parallel-receipt --verify` before using the result. Missing/partial/invalid receipts preserve artifacts but require host-sequential takeover; they are never execution evidence.
+9. Sub-agents return **raw evidence only**. They never decide Novelty, severity, or final conclusions.
+10. Never invent “spawn unavailable” to skip parallelism. If the user explicitly asks not to spawn, record that user constraint in the round summary.
 
 ### Sub-agent liveness
 
@@ -212,7 +213,7 @@ Run stages in order unless a hard gate or explicit scope rule ends a candidate.
     --workspace <audit-dir> --show-candidates --json
   ```
 
-- **Semantic call binding evidence:** `semantic-call-evidence-v1` adds a bounded one-hop bridge over otherwise unresolved cross-symbol paths. It records callsite argument/parameter binding, limited tainted-parameter propagation, return-shape hints, and whether the eventual sink argument is statically bound. It does not model complete CFGs, types or aliases, virtual dispatch, DI, reflection, callbacks, async behavior, containers, or sanitizer semantics; `bound` is a research signal, not a data-flow proof. Rows and `call-*` candidates remain `claim_status=not-a-finding`, `heuristic-nearby`, and `requires_manual_dataflow=true`.
+- **Semantic call binding evidence:** `semantic-call-evidence-v2` adds a bounded cross-symbol bridge. Python uses its syntax frontend; Java uses JDK `JavacTask.parse()` only, never analysis, class loading, annotation processing, or target execution. It records parser-labelled callsite argument/parameter binding, limited tainted-parameter propagation, return-shape hints, and whether the eventual sink argument is statically bound. It does not resolve Java types, overloads, dispatch, DI, reflection, callbacks, async behavior, containers, or sanitizer semantics; `bound` is a research signal, not a data-flow proof. Rows and `call-*` candidates remain `claim_status=not-a-finding`, `heuristic-nearby`, and `requires_manual_dataflow=true`.
 
   ```bash
   python3 scripts/agent_cli.py semantic-calls <target> \
@@ -226,7 +227,7 @@ Run stages in order unless a hard gate or explicit scope rule ends a candidate.
     --workspace <audit-dir> --show-candidates --json
   ```
 
-- **Python AST evidence:** `semantic-ast-evidence-v1` parses each bounded Python file once and records syntax-tree scope, branch membership, negative-test shape, direct terminal statements, `else`/exception alternate paths, and parse status. It is a syntax witness, not a complete CFG, dominance/SSA, type/dispatch or runtime proof; unsupported languages and parse failures remain explicit gaps. Rows and `ast-*` candidates remain `claim_status=not-a-finding`, `heuristic-nearby`, and `requires_manual_dataflow=true`, with no source text or AST dump stored.
+- **Syntax AST evidence:** `semantic-ast-evidence-v2` records scope, branch membership, negative-test shape, direct terminal statements, alternate paths, and parse status. Python uses `ast`; Java uses parse-only JDK facts. It is a syntax witness, not a complete CFG, dominance/SSA, type/dispatch or runtime proof; unsupported languages, Java parse limits, and parse failures remain explicit gaps. Rows and `ast-*` candidates remain `claim_status=not-a-finding`, `heuristic-nearby`, and `requires_manual_dataflow=true`, with no source text or AST dump stored.
 
   ```bash
   python3 scripts/agent_cli.py semantic-ast <target> \
@@ -348,15 +349,16 @@ What this buys across rounds:
 - the residual sweep (spec §14) recomputes the gaps, so each round's input is
   the *new* gap list rather than the same top-N.
 
-Eight index-derived candidate families are **prepended** to the pool before
+Eight index-derived candidate families are merged into the durable pool before
 scoring: the control map's `ctl-*` candidates (spec §11), the differential's
 `dif-*` candidates (spec §12), the capability graph's `cap-*` research
 paths, semantic path `sem-*` leads, semantic guard `guard-*` leads, semantic
-call `call-*` leads, semantic control-flow `cfg-*` leads, and Python AST
-`ast-*` leads, all already persisted by S1. They are
-deliberately **not capped** — their ids are regenerated identically every round,
-so a truncated prefix would starve every later finding forever; oversize pools
-are absorbed by the quota. Ties go to the candidate with a citable `file:line`
+call `call-*` leads, semantic control-flow `cfg-*` leads, and syntax AST
+`ast-*` leads, all already persisted by S1. The durable pool is retained in
+full, but S2 schedules only a deterministic, category-rotating
+`candidate-intake-v1` active window; deferred IDs remain explicitly queued and
+rotate in later rounds. This prevents an oversized static pool from consuming
+S2/S3/S4 while avoiding permanent prefix starvation. Ties go to a candidate with a citable `file:line`
 and a named missing control. Set `static_candidates: false` in the target config
 to schedule only the candidates the model proposes.
 
@@ -364,8 +366,8 @@ The plan is written to `state/<target>/coverage/schedule-round-NN.json`
 (`schedule-latest.json` mirrors the newest) with `producer` / `confidence` /
 `evidence_type`, and is readable from `S2/candidate-schedule.json`.
 
-`max_candidates` in the target config caps the round (0 = audit the whole
-configured pool, the pre-PR3 behaviour). If the coverage index is unavailable
+`max_candidates` in the target config caps the round. Legacy/unset `0` maps to
+a finite default and never expands into a whole-pool static audit. If the coverage index is unavailable
 the scheduler degrades to proposal order **and says so** in `schedule_note` —
 an unscheduled round never reads as a scheduled one.
 
@@ -1184,13 +1186,14 @@ S1 前必须：
 
 1. **S4：** 每候选一个子 Agent，最多并发 3 个。
 2. **S5：** 一个有界子 Agent 收集上游 tracker / 公开披露证据。
-3. **S4 开工前强制探针：** 协议见 `skills/vulngate-audit/spawn-probe-task.md`。
-4. 90 秒内心跳出现则探针成功，使用 `agent_cli.py spawn-probe ... --status ok` 落盘后继续逐候选 spawn。
-5. 无心跳时允许一次 follow-up 重投（≤60 秒）；仍失败则用 `--status degraded` 落盘，并写实际子 Agent 回复与 `no-heartbeat-greeting-only`、`no-heartbeat-timeout`、`followup-retried-failed` 等症状。之后整轮宿主顺序执行，不再逐候选或在 S5 重试 spawn。
+3. **S4 开工前强制探针：** 先运行 `agent_cli.py spawn-probe --prepare`，再把输出的 nonce 心跳路径与 token 按 `skills/vulngate-audit/spawn-probe-task.md` 发送给子 Agent；宿主不得自行创建心跳。
+4. 只有子 Agent 在 90 秒内精确写入 `PROBE <token>` 且精确回复 `PROBE-DONE <token>` 才算成功；用 `agent_cli.py spawn-probe ... --status ok --reply "PROBE-DONE <token>"` 记录。任一校验失败都必须顺序降级。
+5. nonce 探针失败时允许一次 follow-up 重投（≤60 秒）；仍失败则用 `--status degraded` 落盘，并写实际子 Agent 回复与 `no-heartbeat-greeting-only`、`no-heartbeat-timeout`、`followup-retried-failed` 等症状。之后整轮宿主顺序执行，不再逐候选或在 S5 重试 spawn。
 6. 子 Agent 只回“ready to help / waiting for task / no task has come through / 没看到任务”等通用问候且没有心跳时，记录为消息投递失败，必须保留原始回复。
 7. 探针通过后若后续 spawn 工具明确报错，才允许中途降级，并记录错误和尝试次数。
-8. 子 Agent **只回原始证据**，不判 Novelty、严重性或最终结论。
-9. 禁止虚构“spawn 不可用”来跳过并行；用户明确要求不 spawn 时，记录用户约束。
+8. 每个并行 S4 候选，宿主先运行 `parallel-receipt --prepare --candidate <id>` 并把 token 发给该 worker。worker 只有在写出 `S4/matrix-runs/<id>/cells.json` 后，才能用 `parallel-receipt --status completed` 记录摘要；宿主必须在使用结果前运行 `parallel-receipt --verify`。缺失、partial 或无效 receipt 只能保留产物并由宿主顺序接管，绝不是执行证据。
+9. 子 Agent **只回原始证据**，不判 Novelty、严重性或最终结论。
+10. 禁止虚构“spawn 不可用”来跳过并行；用户明确要求不 spawn 时，记录用户约束。
 
 ### 子 Agent 活性
 
@@ -1318,7 +1321,7 @@ reports/<target>/round-NN/...
     --workspace <audit-dir> --show-candidates --json
   ```
 
-- **语义调用绑定证据：** `semantic-call-evidence-v1` 为仍未解析的跨符号路径增加一跳有界桥接，记录调用点实参/形参绑定、有限污染参数传播、返回形状提示，以及最终 sink 实参是否与这条静态绑定链对齐。它不建模完整 CFG、类型或别名、virtual dispatch、DI、reflection、callback、async、容器或 sanitizer 语义；`bound` 只是研究信号，不是数据流证明。记录和 `call-*` 候选始终保持 `claim_status=not-a-finding`、`heuristic-nearby` 与 `requires_manual_dataflow=true`。
+- **语义调用绑定证据：** `semantic-call-evidence-v2` 提供有界跨符号桥接。Python 使用语法前端；Java 仅使用 JDK `JavacTask.parse()`，不做 analyze、类加载、annotation processing 或目标执行。它记录带 parser 标签的调用点实参/形参绑定、有限污染参数传播、返回形状提示，以及最终 sink 实参是否与这条静态绑定链对齐。它不解析 Java 类型、overload、dispatch、DI、reflection、callback、async、容器或 sanitizer 语义；`bound` 只是研究信号，不是数据流证明。记录和 `call-*` 候选始终保持 `claim_status=not-a-finding`、`heuristic-nearby` 与 `requires_manual_dataflow=true`。
 
   ```bash
   python3 scripts/agent_cli.py semantic-calls <target> \
@@ -1332,7 +1335,7 @@ reports/<target>/round-NN/...
     --workspace <audit-dir> --show-candidates --json
   ```
 
-- **Python AST 证据：** `semantic-ast-evidence-v1` 对每个有界 Python 文件只解析一次，记录语法树作用域、分支归属、负向条件形状、直接终止语句、`else`/异常备用路径和解析状态。它只是语法结构见证，不是完整 CFG、dominance/SSA、类型/dispatch 或运行时证明；不支持语言和解析失败会作为明确缺口保留。记录和 `ast-*` 候选保持 `claim_status=not-a-finding`、`heuristic-nearby` 与 `requires_manual_dataflow=true`，不保存源码原文或 AST dump。
+- **语法 AST 证据：** `semantic-ast-evidence-v2` 记录作用域、分支归属、负向条件形状、直接终止语句、备用路径和解析状态。Python 使用 `ast`；Java 使用仅解析的 JDK facts。它只是语法结构见证，不是完整 CFG、dominance/SSA、类型/dispatch 或运行时证明；不支持语言、Java 解析上限和解析失败都会作为明确缺口保留。记录和 `ast-*` 候选保持 `claim_status=not-a-finding`、`heuristic-nearby` 与 `requires_manual_dataflow=true`，不保存源码原文或 AST dump。
 
   ```bash
   python3 scripts/agent_cli.py semantic-ast <target> \
@@ -1437,17 +1440,16 @@ python3 scripts/agent_cli.py coverage <target> --schedule
 - 延后的候选保留分数与理由，下一轮针对已变化的覆盖重新调度；
 - 残留扫描（spec §14）重算缺口，因此每轮的输入是**新的**缺口列表，而不是固定的 top-N。
 
-八类索引派生的候选会在打分前被**前置**进候选池：控制图的 `ctl-*`（spec §11）、
+八类索引派生的候选会在打分前合入持久候选池：控制图的 `ctl-*`（spec §11）、
 差分的 `dif-*`（spec §12）、能力图的 `cap-*` 研究链、语义路径的 `sem-*` 线索、语义守卫的
-`guard-*` 线索、语义调用的 `call-*` 线索、语义控制流的 `cfg-*` 线索和 Python AST 的 `ast-*` 线索，它们都已由 S1 持久化。它们刻意**不设上限**——
-其 id 每轮确定性重建，截断前缀会让后面所有发现永远饿死；超大池由配额机制吸收。
+`guard-*` 线索、语义调用的 `call-*` 线索、语义控制流的 `cfg-*` 线索和语法 AST 的 `ast-*` 线索，它们都已由 S1 持久化。持久池完整保留，但 S2 只调度确定性、按类别轮转的 `candidate-intake-v1` active window；deferred ID 显式排队并在后续轮次轮转。这样既避免超大静态池吞没 S2/S3/S4，也不产生永久前缀饥饿。
 平分时优先取带有可引用 `file:line` 与具名缺失控制的候选。
 在目标配置里设 `static_candidates: false` 可只调度模型自己提出的候选。
 
 计划写入 `state/<target>/coverage/schedule-round-NN.json`（`schedule-latest.json` 为最新镜像），
 带 `producer` / `confidence` / `evidence_type`，同时可在 `S2/candidate-schedule.json` 读到。
 
-目标配置里的 `max_candidates` 限定每轮预算（0 = 审完全部已配置候选，即 PR3 之前的行为）。
+目标配置里的 `max_candidates` 限定每轮预算；legacy/unset 的 `0` 映射为有限默认值，绝不扩张成全池静态审计。
 若覆盖索引不可用，调度会退化为提案顺序，**并如实写入 `schedule_note`** ——
 没被调度的轮次不会看起来像被调度过。
 

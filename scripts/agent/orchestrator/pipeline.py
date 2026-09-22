@@ -109,7 +109,14 @@ def run_round(ctx: StageContext, force: bool = False, only: Optional[str] = None
             raise ValueError("unknown stage %s" % stage)
         ctx.store.save_stage(stage, data)
         print("[pipeline] %s done" % stage)
-    print("[pipeline] round complete")
+    s8 = ctx.store.load_stage("S8") or {}
+    closure = s8.get("coverage") if isinstance(s8, dict) else None
+    if isinstance(closure, dict):
+        print("[pipeline] round evidence recorded; coverage=%s high-risk-uncovered=%s"
+              % (closure.get("state", "coverage-unknown"),
+                 closure.get("high_risk_uncovered", "?")))
+    else:
+        print("[pipeline] round evidence recorded; coverage closure unavailable")
 
 
 def _ledger_rows(ctx: StageContext, summaries: Dict[str, Any],
