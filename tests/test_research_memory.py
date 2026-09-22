@@ -676,6 +676,38 @@ class ResearchMemoryTests(unittest.TestCase):
                          json.loads(target_memory.read_text(encoding="utf-8")
                                     )["entries"][0]["events"][0]["state"])
 
+    def test_s8_demotes_static_confirmation_and_withholds_cvss(self):
+        c = candidate()
+        cfg = TargetConfig(name="target", discovery_date="2026-09-21",
+                           candidates=[c], notes="test")
+        ctx = StageContext(self.root, "target", 1, cfg, offline=True)
+        write_research_strategy(
+            self.root, "target",
+            build_research_strategy(target="target", target_type="library"))
+        result = run_s8(
+            ctx, {"C1": {}}, {"C1": "确认"},
+            {"C1": {
+                "novelty": {"verdict": "candidate-0day", "reason": "no record"},
+                "g3": {"passed": True, "verdict": "candidate-0day"},
+            }},
+            {"C1": {"vector": "AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N",
+                    "score": 7.5}},
+        )
+        consistency = ctx.store.read_artifact(
+            "S8", "final-evidence-consistency.json")
+        self.assertEqual("final-evidence-consistency-v1",
+                         consistency["schema_version"])
+        self.assertEqual("候选（待验证）",
+                         consistency["rows"][0]["effective_conclusion"])
+        self.assertEqual(1, result["final_evidence_consistency"]["demoted_count"])
+        ledger = json.loads((self.root / result["ledger_dir"] /
+                             "ledger.json").read_text(encoding="utf-8"))
+        row = ledger["rows"][0]
+        self.assertNotIn("cvss", row)
+        self.assertFalse(row["novelty"]["claimable"])
+        self.assertIn("S8_CVSS_WITHHELD=unconfirmed-not-a-finding",
+                      row["evidence"])
+
 
 if __name__ == "__main__":
     unittest.main()

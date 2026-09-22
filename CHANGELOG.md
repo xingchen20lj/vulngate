@@ -20,6 +20,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   fresh nonce in both heartbeat and reply, and `parallel-receipt-v1` requires a
   matching digest for each candidate's `matrix-runs/<id>/cells.json` before
   runtime artifacts are accepted.
+- Added `final-evidence-consistency-v1` at S8. It re-runs G4/G3 before ledger
+  rendering, demotes unsupported confirmations, withholds CVSS from unconfirmed
+  rows, and labels an unconfirmed `candidate-0day` only as a `not-a-finding`
+  novelty hypothesis.
 - Historical CVE benchmark validation now requires advisory/source/fix
   references and verifies that vulnerable, fixed, safe-sibling, and
   environment-gap arms remain pinned to their declared baseline commits.

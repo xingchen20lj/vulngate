@@ -1458,10 +1458,35 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
     """Round close: ledger + exclusions + summary + next-round candidates."""
     rows = []
     excluded = []
+    final_evidence_rows = []
     for cand in ctx.config.candidates:
         cid = cand["candidate_id"]
         summary = summaries.get(cid, {})
-        conclusion = conclusions.get(cid, "候选（待验证）")
+        requested_conclusion = conclusions.get(cid, "候选（待验证）")
+        conclusion = requested_conclusion
+        novelty_record = novelties.get(cid, {})
+        novelty_record = novelty_record if isinstance(novelty_record, dict) else {}
+        g3_record = novelty_record.get("g3")
+        g3_record = g3_record if isinstance(g3_record, dict) else {}
+        checks = []
+        # S8 is a final integrity boundary as well as a renderer. Pipeline
+        # callers normally derive this earlier, but a hand-written/resumed S8
+        # invocation must not turn static evidence into a finding by passing a
+        # string such as "确认". Keep G4 and G3 independently visible.
+        if is_confirmed_conclusion(conclusion):
+            g4 = g4_runtime(summary, "确认", cand)
+            checks.append({"gate": "G4", "passed": g4.passed,
+                           "verdict": g4.verdict})
+            if not g4.passed:
+                conclusion = "候选（待验证）"
+            elif not g3_record.get("passed", False):
+                checks.append({"gate": "G3", "passed": False,
+                               "verdict": str(g3_record.get(
+                                   "verdict", "novelty-evidence-missing"))})
+                conclusion = "候选（待验证）"
+            else:
+                checks.append({"gate": "G3", "passed": True,
+                               "verdict": str(g3_record.get("verdict", ""))})
         row = {
             "candidate_id": cid,
             "surface": cand["surface"],
@@ -1472,24 +1497,67 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
             "code_location": cand.get("code_location", []),
             "authorization_matrix": summary.get("authz_results", []),
         }
-        nv = novelties.get(cid, {}).get("novelty")
+        nv = novelty_record.get("novelty")
         if nv:
             row["novelty"] = {"verdict": nv["verdict"], "reason": nv["reason"],
                               "increments": nv.get("increments", [])}
+            if nv.get("verdict") == "candidate-0day":
+                # Absence of a public record is a novelty research result, not
+                # a vulnerability claim. A static/pending row must render that
+                # distinction explicitly rather than looking like an 0day.
+                claimable = bool(is_confirmed_conclusion(conclusion)
+                                 and g3_record.get("passed", False))
+                row["novelty"]["claimable"] = claimable
+                if not claimable:
+                    row["novelty"]["presentation"] = (
+                        "unconfirmed-novelty-hypothesis")
+                    row["evidence"].append(
+                        "S8_NOVELTY_UNCONFIRMED=not-a-finding")
         if cid in severities:
-            row["cvss"] = {"vector": severities[cid]["vector"], "score": severities[cid]["score"]}
-            if severities[cid].get("blocked"):
+            severity = severities[cid]
+            if severity.get("blocked"):
                 row["conclusion"] = "候选（待验证）"
                 row["evidence"].append(
-                    "G5_BLOCKED=" + "; ".join(severities[cid].get("g5", {}).get("evidence", [])))
+                    "G5_BLOCKED=" + "; ".join(severity.get("g5", {}).get("evidence", [])))
+                checks.append({"gate": "G5", "passed": False,
+                               "verdict": "cvss-consistency-blocked"})
+            elif is_confirmed_conclusion(row["conclusion"]):
+                row["cvss"] = {"vector": severity["vector"], "score": severity["score"]}
+                checks.append({"gate": "G5", "passed": True,
+                               "verdict": "cvss-attached"})
+            else:
+                row["evidence"].append(
+                    "S8_CVSS_WITHHELD=unconfirmed-not-a-finding")
         row["status"] = conclusion_status(row.get("conclusion"))
         rows.append(row)
-        if conclusion_status(conclusion) == "excluded":
+        final_evidence_rows.append({
+            "candidate_id": cid,
+            "requested_conclusion": requested_conclusion,
+            "effective_conclusion": row["conclusion"],
+            "checks": checks,
+            "static_claim": "not-a-finding",
+        })
+        if conclusion_status(row.get("conclusion")) == "excluded":
             excluded.append({
                 "surface": cand["surface"],
                 "conclusion": "排除（%s）" % cand.get("exclusion_reason", "门控/受控异常"),
                 "evidence": row["evidence"],
             })
+    final_evidence = {
+        "schema_version": "final-evidence-consistency-v1",
+        "stage": "S8",
+        "rows": final_evidence_rows,
+        "summary": {
+            "candidate_count": len(final_evidence_rows),
+            "demoted_count": sum(
+                row["requested_conclusion"] != row["effective_conclusion"]
+                for row in final_evidence_rows),
+            "claim_status": "not-a-finding",
+        },
+        "claim_status": "not-a-finding",
+    }
+    ctx.store.write_artifact("S8", "final-evidence-consistency.json",
+                             final_evidence)
     confirmed_rows = [r for r in rows if is_confirmed_conclusion(r.get("conclusion"))]
     novelty_misses = len([
         r for r in confirmed_rows
@@ -1509,6 +1577,11 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
     summary = {
         "header_note": ctx.config.notes,
         "metrics": metrics,
+        "final_evidence_consistency": {
+            "artifact": "state/%s/round-%02d/S8/final-evidence-consistency.json"
+                        % (ctx.target, ctx.round_no),
+            **final_evidence["summary"],
+        },
         "next_round": next_round or ["复测 2.0.65（#7753 发布后）", "扩展模块轮（HTTP/Redis/JSONB 集成面）"],
     }
     # S8 closes the round's durable research loop.  This is deliberately
@@ -1875,6 +1948,7 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
             "research_replay_calibration": summary[
             "research_replay_calibration"],
             "research_replay_pack": summary["research_replay_pack"],
+            "final_evidence_consistency": final_evidence["summary"],
             "coverage": coverage_closure,
             "research_replay_cohort": summary.get(
                 "research_replay_cohort", {
