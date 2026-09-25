@@ -7,9 +7,9 @@ prompt digest retained for the existing S1 call site.
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from .source_evidence import scan_all_hits, summarize_hits
+from .source_evidence import scan_all_labeled_hits
 
 
 TARGET_RULES: Dict[str, List[Tuple[str, str]]] = {
@@ -52,24 +52,56 @@ def patterns_for(target_type: str) -> List[Tuple[str, str]]:
     return TARGET_RULES.get(str(target_type), TARGET_RULES["library"])
 
 
-def scan_all_target_rule_hits(target_type: str, source_dirs: List[str], root) -> List[Dict]:
+def scan_s1_source_rules(target_type: str, source_dirs: List[str], root,
+                         danger_limit: int = 8, target_limit: int = 8,
+                         timeout: Optional[float] = 600
+                         ) -> Tuple[List[Dict], List[Dict]]:
+    """Collect danger and target-rule digests in one bounded source scan."""
+    from .source_evidence import DANGER_PATTERNS
+
+    target_patterns = patterns_for(target_type)
+    danger_keys = set(DANGER_PATTERNS)
+    target_keys = set(target_patterns)
+    limits = [value for value in (danger_limit, target_limit) if value >= 0]
+    scan_limit = max(limits) if limits else None
+    hits = scan_all_labeled_hits(
+        DANGER_PATTERNS + target_patterns, source_dirs, root,
+        max_per_pattern=scan_limit, timeout=timeout)
+    danger_hits: List[Dict] = []
+    target_hits: List[Dict] = []
+    danger_counts: Dict[Tuple[str, str], int] = {}
+    target_counts: Dict[Tuple[str, str], int] = {}
+    for hit in hits:
+        key = (str(hit.get("pattern") or ""), str(hit.get("label") or ""))
+        if key in danger_keys:
+            count = danger_counts.get(key, 0)
+            if danger_limit < 0 or count < danger_limit:
+                danger_hits.append(hit)
+                danger_counts[key] = count + 1
+        if key in target_keys:
+            count = target_counts.get(key, 0)
+            if target_limit < 0 or count < target_limit:
+                target_hits.append(hit)
+                target_counts[key] = count + 1
+    return danger_hits, target_hits
+
+
+def scan_all_target_rule_hits(target_type: str, source_dirs: List[str], root,
+                              timeout: Optional[float] = 600) -> List[Dict]:
     """**Full** scan of the target-type rule set.  No cap (spec §6.1)."""
-    hits = []
-    for pattern, label in patterns_for(target_type):
-        for item in scan_all_hits(pattern, source_dirs, root):
-            hits.append({"label": label, "pattern": pattern, **item})
-    hits.sort(key=lambda h: (str(h["file"]), int(h["line"]), h["label"]))
-    return hits
+    hits = scan_all_labeled_hits(patterns_for(target_type), source_dirs, root,
+                                 timeout=timeout)
+    return sorted(hits, key=lambda h: (str(h["file"]), int(h["line"]),
+                                       h["label"]))
 
 
 def collect_target_rule_hits(target_type: str, source_dirs: List[str], root,
-                             max_lines: int = 8) -> List[Dict]:
+                             max_lines: int = 8,
+                             timeout: Optional[float] = 600) -> List[Dict]:
     """Bounded digest for **prompt/report display only** (spec §2.1)."""
-    hits = []
-    for pattern, label in patterns_for(target_type):
-        for item in summarize_hits(scan_all_hits(pattern, source_dirs, root), max_lines):
-            hits.append({"label": label, "pattern": pattern, **item})
-    return hits
+    return scan_all_labeled_hits(
+        patterns_for(target_type), source_dirs, root,
+        max_per_pattern=max_lines, timeout=timeout)
 
 
 def composite_chain_hints(graph: List[Dict], max_items: int = 80) -> List[Dict]:

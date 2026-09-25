@@ -8,7 +8,8 @@ from typing import Any, Dict, Optional, Tuple
 
 AV = {"N": 0.85, "A": 0.62, "L": 0.55, "P": 0.20}
 AC = {"L": 0.77, "H": 0.44}
-PR = {"N": 0.85, "L": 0.62, "H": 0.27}
+PR_UNCHANGED = {"N": 0.85, "L": 0.62, "H": 0.27}
+PR_CHANGED = {"N": 0.85, "L": 0.68, "H": 0.50}
 UI = {"N": 0.85, "R": 0.62}
 IMPACT = {"H": 0.56, "L": 0.22, "N": 0.0}
 
@@ -29,31 +30,70 @@ TIER_AC = {
 
 
 def _ceil1(x: float) -> float:
-    return math.ceil(x * 10.0) / 10.0
+    # CVSS Roundup: smallest one-decimal value that is >= x. The epsilon
+    # absorbs binary representations just below an exact tenth (e.g. 4.1).
+    return math.ceil(x * 10.0 - 1e-12) / 10.0
+
+
+METRIC_VALUES = {
+    "AV": set(AV), "AC": set(AC), "PR": set(PR_UNCHANGED),
+    "UI": set(UI), "S": {"U", "C"}, "C": set(IMPACT),
+    "I": set(IMPACT), "A": set(IMPACT),
+    "E": {"X", "H", "F", "P", "U"},
+    "RL": {"X", "U", "W", "T", "O"}, "RC": {"X", "C", "R"},
+    "CR": {"X", "H", "M", "L"}, "IR": {"X", "H", "M", "L"},
+    "AR": {"X", "H", "M", "L"},
+    "MAV": {"X", "N", "A", "L", "P"}, "MAC": {"X", "L", "H"},
+    "MPR": {"X", "N", "L", "H"}, "MUI": {"X", "N", "R"},
+    "MS": {"X", "U", "C"}, "MC": {"X", "H", "L", "N"},
+    "MI": {"X", "H", "L", "N"}, "MA": {"X", "H", "L", "N"},
+}
+BASE_METRICS = ("AV", "AC", "PR", "UI", "S", "C", "I", "A")
 
 
 def parse_vector(vector: str) -> dict:
+    if not isinstance(vector, str) or not vector.strip():
+        raise ValueError("CVSS vector must be a non-empty string")
+    raw = vector.strip()
+    if raw.startswith("CVSS:"):
+        version, sep, raw = raw.partition("/")
+        if version != "CVSS:3.1" or not sep:
+            raise ValueError("only CVSS:3.1 vectors are supported")
     parts = {}
-    for token in vector.split("/"):
-        if ":" not in token:
-            continue
+    for token in raw.split("/"):
+        if not token or token.count(":") != 1:
+            raise ValueError("invalid CVSS metric token: %s" % token)
         k, v = token.split(":", 1)
+        if k not in METRIC_VALUES:
+            raise ValueError("unknown CVSS 3.1 metric: %s" % k)
+        if k in parts:
+            raise ValueError("duplicate CVSS metric: %s" % k)
+        if v not in METRIC_VALUES[k]:
+            raise ValueError("invalid value for CVSS metric %s: %s" % (k, v))
         parts[k] = v
+    missing = [key for key in BASE_METRICS if key not in parts]
+    if missing:
+        raise ValueError("missing required CVSS base metrics: %s" % ", ".join(missing))
     return parts
 
 
 def base_score(vector: str) -> Tuple[float, str]:
     m = parse_vector(vector)
-    av, ac, pr, ui = AV[m["AV"]], AC[m["AC"]], PR[m["PR"]], UI[m["UI"]]
+    scope = m["S"]
+    pr_weights = PR_CHANGED if scope == "C" else PR_UNCHANGED
+    av, ac, pr, ui = AV[m["AV"]], AC[m["AC"]], pr_weights[m["PR"]], UI[m["UI"]]
     c, i, a = IMPACT[m["C"]], IMPACT[m["I"]], IMPACT[m["A"]]
     iss = 1.0 - (1.0 - c) * (1.0 - i) * (1.0 - a)
-    scope = m.get("S", "U")
     if scope == "U":
         impact = 6.42 * iss
-        base = _ceil1(min(impact + 8.22 * av * ac * pr * ui, 10.0))
     else:
         impact = 7.52 * (iss - 0.029) - 3.25 * math.pow(iss - 0.02, 15)
-        base = _ceil1(min(1.08 * (impact + 8.22 * av * ac * pr * ui), 10.0))
+    if impact <= 0:
+        base = 0.0
+    else:
+        exploitability = 8.22 * av * ac * pr * ui
+        score = (impact + exploitability) if scope == "U" else 1.08 * (impact + exploitability)
+        base = _ceil1(min(score, 10.0))
     severity = "None" if base == 0 else "Low" if base < 4.0 else "Medium" if base < 7.0 else "High" if base < 9.0 else "Critical"
     return base, severity
 
@@ -61,15 +101,17 @@ def base_score(vector: str) -> Tuple[float, str]:
 def check_precondition_consistency(tier: str, vector: str, implicit_default_on: bool = False) -> Tuple[bool, str]:
     """G5: CVSS AC must match the precondition tier."""
     m = parse_vector(vector)
-    allowed = TIER_AC.get(tier, ["H"])
+    if tier not in TIER_AC:
+        return False, "unknown precondition tier '%s'" % tier
+    allowed = TIER_AC[tier]
     if implicit_default_on:
         allowed = allowed + ["L"]
-    if m.get("AC") not in allowed:
+    if m["AC"] not in allowed:
         return False, (
             "AC:%s inconsistent with precondition tier '%s' (allowed AC %s)"
-            % (m.get("AC"), tier, "/".join(allowed))
+            % (m["AC"], tier, "/".join(allowed))
         )
-    return True, "AC:%s consistent with precondition tier '%s'" % (m.get("AC"), tier)
+    return True, "AC:%s consistent with precondition tier '%s'" % (m["AC"], tier)
 
 
 def check_impact_consistency(candidate: Dict[str, Any], summary: Dict[str, Any],

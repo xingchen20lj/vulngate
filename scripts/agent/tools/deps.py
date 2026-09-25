@@ -16,6 +16,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+try:  # Python 3.11+
+    import tomllib
+except ImportError:  # pragma: no cover - older supported Python
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ImportError:
+        tomllib = None
+
 from .public_scan import _cache_key, _http_json, _read_cache, _write_cache
 
 MANIFESTS = {
@@ -129,6 +137,68 @@ def _parse_gemfile(text: str) -> List[Tuple[str, str]]:
     return out
 
 
+def _version_from_constraint(value: Any) -> str:
+    match = re.search(r"v?(\d+(?:\.\d+){0,3}(?:[-+._][0-9A-Za-z.-]+)?)",
+                      str(value or ""))
+    return match.group(1) if match else "latest"
+
+
+def _parse_cargo(text: str) -> List[Tuple[str, str]]:
+    if tomllib is None:
+        return []
+    try:
+        data = tomllib.loads(text)
+    except (ValueError, TypeError):
+        return []
+    sections = [data.get(name, {}) for name in
+                ("dependencies", "dev-dependencies", "build-dependencies")]
+    target = data.get("target", {})
+    if isinstance(target, dict):
+        for target_data in target.values():
+            if isinstance(target_data, dict):
+                sections.extend(target_data.get(name, {}) for name in
+                                ("dependencies", "dev-dependencies", "build-dependencies"))
+    out = []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        for name, spec in section.items():
+            value = spec.get("version", "") if isinstance(spec, dict) else spec
+            out.append((str(name), _version_from_constraint(value)))
+    return out
+
+
+def _parse_composer(text: str) -> List[Tuple[str, str]]:
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    out = []
+    for section in ("require", "require-dev"):
+        values = data.get(section) or {}
+        if not isinstance(values, dict):
+            continue
+        for name, constraint in values.items():
+            if str(name).lower() == "php":
+                continue
+            out.append((str(name), _version_from_constraint(constraint)))
+    return out
+
+
+def _parse_gradle(text: str) -> List[Tuple[str, str]]:
+    out = []
+    declaration = re.compile(
+        r"\b(?:implementation|api|compileOnly|runtimeOnly|testImplementation|"
+        r"testRuntimeOnly|classpath|annotationProcessor)\s*"
+        r"(?:\(\s*)?['\"]([^'\"]+)['\"]")
+    for match in declaration.finditer(text):
+        parts = match.group(1).split(":")
+        if len(parts) >= 3 and parts[0] and parts[1]:
+            out.append((parts[0] + ":" + parts[1],
+                        _version_from_constraint(parts[2])))
+    return out
+
+
 _PARSERS = {
     "pom.xml": _parse_pom,
     "requirements.txt": _parse_reqs,
@@ -137,10 +207,10 @@ _PARSERS = {
     "package.json": _parse_package_json,
     "go.mod": _parse_go_mod,
     "Gemfile": _parse_gemfile,
-    "Cargo.toml": _parse_reqs,
-    "composer.json": _parse_package_json,
-    "build.gradle": _parse_reqs,
-    "build.gradle.kts": _parse_reqs,
+    "Cargo.toml": _parse_cargo,
+    "composer.json": _parse_composer,
+    "build.gradle": _parse_gradle,
+    "build.gradle.kts": _parse_gradle,
 }
 
 
@@ -197,9 +267,20 @@ def _fixed_version(vuln: Dict[str, Any]) -> Optional[str]:
                     fixed.append(str(ev["fixed"]))
     if not fixed:
         return None
-    # prefer semver-looking tags over commit hashes (PyPI advisories mix both)
-    semvers = [f for f in fixed if re.match(r"^\d+\.\d+", f)]
-    return max(semvers) if semvers else fixed[-1]
+    # Prefer numeric release versions over commit hashes and compare numeric
+    # components numerically (lexical max incorrectly ranks 1.9 above 1.10).
+    semvers = [f for f in fixed if re.match(r"^v?\d+(?:\.\d+){1,3}(?:[-+._][0-9A-Za-z.-]+)?$", f)]
+    return max(semvers, key=_version_key) if semvers else fixed[-1]
+
+
+def _version_key(value: str) -> Tuple[Any, ...]:
+    text = str(value).strip().lstrip("v")
+    match = re.match(r"^(\d+(?:\.\d+)*)?(.*)$", text)
+    numeric = tuple(int(part) for part in (match.group(1) or "0").split("."))
+    numeric = numeric + (0,) * max(0, 8 - len(numeric))
+    suffix = (match.group(2) or "").strip("-+._").lower()
+    release_suffixes = {"", "final", "release", "ga", "stable"}
+    return numeric[:8], int(suffix in release_suffixes), suffix
 
 
 def scan_dependencies(deps: List[Dependency],

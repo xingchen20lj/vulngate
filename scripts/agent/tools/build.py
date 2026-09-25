@@ -1,70 +1,232 @@
 """Java PoC build + verification-matrix runner.
 
 Runs `{version} x {safe-mode on/off} x {precondition}` cells for a candidate,
-captures stdout/stderr per cell, and extracts machine-readable observations
-(GATE_BLOCKED / INSTANTIATED / ERROR / NETWORK / PARSED plus bounded
-STEP/STEP_EVIDENCE/STATE, capability/transition, and residual-falsifier
-traces) that the G4 runtime gate consumes.
+captures stdout/stderr per cell, and stores marker lines as untrusted PoC
+claims. G4 consumes only harness-owned structured observations; a PoC cannot
+confirm its own reported HTTP result, side effect, or target state.
 """
 
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
 import shutil
 import subprocess
+import tempfile
+import threading
+import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 from ..sandbox.approval import ApprovalGate
-from ..sandbox.runner import CommandRunner, RunResult, minimal_poc_env
+from ..sandbox.http_observer import LoopbackHTTPObserver, OBSERVER_VERSION
+from ..sandbox.network_sandbox import (SEATBELT_DENY_ALL_POLICY,
+                                       SEATBELT_POC_FILESYSTEM_POLICY,
+                                       SEATBELT_PROXY_POLICY,
+                                       verify_network_sandbox,
+                                       wrap_network_command)
+from ..sandbox.runner import (CommandRunner, RunResult, minimal_poc_env,
+                              POC_RESOURCE_POLICY_VERSION,
+                              POC_MAX_FILE_BYTES, POC_MAX_OPEN_FILES,
+                              POC_MAX_PROCESS_SPAWN_DELTA,
+                              POC_MAX_ADDRESS_SPACE_BYTES,
+                              POC_MIN_ADDRESS_SPACE_BYTES,
+                              POC_PROCESS_TREE_RSS_POLICY_VERSION,
+                              POC_MAX_PROCESS_TREE_RSS_BYTES,
+                              POC_PROCESS_TREE_SAMPLE_INTERVAL_SECONDS,
+                              POC_SCRATCH_LIMIT_POLICY_VERSION,
+                              POC_MAX_SCRATCH_BYTES,
+                              POC_MAX_SCRATCH_ENTRIES,
+                              POC_SCRATCH_SAMPLE_INTERVAL_SECONDS)
 from ..evaluation.research_consistency_actions import (
     normalize_research_consistency_action,
     normalize_research_consistency_lane,
 )
 from .authz import (assert_authz_observations, authz_env, authz_fixture_id,
                     authz_jvm_props, normalize_authz_case)
+from .evidence_policy import S4_EVIDENCE_POLICY_VERSION
 from .experiment import (experiment_metadata, normalize_capability_contract,
                          normalize_experiment, normalize_residual_contracts,
                          sequence_trace_status)
 from .surface_variants import normalize_variant_fixture_context
 
 
-RUNNER_POLICY_VERSION = "loopback-only-v2"
+RUNNER_POLICY_VERSION = "static-egress-screen-v19-seatbelt-fs-read-allowlist-safe-path-explicit-java-home-process-tree-rss-watchdog-rlimit-as-scratch-watchdog-observer-direct-session-call-guard-timeout-cap-post-exit-group-reap-service-budget-abort"
+JAVA_RUNNER_POLICY_VERSION = "static-egress-screen-v18-seatbelt-fs-read-allowlist-safe-path-explicit-java-home-process-tree-rss-watchdog-rlimit-as-scratch-watchdog-deny-all-direct-session-call-guard-timeout-cap-post-exit-group-reap-service-budget-abort"
+POC_CLAIMS_SCHEMA = "poc-claims-v1"
+HARNESS_OBSERVATIONS_SCHEMA = "harness-observations-v1"
+MAX_S4_ROUND_TIMEOUT_SECONDS = 90 * 60
+MAX_S4_CANDIDATE_TIMEOUT_SECONDS = 15 * 60
 
 
-LOOPBACK_OK = {"127.0.0.1", "localhost", "0.0.0.0", "[::1]", "::1"}
+class S4ExecutionBudget:
+    """Shared wall-clock budgets for one S4 round and each candidate."""
+
+    def __init__(self, round_timeout_seconds: int = 5400,
+                 candidate_timeout_seconds: int = 900):
+        self.requested_round_timeout_seconds = max(1, int(round_timeout_seconds))
+        self.requested_candidate_timeout_seconds = max(
+            1, int(candidate_timeout_seconds))
+        self.round_timeout_seconds = min(
+            self.requested_round_timeout_seconds,
+            MAX_S4_ROUND_TIMEOUT_SECONDS)
+        self.candidate_timeout_seconds = min(
+            self.requested_candidate_timeout_seconds,
+            MAX_S4_CANDIDATE_TIMEOUT_SECONDS)
+        self.started_at = time.monotonic()
+        self.round_deadline = self.started_at + self.round_timeout_seconds
+        self._candidate_deadlines: Dict[str, float] = {}
+        self._abort_event = threading.Event()
+        self.abort_reason = ""
+
+    @property
+    def abort_event(self) -> threading.Event:
+        return self._abort_event
+
+    def abort(self, reason: str) -> None:
+        if self._abort_event.is_set():
+            return
+        self.abort_reason = str(reason or "s4-aborted")[:160]
+        self._abort_event.set()
+
+    def deadline_for(self, candidate_id: str) -> float:
+        key = str(candidate_id)
+        if key not in self._candidate_deadlines:
+            self._candidate_deadlines[key] = min(
+                self.round_deadline,
+                time.monotonic() + self.candidate_timeout_seconds)
+        return self._candidate_deadlines[key]
+
+    def remaining(self, candidate_id: str) -> float:
+        if self._abort_event.is_set():
+            return 0.0
+        return max(0.0, min(self.round_deadline,
+                            self.deadline_for(candidate_id)) - time.monotonic())
+
+    def round_remaining(self) -> float:
+        if self._abort_event.is_set():
+            return 0.0
+        return max(0.0, self.round_deadline - time.monotonic())
+
+    def exhausted(self, candidate_id: str) -> bool:
+        return self.remaining(candidate_id) < 1.0
+
+    def stop_reason(self, candidate_id: str) -> str:
+        if self._abort_event.is_set():
+            return self.abort_reason or "s4-aborted"
+        if self.round_remaining() < 1.0:
+            return "s4-round-timebox-exhausted"
+        return "candidate-timebox-exhausted:%s" % candidate_id
+
+    def snapshot(self) -> Dict[str, Any]:
+        now = time.monotonic()
+        round_remaining = self.round_remaining()
+        expired = sorted(key for key, deadline in self._candidate_deadlines.items()
+                         if deadline - now < 1.0)
+        return {
+            "requested_round_timeout_seconds": self.requested_round_timeout_seconds,
+            "requested_candidate_timeout_seconds": self.requested_candidate_timeout_seconds,
+            "round_timeout_seconds": self.round_timeout_seconds,
+            "candidate_timeout_seconds": self.candidate_timeout_seconds,
+            "round_timeout_capped": (
+                self.requested_round_timeout_seconds > self.round_timeout_seconds),
+            "candidate_timeout_capped": (
+                self.requested_candidate_timeout_seconds > self.candidate_timeout_seconds),
+            "elapsed_seconds": round(now - self.started_at, 3),
+            "round_remaining_seconds": round(round_remaining, 3),
+            "round_exhausted": round_remaining < 1.0,
+            "aborted": self._abort_event.is_set(),
+            "abort_reason": self.abort_reason,
+            "candidates_started": len(self._candidate_deadlines),
+            "candidate_timeboxes_exhausted": expired,
+        }
+
+
+def _bounded_timeout(budget: Optional[S4ExecutionBudget], candidate_id: str,
+                     requested: Optional[int], default: int) -> Optional[int]:
+    if budget is None:
+        return requested
+    remaining = budget.remaining(candidate_id)
+    if remaining < 1.0:
+        return None
+    requested_seconds = max(1, int(requested or default))
+    return max(1, min(requested_seconds, int(remaining)))
+
+
+def _budget_key(spec: Any) -> str:
+    return str(getattr(spec, "budget_key", "") or
+               getattr(spec, "candidate_id", ""))
+
+
+LOOPBACK_OK = {"127.0.0.1", "localhost", "[::1]", "::1"}
 
 _URL_SCHEME = re.compile(
     r"\b(?:jar|http|https|ftp|ldap|ldaps|rmi|dns|file|tcp|udp|jdbc|nhttp|"
-    r"dnslog|gopher)://([^/\"'\s:]+)", re.I)
+    r"dnslog|gopher)://(\[[0-9a-f:.]+\]|[^/\"'\s:]+)", re.I)
 _IP_LITERAL = re.compile(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b")
 _REMOTE_TOOL = re.compile(
     r"\b(?:ssh|scp|sftp|telnet|rlogin|rsync|kubectl|docker|podman|aliyun|aws|gcloud)\b",
     re.I,
 )
 _WILDCARD_BIND = re.compile(
-    r"\b(?:bind|listen)\s*\([^)]*[\"'](?:0\.0\.0\.0|::)[\"']", re.I | re.S)
+    r"\b(?:bind|listen)\s*\(\s*(?:\(\s*)?[\"'](?:[\"']|0\.0\.0\.0|::)[\"']",
+    re.I | re.S)
+_ANY_ADDRESS = re.compile(r"\b(?:INADDR_ANY|in6addr_any)\b", re.I)
+_NETWORK_PRIMITIVE = re.compile(
+    r"\b(?:ServerSocket|DatagramSocket|Socket|SocketChannel|HttpClient|"
+    r"HttpURLConnection|URLConnection|InitialContext|NamingContext|"
+    r"InetAddress|openConnection|openStream|create_connection|socket|requests|"
+    r"urllib|httpx|aiohttp|curl|wget|socat|ncat)\b", re.I)
+_SAFE_PATH_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+
+
+def _safe_component(value: Any, label: str) -> str:
+    text = str(value or "")
+    if not _SAFE_PATH_COMPONENT.fullmatch(text):
+        raise ValueError("%s must be a path-safe identifier" % label)
+    return text
+
+
+def _contained_path(root: Path, relative: Any, label: str,
+                    allow_absolute: bool = False) -> Path:
+    """Resolve a manifest path under its authorized root, including symlinks."""
+    raw = str(relative or "")
+    candidate_rel = Path(raw)
+    if (not raw or (candidate_rel.is_absolute() and not allow_absolute)
+            or "\\" in raw
+            or ".." in candidate_rel.parts):
+        raise ValueError("%s must be a relative path without traversal" % label)
+    resolved_root = Path(root).resolve()
+    resolved = (candidate_rel if candidate_rel.is_absolute()
+                else resolved_root / candidate_rel).resolve()
+    if not resolved.is_relative_to(resolved_root):
+        raise ValueError("%s escapes its authorized root" % label)
+    return resolved
 
 
 def scan_source_egress(src_text: str, src_path: str = "",
-                       allowed_hosts: Optional[set] = None) -> List[str]:
-    """Static loopback-enforcement scan (baseline fix #4).
+                       allowed_hosts: Optional[set] = None,
+                       declared_targets: Optional[List[str]] = None) -> List[str]:
+    """Static source screening for known network and remote-exec targets.
 
-    Finds non-loopback network targets in PoC source before compilation.
-    Loopback (127.0.0.1 / localhost / 0.0.0.0) is allowed; anything else is
-    reported so the runner can refuse to build the PoC. This turns the
-    "loopback only" prompt-level constraint into a compile-time hard gate.
+    Finds literal non-loopback network targets and obvious wildcard listeners
+    before compilation. This is a source check, not an OS network sandbox;
+    dynamic or indirect system calls still require a supported isolation layer.
     """
     bad: List[str] = []
     if _REMOTE_TOOL.search(src_text):
         bad.append("remote/cloud execution primitive (line ~%d)" % (
             src_text.count("\n", 0, _REMOTE_TOOL.search(src_text).start()) + 1))
     if _WILDCARD_BIND.search(src_text):
-        bad.append("public wildcard listener 0.0.0.0/::")
+        bad.append("wildcard or empty-address listener (0.0.0.0/::/empty host)")
+    if _ANY_ADDRESS.search(src_text):
+        bad.append("wildcard listener address INADDR_ANY/in6addr_any")
     url_hosts = set()
     for m in _URL_SCHEME.finditer(src_text):
         host = m.group(1).strip().lower().rstrip(".")
@@ -78,6 +240,27 @@ def scan_source_egress(src_text: str, src_path: str = "",
             continue  # already reported as a URL host
         if ip not in LOOPBACK_OK and ip not in (allowed_hosts or set()) and ip not in bad:
             bad.append("IP %s (line ~%d)" % (ip, src_text.count("\n", 0, m.start()) + 1))
+    target_text = "\n".join([src_text] + [str(item) for item in
+                                          (declared_targets or [])])
+    target_hosts = set()
+    for match in _URL_SCHEME.finditer(target_text):
+        target_hosts.add(match.group(1).strip().lower().rstrip("."))
+    target_hosts.update(_IP_LITERAL.findall(target_text))
+    if re.search(r"\blocalhost\b", target_text, re.I):
+        target_hosts.add("localhost")
+    explicit_target = False
+    for host in target_hosts:
+        if host in (allowed_hosts or set()):
+            explicit_target = True
+            break
+        try:
+            explicit_target = ipaddress.ip_address(host.strip("[]")).is_loopback
+        except ValueError:
+            explicit_target = host in {"localhost", "localhost.localdomain"}
+        if explicit_target:
+            break
+    if _NETWORK_PRIMITIVE.search(src_text) and not explicit_target:
+        bad.append("network-capable code has no explicit loopback or allowlisted target")
     return sorted(set(bad))
 
 
@@ -202,6 +385,30 @@ def _cell_metadata(cell: MatrixCell) -> Dict[str, Any]:
     }
 
 
+def _stoploss_cell(candidate_id: str, cell: MatrixCell,
+                   budget: S4ExecutionBudget, lang: str,
+                   budget_key: Optional[str] = None) -> Dict[str, Any]:
+    """Persist an unexecuted matrix cell when its bounded S4 budget expires."""
+    result = {
+        "candidate_id": candidate_id,
+        "version": cell.version,
+        "safe_mode": cell.safe_mode,
+        "features": list(cell.features),
+        "precondition": cell.precondition,
+        "returncode": None,
+        "timed_out": False,
+        "duration_ms": 0,
+        "observations": {},
+        "poc_claims": {},
+        "policy_status": "stop-loss",
+        "stop_reason": budget.stop_reason(budget_key or candidate_id),
+        "lang": lang,
+        "claim_status": "not-a-finding",
+    }
+    result.update(_cell_metadata(cell))
+    return result
+
+
 @dataclass
 class POCSpec:
     candidate_id: str
@@ -217,6 +424,7 @@ class POCSpec:
     input_shape: str = ""
     logic: str = ""
     notes: str = ""
+    budget_key: str = ""
 
 
 ENV_ERROR_PATTERN = re.compile(
@@ -350,10 +558,22 @@ def resolve_java_runtime(cell: MatrixCell) -> Dict[str, str]:
             "java_version": version, "java_version_line": probe.get("version_line", "")}
 
 
-def parse_observations(stdout: str, stderr: str = "") -> Dict[str, Any]:
-    """Parse scalar observations plus bounded state/capability evidence traces."""
-    obs: Dict[str, Any] = {}
+def parse_poc_claims(stdout: str, stderr: str = "") -> Dict[str, Any]:
+    """Parse PoC output as claims, never as independent runtime observations.
+
+    A PoC controls its own stdout/stderr, so even well-formed marker lines are
+    not evidence that an HTTP response, side effect, or target state was
+    observed. Preserve them for analyst review while keeping them out of the
+    observation contract consumed by G4.
+    """
+    fields: Dict[str, List[str]] = {}
     combined = stdout + "\n" + stderr
+
+    def add(key: str, value: str) -> None:
+        values = fields.setdefault(key, [])
+        if len(values) < 32:
+            values.append(value[:240])
+
     for line in combined.splitlines():
         for source_key, trace_key in (
                 ("STEP", "STEP_TRACE"),
@@ -364,12 +584,7 @@ def parse_observations(stdout: str, stderr: str = "") -> Dict[str, Any]:
                 ("TRANSITION", "TRANSITION_TRACE"),
                 ("TRANSITION_EVIDENCE", "TRANSITION_EVIDENCE")):
             if line.startswith(source_key + "="):
-                values = obs.setdefault(trace_key, [])
-                if not isinstance(values, list):
-                    values = []
-                    obs[trace_key] = values
-                if len(values) < 32:
-                    values.append(line[len(source_key) + 1:len(source_key) + 241])
+                add(trace_key, line[len(source_key) + 1:])
                 break
         for key in ("GATE_BLOCKED", "INSTANTIATED", "ERROR", "NETWORK", "LEAKED",
                     "SHORTNAME", "PARSED", "INPUT_BYTES", "CELL_START",
@@ -384,60 +599,316 @@ def parse_observations(stdout: str, stderr: str = "") -> Dict[str, Any]:
                     "JDK8_RUNTIME_ACTIVE", "RESIDUAL_ID", "RESIDUAL_STATUS",
                     "RESIDUAL_FALSIFIER"):
             if line.startswith(key + "="):
-                obs[key] = line[len(key) + 1:]
-    if "ERROR" not in obs:
+                add(key, line[len(key) + 1:])
+    if "ERROR" not in fields:
         m = re.search(r"(OutOfMemoryError|StackOverflowError|SQLException|JSONException"
                       r"|ArrayIndexOutOfBoundsException|DateTimeException|"
                       r"NegativeArraySizeException|NumberFormatException|IllegalArgument\w*)",
                       combined)
         if m:
-            obs["ERROR"] = m.group(1)
-    if "ENV_ERROR" not in obs:
+            add("RUNTIME_ERROR_PATTERN", m.group(1))
+    if "ENV_ERROR" not in fields:
         m = ENV_ERROR_PATTERN.search(combined)
         if m:
-            obs["ENV_ERROR"] = m.group(1)
-    return obs
+            add("ENV_ERROR_PATTERN", m.group(1))
+    return {"schema_version": POC_CLAIMS_SCHEMA,
+            "source": "poc-stdout-stderr",
+            "fields": fields}
+
+
+def parse_observations(stdout: str, stderr: str = "") -> Dict[str, Any]:
+    """Deprecated compatibility alias; parsed output is explicitly a claim."""
+    return parse_poc_claims(stdout, stderr)
+
+
+def _trusted_observations(cell: Dict[str, Any]) -> Dict[str, Any]:
+    """Read only validated observations emitted by a supported collector."""
+    provenance = cell.get("observation_provenance") or {}
+    if not isinstance(provenance, dict):
+        return {}
+    capture_scope = provenance.get("capture_scope")
+    network_isolation = cell.get("network_isolation")
+    resource_limits = cell.get("resource_limits")
+    scratch_limits = cell.get("scratch_limits")
+    process_tree_limits = (resource_limits.get("process_tree_rss")
+                           if isinstance(resource_limits, dict) else None)
+    process_tree_limits_valid = (
+        isinstance(process_tree_limits, dict)
+        and process_tree_limits.get("policy") ==
+        POC_PROCESS_TREE_RSS_POLICY_VERSION
+        and process_tree_limits.get("status") == "completed"
+        and type(process_tree_limits.get("max_bytes")) is int
+        and process_tree_limits.get("max_bytes") ==
+        POC_MAX_PROCESS_TREE_RSS_BYTES
+        and type(process_tree_limits.get("sample_interval_ms")) is int
+        and process_tree_limits.get("sample_interval_ms") ==
+        int(POC_PROCESS_TREE_SAMPLE_INTERVAL_SECONDS * 1000)
+        and type(process_tree_limits.get("peak_rss_bytes")) is int
+        and 0 <= process_tree_limits["peak_rss_bytes"] <=
+        POC_MAX_PROCESS_TREE_RSS_BYTES
+        and type(process_tree_limits.get("peak_process_count")) is int
+        and process_tree_limits["peak_process_count"] >= 1
+        and type(process_tree_limits.get("sample_count")) is int
+        and process_tree_limits["sample_count"] >= 1
+        and type(process_tree_limits.get("tracked_process_count")) is int
+        and process_tree_limits["tracked_process_count"] >= 1
+        and process_tree_limits.get("cleanup_status") == "complete")
+    resource_limits_valid = (
+        isinstance(resource_limits, dict)
+        and resource_limits.get("policy") == POC_RESOURCE_POLICY_VERSION
+        and type(resource_limits.get("cpu_seconds_per_process")) is int
+        and 1 <= resource_limits["cpu_seconds_per_process"] <= 3600
+        and type(resource_limits.get("max_address_space_bytes")) is int
+        and POC_MIN_ADDRESS_SPACE_BYTES <=
+        resource_limits["max_address_space_bytes"] <= POC_MAX_ADDRESS_SPACE_BYTES
+        and type(resource_limits.get("max_file_bytes")) is int
+        and resource_limits.get("max_file_bytes") == POC_MAX_FILE_BYTES
+        and type(resource_limits.get("max_open_files")) is int
+        and resource_limits.get("max_open_files") == POC_MAX_OPEN_FILES
+        and type(resource_limits.get("user_process_baseline")) is int
+        and type(resource_limits.get("max_user_processes")) is int
+        and resource_limits["max_user_processes"] >
+        resource_limits["user_process_baseline"]
+        and resource_limits["max_user_processes"] -
+        resource_limits["user_process_baseline"] <= POC_MAX_PROCESS_SPAWN_DELTA
+        and type(resource_limits.get("core_bytes")) is int
+        and resource_limits.get("core_bytes") == 0
+        and process_tree_limits_valid
+        and provenance.get("resource_limits") == resource_limits)
+    scratch_limits_valid = (
+        isinstance(scratch_limits, dict)
+        and scratch_limits.get("policy") == POC_SCRATCH_LIMIT_POLICY_VERSION
+        and scratch_limits.get("status") == "completed"
+        and type(scratch_limits.get("max_bytes")) is int
+        and scratch_limits.get("max_bytes") == POC_MAX_SCRATCH_BYTES
+        and type(scratch_limits.get("max_entries")) is int
+        and scratch_limits.get("max_entries") == POC_MAX_SCRATCH_ENTRIES
+        and type(scratch_limits.get("sample_interval_ms")) is int
+        and scratch_limits.get("sample_interval_ms") ==
+        int(POC_SCRATCH_SAMPLE_INTERVAL_SECONDS * 1000)
+        and type(scratch_limits.get("peak_bytes")) is int
+        and 0 <= scratch_limits["peak_bytes"] <= POC_MAX_SCRATCH_BYTES
+        and type(scratch_limits.get("peak_entries")) is int
+        and 0 <= scratch_limits["peak_entries"] <= POC_MAX_SCRATCH_ENTRIES
+        and cell.get("resource_limit_exceeded") == ""
+        and provenance.get("scratch_limits") == scratch_limits
+        and provenance.get("resource_limit_exceeded") == "")
+    capture_policy_valid = (
+        (capture_scope == "seatbelt-host-local-port"
+         and network_isolation == SEATBELT_PROXY_POLICY
+         and cell.get("filesystem_isolation") == SEATBELT_POC_FILESYSTEM_POLICY
+         and provenance.get("filesystem_isolation") ==
+         SEATBELT_POC_FILESYSTEM_POLICY
+         and resource_limits_valid
+         and scratch_limits_valid
+         and cell.get("runner_policy") == RUNNER_POLICY_VERSION)
+    )
+    if (not isinstance(provenance, dict)
+            or provenance.get("schema_version") != HARNESS_OBSERVATIONS_SCHEMA
+            or provenance.get("producer") != "vulngate-harness"
+            or provenance.get("collector_version") != OBSERVER_VERSION
+            or not capture_policy_valid
+            or provenance.get("network_isolation") != network_isolation
+            or provenance.get("candidate_id") != cell.get("candidate_id")
+            or provenance.get("cell_id") != cell.get("cell_id")
+            or provenance.get("returncode") != cell.get("returncode")
+            or provenance.get("timed_out") != cell.get("timed_out")):
+        return {}
+    for field in ("run_id", "cell_id", "source_digest", "target_digest"):
+        value = str(provenance.get(field, ""))
+        if field == "run_id":
+            try:
+                if str(uuid.UUID(value)) != value:
+                    return {}
+            except (ValueError, AttributeError):
+                return {}
+        elif not re.fullmatch(r"[0-9a-f]{64}", value):
+            return {}
+    features = cell.get("features", [])
+    args = cell.get("args", [])
+    if not isinstance(features, list) or not isinstance(args, list):
+        return {}
+    cell_identity = {
+        "candidate_id": cell.get("candidate_id"),
+        "version": cell.get("version"),
+        "safe_mode": cell.get("safe_mode"),
+        "precondition": cell.get("precondition"),
+        "features": features,
+        "args": args,
+        "source_digest": provenance["source_digest"],
+        "target_digest": provenance["target_digest"],
+        "authz_fixture_id": cell.get("authz_fixture_id"),
+    }
+    expected_cell_id = hashlib.sha256(json.dumps(
+        cell_identity, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False).encode("utf-8")).hexdigest()
+    if expected_cell_id != provenance.get("cell_id"):
+        return {}
+    observations = cell.get("observations")
+    if not isinstance(observations, dict) or set(observations) - {
+            "HTTP_CODE", "HTTP_RESPONSES"}:
+        return {}
+    responses = observations.get("HTTP_RESPONSES")
+    if not isinstance(responses, list) or len(responses) > 256:
+        return {}
+    allowed_methods = {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
+    request_ids = []
+    for row in responses:
+        if (not isinstance(row, dict)
+                or row.get("kind") != "http-response"
+                or row.get("method") not in allowed_methods
+                or type(row.get("request_id")) is not int
+                or row["request_id"] < 1
+                or type(row.get("status")) is not int
+                or not 100 <= row["status"] <= 599
+                or type(row.get("response_bytes")) is not int
+                or row["response_bytes"] < 0
+                or not isinstance(row.get("body_complete"), bool)
+                or not isinstance(row.get("response_truncated"), bool)
+                or (row.get("response_truncated") and row.get("body_complete"))
+                or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("request_digest", "")))
+                or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("response_body_sha256", "")))):
+            return {}
+        request_ids.append(row["request_id"])
+    if len(request_ids) != len(set(request_ids)):
+        return {}
+    if (type(provenance.get("response_count")) is not int
+            or provenance.get("response_count") != len(responses)
+            or not isinstance(provenance.get("observer_gaps"), list)
+            or any(not isinstance(gap, str) or not gap
+                   for gap in provenance.get("observer_gaps", []))):
+        return {}
+    gaps = provenance["observer_gaps"]
+    expected_code = (str(responses[0]["status"])
+                     if len(responses) == 1 and not gaps else None)
+    if observations.get("HTTP_CODE") != expected_code:
+        return {}
+    return observations
+
+
+def _cell_poc_claims(cell: Dict[str, Any]) -> Dict[str, Any]:
+    """Return explicitly untrusted claims, including legacy marker artifacts."""
+    claims = cell.get("poc_claims")
+    if isinstance(claims, dict) and isinstance(claims.get("fields"), dict):
+        return claims
+    if _trusted_observations(cell):
+        return {}
+    # Older cells stored PoC marker output directly under `observations`.
+    # Treat it as claims until a harness-native observation producer exists.
+    legacy = cell.get("observations")
+    if isinstance(legacy, dict) and legacy:
+        return {"schema_version": "legacy-observations-as-claims-v1",
+                "source": "legacy-cell-observations",
+                "fields": {str(key): (value if isinstance(value, list) else [value])
+                           for key, value in legacy.items()}}
+    return {}
 
 
 class JavaMatrixRunner:
     def __init__(self, workspace: Path, target: str, round_no: int,
                  approval: Optional[ApprovalGate] = None,
                  authorized_staging: bool = False,
-                 staging_hosts: Optional[List[str]] = None):
+                 staging_hosts: Optional[List[str]] = None,
+                 execution_budget: Optional[S4ExecutionBudget] = None):
         self.workspace = workspace.resolve()
-        self.target = target
-        self.round_no = round_no
+        self.target = _safe_component(target, "target")
+        self.round_no = int(round_no)
+        if self.round_no < 1:
+            raise ValueError("round must be a positive integer")
         self.approval = approval or ApprovalGate()
         self.authorized_staging = authorized_staging
+        self.execution_budget = execution_budget or S4ExecutionBudget()
         self.staging_hosts = {str(h).strip().lower().rstrip(".") for h in (staging_hosts or [])}
         self.runner = CommandRunner(workspace, approval, authorized_staging=authorized_staging,
-                                    staging_hosts=list(self.staging_hosts))
-        self.src_dir = workspace / "poc" / target / ("round-%02d" % round_no) / "src"
-        self.out_dir = workspace / "poc" / target / ("round-%02d" % round_no) / "out"
-        self.matrix_dir = workspace / "state" / target / ("round-%02d" % round_no) / "S4" / "matrix-runs"
+                                    staging_hosts=list(self.staging_hosts),
+                                    execution_budget=self.execution_budget)
+        round_dir = "round-%02d" % self.round_no
+        self.src_dir = _contained_path(
+            self.workspace, "poc/%s/%s/src" % (self.target, round_dir),
+            "PoC source directory")
+        self.out_dir = _contained_path(
+            self.workspace, "poc/%s/%s/out" % (self.target, round_dir),
+            "PoC output directory")
+        self.matrix_dir = _contained_path(
+            self.workspace, "state/%s/%s/S4/matrix-runs" % (self.target, round_dir),
+            "S4 matrix directory")
+        self._network_sandbox_result: Optional[tuple] = None
+
+    def _network_sandbox(self) -> tuple:
+        if self._network_sandbox_result is None:
+            self._network_sandbox_result = verify_network_sandbox()
+        return self._network_sandbox_result
+
+    def _requires_network_observer(self, spec: POCSpec) -> bool:
+        for source_name in [spec.src] + list(spec.extra_srcs):
+            source = _contained_path(self.src_dir, source_name, "Java PoC source")
+            try:
+                if _NETWORK_PRIMITIVE.search(
+                        source.read_text(encoding="utf-8", errors="replace")):
+                    return True
+            except OSError:
+                continue
+        return False
+
+    @staticmethod
+    def _policy_cell(spec: POCSpec, cell: MatrixCell, status: str,
+                     reason: str, network_isolation: str) -> Dict[str, Any]:
+        result = {
+            "candidate_id": spec.candidate_id,
+            "poc_class": spec.class_name,
+            "version": cell.version,
+            "safe_mode": cell.safe_mode,
+            "features": cell.features,
+            "precondition": cell.precondition,
+            "required_runtime": cell.required_runtime,
+            "authz": normalize_authz_case(cell.authz),
+            "returncode": None,
+            "timed_out": False,
+            "duration_ms": 0,
+            "observations": {},
+            "poc_claims": {},
+            "network_isolation": network_isolation,
+            "policy_status": status,
+            "harness_error": reason[:400],
+            "observation_gaps": ["os-network-isolation-unavailable"],
+            "runner_policy": JAVA_RUNNER_POLICY_VERSION,
+        }
+        result.update(_cell_metadata(cell))
+        return result
 
     # ------------------------------------------------------------------
     def compile(self, spec: POCSpec, version: str, jars: List[Path],
-                runtime: Optional[Dict[str, str]] = None) -> RunResult:
-        out = self.out_dir / version
+                runtime: Optional[Dict[str, str]] = None,
+                timeout: Optional[int] = None) -> RunResult:
+        version = _safe_component(version, "version")
+        out = _contained_path(self.out_dir, version, "Java PoC output directory")
         out.mkdir(parents=True, exist_ok=True)
-        src_file = self.src_dir / spec.src
+        src_file = _contained_path(self.src_dir, spec.src, "Java PoC source")
         if not src_file.exists():
             raise FileNotFoundError(
                 "PoC source missing: %s (stage PoCs into %s first)" % (src_file, self.src_dir))
-        cp = ":".join(str(j) for j in jars)
-        files = [str(src_file)] + [str(self.src_dir / s) for s in spec.extra_srcs]
-        # Baseline fix #4: loopback-only hard gate before javac. Any non-loopback
-        # URL/IP literal in PoC source blocks the build and is recorded.
+        safe_jars = [_contained_path(self.workspace, jar, "dependency jar",
+                                     allow_absolute=True)
+                     for jar in jars]
+        cp = ":".join(str(j) for j in safe_jars)
+        files = [str(src_file)] + [str(_contained_path(
+            self.src_dir, source, "Java extra source")) for source in spec.extra_srcs]
+        # Baseline fix #4: source-level egress screen before javac. Any explicit
+        # non-loopback URL/IP literal blocks the build and is recorded.
         egress = []
+        declared_targets = [str(arg) for cell in spec.cells
+                            if cell.version == version for arg in cell.args]
         for f in files:
             try:
                 text = Path(f).read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            egress += scan_source_egress(text, f, self.staging_hosts if self.authorized_staging else None)
+            egress += scan_source_egress(
+                text, f,
+                self.staging_hosts if self.authorized_staging else None,
+                declared_targets)
         if egress:
-            detail = "PoC 源码含非回环网络目标: %s" % "; ".join(sorted(set(egress))[:6])
+            detail = "PoC 源码未满足网络执行边界: %s" % "; ".join(sorted(set(egress))[:6])
             self.approval.request("external_egress", detail)
             return RunResult(cmd=[], returncode=-2, stdout="",
                              stderr="EGRESS_DENIED " + detail, duration_ms=0)
@@ -448,7 +919,32 @@ class JavaMatrixRunner:
                 stderr="PRECONDITION_UNAVAILABLE " + runtime.get("reason", "java runtime unavailable"),
                 duration_ms=0)
         cmd = [runtime["javac_bin"]] + spec.module_opts + ["-cp", cp, "-d", str(out)] + files
-        return self.runner.run(cmd, cwd=self.src_dir, minimal_env=True)
+        readable_roots = ([Path(runtime["java_home"])]
+                          if runtime.get("java_home") else [])
+        policy, error = verify_network_sandbox(
+            filesystem_workspace=self.workspace,
+            readable_paths=readable_roots, writable_paths=[out])
+        if error or policy != SEATBELT_DENY_ALL_POLICY:
+            return RunResult(cmd=cmd, returncode=-5, stdout="",
+                             stderr="NETWORK_ISOLATION_UNAVAILABLE " +
+                             (error or "unexpected network policy: %s" % policy),
+                             duration_ms=0)
+        isolated_cmd, wrapped_policy = wrap_network_command(
+            cmd, filesystem_workspace=self.workspace,
+            readable_paths=readable_roots, writable_paths=[out])
+        if wrapped_policy != SEATBELT_DENY_ALL_POLICY:
+            return RunResult(cmd=cmd, returncode=-5, stdout="",
+                             stderr="NETWORK_ISOLATION_UNAVAILABLE invalid policy",
+                             duration_ms=0)
+        scratch_env = {
+            "HOME": str(out), "TMPDIR": str(out), "TMP": str(out),
+            "TEMP": str(out), "VULNGATE_SCRATCH_DIR": str(out),
+            "JAVA_HOME": runtime.get("java_home", ""),
+        }
+        return self.runner.run(isolated_cmd, cwd=self.src_dir,
+                               env_extra=scratch_env, minimal_env=True,
+                               restrict_poc_path=True,
+                               timeout=timeout)
 
     @staticmethod
     def _runtime_fields(runtime: Dict[str, str]) -> Dict[str, str]:
@@ -470,24 +966,58 @@ class JavaMatrixRunner:
             "required_runtime": cell.required_runtime,
             "authz": normalize_authz_case(cell.authz),
             "returncode": -4, "timed_out": False, "duration_ms": 0,
-            "observations": {"GATE_BLOCKED": "precondition-unavailable"},
+            "observations": {}, "poc_claims": {},
+            "policy_status": "precondition-unavailable",
             "harness_error": runtime.get("reason", "java runtime unavailable"),
             "precondition_status": RUNTIME_UNAVAILABLE,
             "stderr": runtime.get("reason", "java runtime unavailable"),
             "cmd": "",
-            "runner_policy": RUNNER_POLICY_VERSION,
+            "runner_policy": JAVA_RUNNER_POLICY_VERSION,
         }
         result.update(_cell_metadata(cell))
         result.update(self._runtime_fields(runtime))
         return result
 
     def run_cell(self, spec: POCSpec, cell: MatrixCell, jars: List[Path],
-                 runtime: Optional[Dict[str, str]] = None) -> Dict:
+                 runtime: Optional[Dict[str, str]] = None,
+                 timeout: Optional[int] = None) -> Dict:
+        _safe_component(spec.candidate_id, "candidate_id")
+        budget_id = _budget_key(spec)
+        timeout = _bounded_timeout(self.execution_budget, budget_id,
+                                   timeout if timeout is not None else cell.timeout,
+                                   self.runner.default_timeout)
+        if timeout is None:
+            stopped = _stoploss_cell(spec.candidate_id, cell,
+                                      self.execution_budget, "java", budget_id)
+            stopped["poc_class"] = spec.class_name
+            return stopped
         runtime = runtime or resolve_java_runtime(cell)
         if runtime.get("available") != "true":
             return self._unavailable_cell(spec, cell, runtime)
-        out = self.out_dir / cell.version
-        cp = ":".join([str(j) for j in jars] + [str(out)])
+        policy, sandbox_error = self._network_sandbox()
+        if sandbox_error or policy != SEATBELT_DENY_ALL_POLICY:
+            denied = self._policy_cell(
+                spec, cell, "needs-network-isolation",
+                sandbox_error or "unexpected network policy: %s" % policy,
+                policy)
+            denied.update(self._runtime_fields(runtime))
+            return denied
+        if self._requires_network_observer(spec):
+            denied = self._policy_cell(
+                spec, cell, "needs-harness-observer",
+                "Java PoC uses network APIs, but the Java runner has no "
+                "independent loopback protocol observer",
+                SEATBELT_DENY_ALL_POLICY)
+            denied["observation_gaps"] = ["java-network-observer-unavailable"]
+            denied.update(self._runtime_fields(runtime))
+            return denied
+        version = _safe_component(cell.version, "version")
+        out = _contained_path(self.out_dir, version, "Java PoC output directory")
+        out.mkdir(parents=True, exist_ok=True)
+        safe_jars = [_contained_path(self.workspace, jar, "dependency jar",
+                                     allow_absolute=True)
+                     for jar in jars]
+        cp = ":".join([str(j) for j in safe_jars] + [str(out)])
         jvm = dict(spec.jvm_default)
         jvm.update(cell.jvm)
         xmx = jvm.get("Xmx")
@@ -502,14 +1032,39 @@ class JavaMatrixRunner:
         java_cmd += authz_jvm_props(cell.authz)
         java_cmd += spec.module_run_opts
         java_cmd += ["-cp", cp, spec.class_name] + list(cell.args)
+        readable_roots = ([Path(runtime["java_home"])]
+                          if runtime.get("java_home") else [])
+        policy, sandbox_error = verify_network_sandbox(
+            filesystem_workspace=self.workspace,
+            readable_paths=readable_roots, writable_paths=[out])
+        if sandbox_error or policy != SEATBELT_DENY_ALL_POLICY:
+            denied = self._policy_cell(
+                spec, cell, "needs-network-isolation",
+                sandbox_error or "unexpected network policy: %s" % policy,
+                policy)
+            denied.update(self._runtime_fields(runtime))
+            return denied
+        isolated_cmd, wrapped_policy = wrap_network_command(
+            java_cmd, filesystem_workspace=self.workspace,
+            readable_paths=readable_roots, writable_paths=[out])
+        if wrapped_policy != SEATBELT_DENY_ALL_POLICY:
+            denied = self._policy_cell(
+                spec, cell, "needs-network-isolation",
+                "failed to construct deny-all network profile",
+                wrapped_policy)
+            denied.update(self._runtime_fields(runtime))
+            return denied
         try:
             result = self.runner.run(
-                java_cmd,
+                isolated_cmd,
                 cwd=out,
-                env_extra=_cell_experiment_env(cell),
+                env_extra=dict(_cell_experiment_env(cell), HOME=str(out),
+                               TMPDIR=str(out), TMP=str(out), TEMP=str(out),
+                               JAVA_HOME=runtime.get("java_home", ""),
+                               VULNGATE_SCRATCH_DIR=str(out)),
                 operation="loopback_connect",
-                operation_detail="mechanism-level PoC %s (JNDI/HTTP limited to 127.0.0.1)" % spec.class_name,
-                timeout=cell.timeout,
+                operation_detail="mechanism-level PoC %s (Java network access denied by runner policy)" % spec.class_name,
+                timeout=timeout if timeout is not None else cell.timeout,
             )
         except PermissionError as exc:
             denied = {
@@ -519,15 +1074,17 @@ class JavaMatrixRunner:
                 "required_runtime": cell.required_runtime,
                 "authz": normalize_authz_case(cell.authz),
                 "returncode": -3, "timed_out": False, "duration_ms": 0,
-                "observations": {"GATE_BLOCKED": "policy-denied"},
+                "observations": {}, "poc_claims": {},
+                "policy_status": "blocked",
                 "harness_error": "policy_denied: %s" % exc,
                 "stderr": str(exc), "cmd": " ".join(java_cmd),
-                "runner_policy": RUNNER_POLICY_VERSION,
+                "runner_policy": JAVA_RUNNER_POLICY_VERSION,
             }
             denied.update(_cell_metadata(cell))
             denied.update(self._runtime_fields(runtime))
             return denied
-        obs = parse_observations(result.stdout, result.stderr)
+        poc_claims = parse_poc_claims(result.stdout, result.stderr)
+        obs: Dict[str, Any] = {}
         authz_assertion = assert_authz_observations(cell.authz, obs)
         result_payload = {
             "candidate_id": spec.candidate_id,
@@ -541,13 +1098,42 @@ class JavaMatrixRunner:
             "returncode": result.returncode,
             "timed_out": result.timed_out,
             "duration_ms": result.duration_ms,
+            "runner_timeout_seconds": result.timeout_seconds,
+            "runner_timeout_capped": result.timeout_capped,
             "observations": obs,
+            "poc_claims": poc_claims,
+            "observation_provenance": {
+                "schema_version": POC_CLAIMS_SCHEMA,
+                "producer": "poc-stdout-stderr",
+                "trust": "untrusted-claim",
+            },
             "authz_assertion": authz_assertion,
             "stdout": result.stdout,
             "stderr": result.stderr[-4000:],
             "cmd": " ".join(java_cmd),
-            "runner_policy": RUNNER_POLICY_VERSION,
+            "network_isolation": SEATBELT_DENY_ALL_POLICY,
+            "filesystem_isolation": SEATBELT_POC_FILESYSTEM_POLICY,
+            "resource_limits": result.resource_limits,
+            "scratch_limits": result.scratch_limits,
+            "process_tree_cleanup": result.process_tree_cleanup,
+            "resource_limit_exceeded": result.resource_limit_exceeded,
+            "abort_reason": result.abort_reason,
+            "policy_status": ("resource-limit-exceeded"
+                              if result.resource_limit_exceeded else
+                              "aborted" if result.abort_reason else "allowed"),
+            "runner_policy": JAVA_RUNNER_POLICY_VERSION,
         }
+        if result.resource_limit_exceeded:
+            result_payload["harness_error"] = (
+                "PoC resource watchdog stopped or invalidated the run: %s" %
+                result.resource_limit_exceeded)
+        if result.abort_reason:
+            result_payload["harness_error"] = (
+                "S4 run aborted by shared stop-loss: %s" % result.abort_reason)
+            result_payload["stop_reason"] = result.abort_reason
+        elif result.timed_out and self.execution_budget.exhausted(budget_id):
+            result_payload["stop_reason"] = self.execution_budget.stop_reason(
+                budget_id)
         result_payload.update(_cell_metadata(cell))
         result_payload.update(self._runtime_fields(runtime))
         return result_payload
@@ -556,7 +1142,29 @@ class JavaMatrixRunner:
         """Run every cell of every spec; return {candidate_id: [cell results]}."""
         all_results: Dict[str, List[Dict]] = {}
         for spec in specs:
+            _safe_component(spec.candidate_id, "candidate_id")
             results = []
+            budget_id = _budget_key(spec)
+            self.execution_budget.deadline_for(budget_id)
+            sandbox_policy, sandbox_error = self._network_sandbox()
+            if sandbox_error or sandbox_policy != SEATBELT_DENY_ALL_POLICY:
+                reason = sandbox_error or "unexpected network policy: %s" % sandbox_policy
+                results = [self._policy_cell(
+                    spec, cell, "needs-network-isolation", reason, sandbox_policy)
+                    for cell in spec.cells]
+                all_results.setdefault(spec.candidate_id, []).extend(results)
+                continue
+            if self._requires_network_observer(spec):
+                results = [self._policy_cell(
+                    spec, cell, "needs-harness-observer",
+                    "Java PoC uses network APIs, but the Java runner has no "
+                    "independent loopback protocol observer",
+                    SEATBELT_DENY_ALL_POLICY)
+                    for cell in spec.cells]
+                for item in results:
+                    item["observation_gaps"] = ["java-network-observer-unavailable"]
+                all_results.setdefault(spec.candidate_id, []).extend(results)
+                continue
             # Compile separately for different requested runtimes.  This keeps
             # a JDK8 cell from accidentally running bytecode/tools selected by
             # another cell or by the host agent default.
@@ -566,16 +1174,39 @@ class JavaMatrixRunner:
                        cell.required_runtime or cell.precondition)
                 groups.setdefault(key, []).append(cell)
             for (version, _java_home, _java_bin, _required), group in groups.items():
+                if self.execution_budget.exhausted(budget_id):
+                    results.extend(_stoploss_cell(
+                        spec.candidate_id, cell, self.execution_budget,
+                        "java", budget_id) for cell in group)
+                    continue
                 jars = jars_by_version.get(version, [])
                 runtime = resolve_java_runtime(group[0])
                 if runtime.get("available") != "true":
                     results.extend(self._unavailable_cell(spec, cell, runtime) for cell in group)
                     continue
-                compiled = self.compile(spec, version, jars, runtime)
+                compile_timeout = _bounded_timeout(
+                    self.execution_budget, budget_id, None,
+                    self.runner.default_timeout)
+                if compile_timeout is None:
+                    results.extend(_stoploss_cell(spec.candidate_id, cell,
+                                                  self.execution_budget, "java",
+                                                  budget_id)
+                                   for cell in group)
+                    continue
+                compiled = self.compile(spec, version, jars, runtime,
+                                        timeout=compile_timeout)
+                if (compiled.timed_out
+                        and self.execution_budget.exhausted(budget_id)):
+                    results.extend(_stoploss_cell(spec.candidate_id, cell,
+                                                  self.execution_budget, "java",
+                                                  budget_id)
+                                   for cell in group)
+                    continue
                 if compiled.returncode != 0:
                     # Keep one result per declared cell so matrix coverage is
                     # honest even when compilation fails for a whole group.
                     for cell in group:
+                        isolation_failed = compiled.returncode == -5
                         item = {
                         "candidate_id": spec.candidate_id,
                         "poc_class": spec.class_name,
@@ -587,22 +1218,45 @@ class JavaMatrixRunner:
                         "authz": normalize_authz_case(next(
                             (c.authz for c in group if c is cell), {})),
                         "compile_error": (compiled.stderr or compiled.stdout)[-2000:],
+                        "compile_timed_out": compiled.timed_out,
+                        "compile_duration_ms": compiled.duration_ms,
+                        "compile_timeout_seconds": compiled.timeout_seconds,
+                        "compile_timeout_capped": compiled.timeout_capped,
                         "observations": {},
                         "cmd": " ".join(compiled.cmd),
+                        "network_isolation": ("network-sandbox-unavailable"
+                                              if isolation_failed
+                                              else SEATBELT_DENY_ALL_POLICY),
+                        "policy_status": ("needs-network-isolation"
+                                          if isolation_failed else "compile-failed"),
                         }
                         item.update(_cell_metadata(cell))
                         item.update(self._runtime_fields(runtime))
                         results.append(item)
                     continue
                 for cell in group:
-                    results.append(self.run_cell(spec, cell, jars, runtime))
+                    cell_timeout = _bounded_timeout(
+                        self.execution_budget, budget_id, cell.timeout,
+                        self.runner.default_timeout)
+                    if cell_timeout is None:
+                        results.append(_stoploss_cell(
+                            spec.candidate_id, cell, self.execution_budget,
+                            "java", budget_id))
+                        continue
+                    results.append(self.run_cell(
+                        spec, cell, jars, runtime, timeout=cell_timeout))
             all_results.setdefault(spec.candidate_id, []).extend(results)
         for candidate_id, cells in all_results.items():
             self._write_cells(candidate_id, cells)
         return all_results
 
     def _write_cells(self, candidate_id: str, cells: List[Dict]) -> None:
-        d = self.matrix_dir / candidate_id
+        candidate_id = _safe_component(candidate_id, "candidate_id")
+        d = _contained_path(
+            self.workspace,
+            "state/%s/round-%02d/S4/matrix-runs/%s" % (
+                self.target, self.round_no, candidate_id),
+            "candidate matrix directory")
         d.mkdir(parents=True, exist_ok=True)
         tmp = d / ("cells.json.tmp.%d" % os.getpid())
         tmp.write_text(json.dumps(cells, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -620,28 +1274,23 @@ class ShellPOCSpec:
     input_shape: str = ""
     logic: str = ""
     notes: str = ""
+    budget_key: str = ""
 
 
 class ShellMatrixRunner:
     """Shell/HTTP PoC matrix runner for web apps, services and protocol tests.
 
     Produces the same cells.json schema as JavaMatrixRunner so G4 sees one
-    observation contract. PoC scripts (bash) must print machine-readable lines:
+    observation contract. PoC output is optional diagnostic material and is
+    retained only as untrusted claims. HTTP response metadata comes from the
+    independent loopback observer; unsupported or missing observations remain
+    explicit gaps rather than being inferred from stdout/stderr.
 
-      HTTP_CODE=<status>        observed HTTP status code
-      RESP_MATCH=<marker>       expected marker found in response body/headers
-      EVIDENCE=<text>           side-effect proof (marker file / DB row / log line)
-      GATE_BLOCKED=<reason>     config/precondition blocked the path
-      ERROR=<exception>         runtime error observed
-      STEP=<step-id>            ordered state/operation step reached
-      STEP_EVIDENCE=<detail>    evidence for that step
-      STATE=<state-id>          observed state checkpoint
-      RESIDUAL_ID=<rr-id>       declared residual identity under test
-      RESIDUAL_STATUS=<status>  explicit residual outcome marker
-      RESIDUAL_FALSIFIER=<id>   bounded residual falsifier code
-
-    Loopback-only egress is enforced by the same static source scan used for
-    Java PoCs; any non-loopback URL/IP in the script is refused before run.
+    Literal network targets are checked by source screening, then each cell
+    requires a preflighted OS network profile. On macOS, declared plain-HTTP
+    loopback traffic is restricted to the harness observer; all other shell
+    cells receive a deny-all network profile. Unsupported platforms fail
+    closed before the PoC starts.
     Cells receive VULNGATE_VERSION / VULNGATE_SAFE_MODE / VULNGATE_PRECONDITION
     / VULNGATE_FEATURES plus bounded sequence/concurrency metadata via
     environment.
@@ -650,29 +1299,76 @@ class ShellMatrixRunner:
     def __init__(self, workspace: Path, target: str, round_no: int,
                  approval: Optional[ApprovalGate] = None,
                  authorized_staging: bool = False,
-                 staging_hosts: Optional[List[str]] = None):
+                 staging_hosts: Optional[List[str]] = None,
+                 execution_budget: Optional[S4ExecutionBudget] = None):
         self.workspace = workspace.resolve()
-        self.target = target
-        self.round_no = round_no
+        self.target = _safe_component(target, "target")
+        self.round_no = int(round_no)
+        if self.round_no < 1:
+            raise ValueError("round must be a positive integer")
         self.approval = approval or ApprovalGate()
         self.authorized_staging = authorized_staging
+        self.execution_budget = execution_budget or S4ExecutionBudget()
         self.staging_hosts = {str(h).strip().lower().rstrip(".") for h in (staging_hosts or [])}
         self.runner = CommandRunner(workspace, approval, authorized_staging=authorized_staging,
-                                    staging_hosts=list(self.staging_hosts))
-        self.src_dir = workspace / "poc" / target / ("round-%02d" % round_no) / "src"
-        self.matrix_dir = workspace / "state" / target / ("round-%02d" % round_no) / "S4" / "matrix-runs"
+                                    staging_hosts=list(self.staging_hosts),
+                                    execution_budget=self.execution_budget)
+        round_dir = "round-%02d" % self.round_no
+        self.src_dir = _contained_path(
+            self.workspace, "poc/%s/%s/src" % (self.target, round_dir),
+            "PoC source directory")
+        self.matrix_dir = _contained_path(
+            self.workspace, "state/%s/%s/S4/matrix-runs" % (self.target, round_dir),
+            "S4 matrix directory")
 
     def run_manifest(self, specs: List[ShellPOCSpec]) -> Dict[str, List[Dict]]:
         all_results: Dict[str, List[Dict]] = {}
         for spec in specs:
-            results = [self.run_cell(spec, cell) for cell in spec.cells]
+            _safe_component(spec.candidate_id, "candidate_id")
+            budget_id = _budget_key(spec)
+            self.execution_budget.deadline_for(budget_id)
+            results = []
+            for cell in spec.cells:
+                timeout = _bounded_timeout(
+                    self.execution_budget, budget_id, cell.timeout,
+                    self.runner.default_timeout)
+                if timeout is None:
+                    results.append(_stoploss_cell(
+                        spec.candidate_id, cell, self.execution_budget,
+                        "shell", budget_id))
+                    continue
+                results.append(self.run_cell(spec, cell, timeout=timeout))
             all_results.setdefault(spec.candidate_id, []).extend(results)
         for candidate_id, cells in all_results.items():
             self._write_cells(candidate_id, cells)
         return all_results
 
-    def run_cell(self, spec: ShellPOCSpec, cell: MatrixCell) -> Dict:
-        script = self.src_dir / spec.script
+    def run_cell(self, spec: ShellPOCSpec, cell: MatrixCell,
+                 timeout: Optional[int] = None) -> Dict:
+        _safe_component(spec.candidate_id, "candidate_id")
+        budget_id = _budget_key(spec)
+        timeout = _bounded_timeout(self.execution_budget, budget_id,
+                                   timeout if timeout is not None else cell.timeout,
+                                   self.runner.default_timeout)
+        if timeout is None:
+            return _stoploss_cell(spec.candidate_id, cell,
+                                  self.execution_budget, "shell", budget_id)
+        try:
+            script = _contained_path(self.src_dir, spec.script, "shell PoC script")
+        except ValueError as exc:
+            result = {
+                "candidate_id": spec.candidate_id,
+                "poc_script": str(spec.script),
+                "version": cell.version,
+                "safe_mode": cell.safe_mode,
+                "precondition": cell.precondition,
+                "observations": {}, "poc_claims": {},
+                "policy_status": "blocked",
+                "harness_error": str(exc),
+                "lang": "shell",
+            }
+            result.update(_cell_metadata(cell))
+            return result
         if not script.exists():
             result = {
                 "candidate_id": spec.candidate_id,
@@ -687,11 +1383,16 @@ class ShellMatrixRunner:
             }
             result.update(_cell_metadata(cell))
             return result
+        source_bytes = script.read_bytes()
+        source_digest = hashlib.sha256(source_bytes).hexdigest()
+        source_text = source_bytes.decode("utf-8", "replace")
         egress = scan_source_egress(
-            script.read_text(encoding="utf-8", errors="replace"), str(script),
-            self.staging_hosts if self.authorized_staging else None)
+            source_text, str(script),
+            self.staging_hosts if self.authorized_staging else None,
+            [spec.urls.get(cell.version, ""),
+             spec.env.get("VULNGATE_TARGET_URL", "")] + [str(arg) for arg in cell.args])
         if egress:
-            detail = "PoC 脚本含非回环网络目标: %s" % "; ".join(sorted(set(egress))[:6])
+            detail = "PoC 脚本未满足网络执行边界: %s" % "; ".join(sorted(set(egress))[:6])
             self.approval.request("external_egress", detail)
             result = {
                 "candidate_id": spec.candidate_id,
@@ -699,7 +1400,8 @@ class ShellMatrixRunner:
                 "version": cell.version,
                 "safe_mode": cell.safe_mode,
                 "precondition": cell.precondition,
-                "observations": {"GATE_BLOCKED": "egress-denied"},
+                "observations": {}, "poc_claims": {},
+                "policy_status": "blocked",
                 "stderr": "EGRESS_DENIED " + detail,
                 "lang": "shell",
             }
@@ -719,56 +1421,376 @@ class ShellMatrixRunner:
         # Structured authorization context wins over free-form PoC env values;
         # credentials are never part of this contract.
         env_extra.update(authz_env(cell.authz))
+        target_url = str(env_extra.get("VULNGATE_TARGET_URL", "") or "").strip()
+        authz_case = normalize_authz_case(cell.authz)
+        requires_http_observation = bool(authz_case.get("expected_http_codes"))
+        try:
+            parsed_target = urlsplit(target_url) if target_url else None
+        except ValueError as exc:
+            result_payload = {
+                "candidate_id": spec.candidate_id,
+                "poc_script": spec.script,
+                "version": cell.version,
+                "safe_mode": cell.safe_mode,
+                "features": cell.features,
+                "args": list(cell.args),
+                "precondition": cell.precondition,
+                "authz": authz_case,
+                "returncode": None,
+                "timed_out": False,
+                "duration_ms": 0,
+                "observations": {},
+                "poc_claims": {},
+                "authz_assertion": assert_authz_observations(cell.authz, {}),
+                "policy_status": "needs-harness-observer",
+                "harness_error": "invalid declared target URL: %s" % str(exc)[:160],
+                "observation_gaps": ["target-url-invalid"],
+                "lang": "shell",
+                "runner_policy": RUNNER_POLICY_VERSION,
+            }
+            result_payload.update(_cell_metadata(cell))
+            return result_payload
+        wants_http_observer = bool(parsed_target and parsed_target.scheme.lower() in {
+            "http", "https"})
+        network_capable = bool(_NETWORK_PRIMITIVE.search(source_text))
+        if network_capable and not wants_http_observer:
+            result_payload = {
+                "candidate_id": spec.candidate_id,
+                "poc_script": spec.script,
+                "version": cell.version,
+                "safe_mode": cell.safe_mode,
+                "features": cell.features,
+                "args": list(cell.args),
+                "precondition": cell.precondition,
+                "authz": authz_case,
+                "returncode": None,
+                "timed_out": False,
+                "duration_ms": 0,
+                "observations": {},
+                "poc_claims": {},
+                "authz_assertion": assert_authz_observations(cell.authz, {}),
+                "policy_status": "needs-harness-observer",
+                "harness_error": (
+                    "network-capable shell PoC requires a supported declared "
+                    "loopback HTTP target"),
+                "observation_gaps": ["network-observer-target-unavailable"],
+                "lang": "shell",
+                "runner_policy": RUNNER_POLICY_VERSION,
+            }
+            result_payload.update(_cell_metadata(cell))
+            return result_payload
+        if requires_http_observation and not wants_http_observer:
+            result_payload = {
+                "candidate_id": spec.candidate_id,
+                "poc_script": spec.script,
+                "version": cell.version,
+                "safe_mode": cell.safe_mode,
+                "features": cell.features,
+                "precondition": cell.precondition,
+                "authz": authz_case,
+                "returncode": None,
+                "timed_out": False,
+                "duration_ms": 0,
+                "observations": {},
+                "poc_claims": {},
+                "authz_assertion": assert_authz_observations(cell.authz, {}),
+                "policy_status": "needs-harness-observer",
+                "harness_error": "HTTP authorization evidence requires a declared target URL",
+                "observation_gaps": ["target-url-unavailable"],
+                "lang": "shell",
+                "runner_policy": RUNNER_POLICY_VERSION,
+            }
+            result_payload.update(_cell_metadata(cell))
+            return result_payload
+
+        observer = None
+        run_id = str(uuid.uuid4())
+        try:
+            if wants_http_observer:
+                observer = LoopbackHTTPObserver(target_url, run_id).start()
+        except (OSError, ValueError) as exc:
+            result_payload = {
+                "candidate_id": spec.candidate_id,
+                "poc_script": spec.script,
+                "version": cell.version,
+                "safe_mode": cell.safe_mode,
+                "features": cell.features,
+                "precondition": cell.precondition,
+                "authz": authz_case,
+                "returncode": None,
+                "timed_out": False,
+                "duration_ms": 0,
+                "observations": {},
+                "poc_claims": {},
+                "authz_assertion": assert_authz_observations(cell.authz, {}),
+                "policy_status": "needs-harness-observer",
+                "harness_error": "HTTP observer unavailable: %s" % str(exc)[:240],
+                "observation_gaps": ["http-observer-unavailable"],
+                "lang": "shell",
+                "runner_policy": RUNNER_POLICY_VERSION,
+            }
+            result_payload.update(_cell_metadata(cell))
+            return result_payload
+
+        if observer is not None:
+            for key in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy",
+                        "ALL_PROXY", "all_proxy"):
+                env_extra[key] = observer.proxy_url
+            # Many HTTP clients otherwise bypass proxies for loopback hosts.
+            env_extra["NO_PROXY"] = ""
+            env_extra["no_proxy"] = ""
+
+        try:
+            scratch = tempfile.TemporaryDirectory(
+                prefix=".vulngate-poc-", dir=str(self.workspace))
+            scratch_dir = Path(scratch.name).resolve()
+        except OSError as exc:
+            if observer is not None:
+                observer.close()
+            return {
+                "candidate_id": spec.candidate_id,
+                "poc_script": spec.script,
+                "version": cell.version,
+                "safe_mode": cell.safe_mode,
+                "precondition": cell.precondition,
+                "observations": {}, "poc_claims": {},
+                "policy_status": "needs-network-isolation",
+                "harness_error": "cannot create isolated PoC scratch: %s" % str(exc)[:180],
+                "observation_gaps": ["poc-scratch-unavailable"],
+                "lang": "shell",
+                "runner_policy": RUNNER_POLICY_VERSION,
+            }
+        env_extra.update({
+            "HOME": str(scratch_dir), "TMPDIR": str(scratch_dir),
+            "TMP": str(scratch_dir), "TEMP": str(scratch_dir),
+            "VULNGATE_SCRATCH_DIR": str(scratch_dir),
+        })
+
         cmd = ["bash", str(script)] + list(cell.args)
+        proxy_url = observer.proxy_url if observer is not None else None
+        network_isolation, sandbox_error = verify_network_sandbox(
+            proxy_url, filesystem_workspace=self.workspace,
+            writable_paths=[scratch_dir])
+        expected_network_policy = (SEATBELT_PROXY_POLICY if observer is not None
+                                   else SEATBELT_DENY_ALL_POLICY)
+        if sandbox_error or network_isolation != expected_network_policy:
+            if observer is not None:
+                observer.close()
+            scratch.cleanup()
+            result_payload = {
+                "candidate_id": spec.candidate_id,
+                "poc_script": spec.script,
+                "version": cell.version,
+                "safe_mode": cell.safe_mode,
+                "features": cell.features,
+                "args": list(cell.args),
+                "precondition": cell.precondition,
+                "authz": authz_case,
+                "returncode": None,
+                "timed_out": False,
+                "duration_ms": 0,
+                "observations": {},
+                "poc_claims": {},
+                "authz_assertion": assert_authz_observations(cell.authz, {}),
+                "network_isolation": network_isolation,
+                "policy_status": "needs-network-isolation",
+                "harness_error": (sandbox_error or
+                                  "required network policy is unavailable"),
+                "observation_gaps": ["os-network-isolation-unavailable"],
+                "lang": "shell",
+                "runner_policy": RUNNER_POLICY_VERSION,
+            }
+            result_payload.update(_cell_metadata(cell))
+            return result_payload
+        run_cmd, wrapped_policy = wrap_network_command(
+            cmd, proxy_url, filesystem_workspace=self.workspace,
+            writable_paths=[scratch_dir])
+        if wrapped_policy != network_isolation:
+            if observer is not None:
+                observer.close()
+            scratch.cleanup()
+            result_payload = {
+                "candidate_id": spec.candidate_id,
+                "poc_script": spec.script,
+                "version": cell.version,
+                "safe_mode": cell.safe_mode,
+                "features": cell.features,
+                "args": list(cell.args),
+                "precondition": cell.precondition,
+                "authz": authz_case,
+                "returncode": None,
+                "timed_out": False,
+                "duration_ms": 0,
+                "observations": {},
+                "poc_claims": {},
+                "authz_assertion": assert_authz_observations(cell.authz, {}),
+                "network_isolation": wrapped_policy,
+                "policy_status": "needs-network-isolation",
+                "harness_error": "network policy changed between preflight and launch",
+                "observation_gaps": ["os-network-isolation-policy-mismatch"],
+                "lang": "shell",
+                "runner_policy": RUNNER_POLICY_VERSION,
+            }
+            result_payload.update(_cell_metadata(cell))
+            return result_payload
+        run_error = None
+        result = None
         try:
             result = self.runner.run(
-                cmd,
+                run_cmd,
                 cwd=self.src_dir,
                 env_extra=env_extra,
                 operation="loopback_connect",
-                operation_detail="shell/HTTP PoC %s (targets limited to 127.0.0.1)" % spec.candidate_id,
-                timeout=cell.timeout,
+                operation_detail="shell/HTTP PoC %s (observer port restricted to a host-owned address)" % spec.candidate_id,
+                timeout=timeout if timeout is not None else cell.timeout,
             )
         except PermissionError as exc:
-            denied = {
-                "candidate_id": spec.candidate_id, "poc_script": spec.script,
-                "version": cell.version, "safe_mode": cell.safe_mode,
-                "features": cell.features, "precondition": cell.precondition,
-                "authz": normalize_authz_case(cell.authz),
-                "returncode": -3, "timed_out": False, "duration_ms": 0,
-                "observations": {"GATE_BLOCKED": "policy-denied"},
-                "harness_error": "policy_denied: %s" % exc,
-                "stderr": str(exc), "cmd": " ".join(cmd), "lang": "shell",
-                "runner_policy": RUNNER_POLICY_VERSION,
-            }
-            denied.update(_cell_metadata(cell))
-            return denied
-        obs = parse_observations(result.stdout, result.stderr)
+            run_error = exc
+        finally:
+            if observer is not None:
+                observer.close()
+            scratch.cleanup()
+
+        obs_snapshot = observer.snapshot() if observer is not None else None
+        obs = dict(obs_snapshot.get("observations", {})) if obs_snapshot else {}
+        observer_gaps = list(obs_snapshot.get("observer_gaps", [])) if obs_snapshot else []
+        if observer is not None and not obs.get("HTTP_RESPONSES"):
+            observer_gaps.append("no-proxied-response-captured")
+        if observer is not None and requires_http_observation and "HTTP_CODE" not in obs:
+            observer_gaps.append("expected-http-code-not-independently-observed")
+
+        target_digest = str(obs_snapshot.get("target_digest", "")) if obs_snapshot else ""
+        cell_identity = {
+            "candidate_id": spec.candidate_id,
+            "version": cell.version,
+            "safe_mode": cell.safe_mode,
+            "precondition": cell.precondition,
+            "features": list(cell.features),
+            "args": list(cell.args),
+            "source_digest": source_digest,
+            "target_digest": target_digest,
+            "authz_fixture_id": authz_fixture_id(cell.authz),
+        }
+        cell_id = hashlib.sha256(json.dumps(
+            cell_identity, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False).encode("utf-8")).hexdigest()
+        if result is None:
+            returncode = -3
+            timed_out = False
+            duration_ms = 0
+            stdout = ""
+            stderr = str(run_error or "runner failed")[-4000:]
+            policy_status = "blocked"
+        else:
+            returncode = result.returncode
+            timed_out = result.timed_out
+            duration_ms = result.duration_ms
+            stdout = result.stdout
+            stderr = result.stderr[-4000:]
+            policy_status = ("resource-limit-exceeded"
+                             if result.resource_limit_exceeded else
+                             "aborted" if result.abort_reason else "allowed")
+        poc_claims = parse_poc_claims(stdout, stderr)
         authz_assertion = assert_authz_observations(cell.authz, obs)
+        if (observer is not None and authz_assertion.get("status") == "passed"
+                and network_isolation != SEATBELT_PROXY_POLICY):
+            # A proxy capture is positive evidence for that response, but
+            # cannot prove the PoC did not also issue uncaptured direct traffic.
+            authz_assertion["status"] = "unsupported"
+            authz_assertion.setdefault("missing", []).append(
+                "complete-request-capture-requires-os-network-isolation")
+            observer_gaps.append("authz-pass-not-closed-by-proxy-only-capture")
         result_payload = {
             "candidate_id": spec.candidate_id,
             "poc_script": spec.script,
             "version": cell.version,
             "safe_mode": cell.safe_mode,
             "features": cell.features,
+            "args": list(cell.args),
             "precondition": cell.precondition,
-            "authz": normalize_authz_case(cell.authz),
-            "returncode": result.returncode,
-            "timed_out": result.timed_out,
-            "duration_ms": result.duration_ms,
+            "authz": authz_case,
+            "cell_id": cell_id,
+            "returncode": returncode,
+            "timed_out": timed_out,
+            "duration_ms": duration_ms,
+            "runner_timeout_seconds": (result.timeout_seconds
+                                       if result is not None else 0),
+            "runner_timeout_capped": (result.timeout_capped
+                                      if result is not None else False),
             "observations": obs,
+            "poc_claims": poc_claims,
             "authz_assertion": authz_assertion,
-            "stdout": result.stdout,
-            "stderr": result.stderr[-4000:],
+            "stdout": stdout,
+            "stderr": stderr,
             "cmd": " ".join(cmd),
             "lang": "shell",
+            "network_isolation": network_isolation,
+            "filesystem_isolation": SEATBELT_POC_FILESYSTEM_POLICY,
+            "resource_limits": result.resource_limits if result is not None else {},
+            "scratch_limits": result.scratch_limits if result is not None else {},
+            "process_tree_cleanup": (result.process_tree_cleanup
+                                     if result is not None else {}),
+            "resource_limit_exceeded": (result.resource_limit_exceeded
+                                        if result is not None else ""),
+            "abort_reason": result.abort_reason if result is not None else "",
+            "policy_status": policy_status,
             "runner_policy": RUNNER_POLICY_VERSION,
         }
+        if result is not None and result.resource_limit_exceeded:
+            result_payload["harness_error"] = (
+                "PoC resource watchdog stopped or invalidated the run: %s" %
+                result.resource_limit_exceeded)
+        if result is not None and result.abort_reason:
+            result_payload["harness_error"] = (
+                "S4 run aborted by shared stop-loss: %s" % result.abort_reason)
+        if obs_snapshot:
+            result_payload["observation_provenance"] = {
+                "schema_version": obs_snapshot["schema_version"],
+                "producer": obs_snapshot["producer"],
+                "collector_version": obs_snapshot["collector_version"],
+                "capture_scope": ("seatbelt-host-local-port"
+                                  if network_isolation == SEATBELT_PROXY_POLICY
+                                  else "proxy-environment-only"),
+                "network_isolation": network_isolation,
+                "filesystem_isolation": SEATBELT_POC_FILESYSTEM_POLICY,
+                "resource_limits": result.resource_limits if result is not None else {},
+                "scratch_limits": result.scratch_limits if result is not None else {},
+                "resource_limit_exceeded": (result.resource_limit_exceeded
+                                            if result is not None else ""),
+                "abort_reason": result.abort_reason if result is not None else "",
+                "run_id": obs_snapshot["run_id"],
+                "candidate_id": spec.candidate_id,
+                "cell_id": cell_id,
+                "source_digest": source_digest,
+                "target_digest": target_digest,
+                "response_count": obs_snapshot["response_count"],
+                "observer_gaps": observer_gaps,
+                "returncode": returncode,
+                "timed_out": timed_out,
+            }
+            if observer_gaps:
+                result_payload["observation_gaps"] = observer_gaps
+        else:
+            result_payload["observation_provenance"] = {
+                "schema_version": POC_CLAIMS_SCHEMA,
+                "producer": "poc-stdout-stderr",
+                "trust": "untrusted-claim",
+            }
+        if result is not None and result.abort_reason:
+            result_payload["stop_reason"] = result.abort_reason
+        elif timed_out and self.execution_budget.exhausted(budget_id):
+            result_payload["stop_reason"] = self.execution_budget.stop_reason(
+                budget_id)
         result_payload.update(_cell_metadata(cell))
         return result_payload
 
     def _write_cells(self, candidate_id: str, cells: List[Dict]) -> None:
-        d = self.matrix_dir / candidate_id
+        candidate_id = _safe_component(candidate_id, "candidate_id")
+        d = _contained_path(
+            self.workspace,
+            "state/%s/round-%02d/S4/matrix-runs/%s" % (
+                self.target, self.round_no, candidate_id),
+            "candidate matrix directory")
         d.mkdir(parents=True, exist_ok=True)
         tmp = d / ("cells.json.tmp.%d" % os.getpid())
         tmp.write_text(json.dumps(cells, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -893,8 +1915,9 @@ def _capability_cell_evidence(cell: Dict[str, Any], obs: Dict[str, Any]
 def classify_s4_execution(cells: List[Dict]) -> Dict[str, object]:
     """Classify what S4 actually established, independently of host control flow.
 
-    A proxy/agent timeout is not a matrix result.  Persisted cells, including
-    fallback cells, are authoritative for this classification.
+    A proxy/agent timeout is not a matrix result. Persisted cells are scoped to
+    one candidate. PoC output markers do not classify a run as blocked or
+    effected; only runner policy/status fields and trusted observations do.
     """
     if not cells:
         return {"execution_state": "unexecuted", "declared_cell_count": 0,
@@ -914,11 +1937,20 @@ def classify_s4_execution(cells: List[Dict]) -> Dict[str, object]:
                 and cell.get("returncode") == 0)
 
     def _has_effect(cell: Dict) -> bool:
-        obs = cell.get("observations") or {}
+        obs = _trusted_observations(cell)
         effect_kind = str(obs.get("EFFECT_KIND", "")).strip().lower()
         effect = str(obs.get("EFFECT", obs.get("SIDE_EFFECT", ""))).strip()
         if effect_kind and effect and not any(x in effect_kind for x in
                                              ("canary", "simulat", "shape-only", "in-memory")):
+            return True
+        instantiated = str(obs.get("INSTANTIATED", "")).strip()
+        if instantiated and "." in instantiated:
+            return True
+        error = str(obs.get("ERROR", ""))
+        if any(marker in error for marker in (
+                "OutOfMemoryError", "StackOverflowError", "SQLException",
+                "JSONException", "ArrayIndexOutOfBoundsException",
+                "NegativeArraySizeException", "NumberFormatException")):
             return True
         leaked = str(obs.get("LEAKED", "")).strip().lower()
         if leaked and leaked not in _FALSY_MARKERS:
@@ -930,16 +1962,27 @@ def classify_s4_execution(cells: List[Dict]) -> Dict[str, object]:
                     or str(obs.get("EVIDENCE", "")).strip())
 
     precondition_unavailable = [c for c in cells
-                                if c.get("precondition_status") == RUNTIME_UNAVAILABLE]
+                                if c.get("precondition_status") == RUNTIME_UNAVAILABLE
+                                or c.get("policy_status") == "precondition-unavailable"]
     blocked = [c for c in cells
-               if _truthy((c.get("observations") or {}).get("GATE_BLOCKED"))
+               if (c.get("policy_status") == "blocked"
+                   or c.get("returncode") == -3)
                and c.get("precondition_status") != RUNTIME_UNAVAILABLE]
+    stop_loss = [c for c in cells
+                 if (c.get("policy_status") == "stop-loss"
+                     or "timebox-exhausted" in str(c.get("stop_reason", "")))]
     executed = [c for c in cells if _ran(c)]
     failed = [c for c in cells if c not in executed and c not in blocked
-              and c not in precondition_unavailable]
+              and c not in precondition_unavailable and c not in stop_loss]
     effected = [c for c in executed if _has_effect(c)]
 
-    if not executed and precondition_unavailable and not failed and not blocked:
+    if stop_loss and executed:
+        state = "partial-matrix"
+    elif stop_loss:
+        state = "timebox-exhausted"
+    elif executed and (failed or blocked or precondition_unavailable):
+        state = "partial-matrix"
+    elif not executed and precondition_unavailable and not failed and not blocked:
         state = "precondition-unavailable"
     elif not executed and blocked and not failed and not precondition_unavailable:
         state = "gate-blocked"
@@ -960,24 +2003,41 @@ def classify_s4_execution(cells: List[Dict]) -> Dict[str, object]:
         "failed_cell_count": len(failed),
         "gate_blocked_cell_count": len(blocked),
         "precondition_unavailable_count": len(precondition_unavailable),
+        "stop_loss_cell_count": len(stop_loss),
         "effect_cell_count": len(effected),
     }
 
 
 def _extract_s4_cells(payload: object, candidate_id: str) -> List[Dict]:
-    """Accept the small set of persisted host-fallback result shapes."""
+    """Accept persisted result shapes without mixing candidate evidence."""
+    candidate_id = _safe_component(candidate_id, "candidate_id")
+
+    def scoped(items: object) -> List[Dict]:
+        if not isinstance(items, list):
+            return []
+        out = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            declared = str(item.get("candidate_id") or "").strip()
+            if declared != candidate_id:
+                continue
+            row = dict(item)
+            out.append(row)
+        return out
+
     if isinstance(payload, list):
-        return [x for x in payload if isinstance(x, dict)]
+        return scoped(payload)
     if not isinstance(payload, dict):
         return []
     for key in ("cells", "fallback_cells", "matrix_cells"):
         if isinstance(payload.get(key), list):
-            return [x for x in payload[key] if isinstance(x, dict)]
+            return scoped(payload[key])
     results = payload.get("results")
     if isinstance(results, dict) and isinstance(results.get(candidate_id), list):
-        return [x for x in results[candidate_id] if isinstance(x, dict)]
+        return scoped(results[candidate_id])
     if isinstance(payload.get(candidate_id), list):
-        return [x for x in payload[candidate_id] if isinstance(x, dict)]
+        return scoped(payload[candidate_id])
     return []
 
 
@@ -991,12 +2051,24 @@ def converge_s4_cells(workspace: Path, target: str, round_no: int,
     did not execute.  Fallback files are intentionally additive and are
     deduplicated by their serialized cell content.
     """
-    s4_dir = Path(workspace) / "state" / target / ("round-%02d" % round_no) / "S4"
-    matrix_file = s4_dir / "matrix-runs" / candidate_id / "cells.json"
+    root = Path(workspace).resolve()
+    target = _safe_component(target, "target")
+    candidate_id = _safe_component(candidate_id, "candidate_id")
+    round_no = int(round_no)
+    if round_no < 1:
+        raise ValueError("round must be a positive integer")
+    round_dir = "round-%02d" % round_no
+    s4_dir = _contained_path(
+        root, "state/%s/%s/S4" % (target, round_dir), "S4 artifact directory")
+    matrix_file = _contained_path(
+        root, "state/%s/%s/S4/matrix-runs/%s/cells.json" % (
+            target, round_dir, candidate_id), "candidate matrix artifact")
     candidates = []
     if runner_cells:
-        candidates.append(("runner", runner_cells))
-    if matrix_file.exists():
+        scoped_runner = _extract_s4_cells(runner_cells, candidate_id)
+        if scoped_runner:
+            candidates.append(("runner", scoped_runner))
+    if matrix_file.is_file() and matrix_file.resolve().is_relative_to(s4_dir.resolve()):
         try:
             candidates.append(("persisted", _extract_s4_cells(
                 json.loads(matrix_file.read_text(encoding="utf-8")), candidate_id)))
@@ -1006,6 +2078,11 @@ def converge_s4_cells(workspace: Path, target: str, round_no: int,
         for path in sorted(s4_dir.rglob("*.json")):
             name = path.name.lower()
             if "fallback" not in name and "sequential" not in name:
+                continue
+            try:
+                if not path.resolve().is_relative_to(s4_dir.resolve()):
+                    continue
+            except OSError:
                 continue
             try:
                 cells = _extract_s4_cells(json.loads(path.read_text(encoding="utf-8")), candidate_id)
@@ -1048,8 +2125,7 @@ def _residual_cell_ref(cell: Dict[str, Any], residual_id: str) -> str:
 def _residual_execution_state(cell: Dict[str, Any], obs: Dict[str, Any]) -> str:
     if cell.get("precondition_status") == RUNTIME_UNAVAILABLE:
         return "precondition-unavailable"
-    blocked = str(obs.get("GATE_BLOCKED", "")).strip().lower()
-    if blocked and blocked not in _FALSY_MARKERS:
+    if cell.get("policy_status") == "blocked" or cell.get("returncode") == -3:
         return "gate-blocked"
     if (isinstance(cell.get("returncode"), int)
             and cell.get("returncode") == 0
@@ -1092,6 +2168,8 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
     authz_results = []
     authz_boundary_violations = []
     residual_falsifiers = []
+    poc_claim_rows = []
+    untrusted_claim_field_count = 0
 
     def truthy(v: str) -> bool:
         # LLM-authored PoCs may emit INSTANTIATED=false / GATE_BLOCKED=none /
@@ -1099,9 +2177,23 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
         return str(v).strip().lower() not in ("", "false", "none", "null", "0")
 
     for c in cells:
-        obs = c.get("observations", {})
-        if not isinstance(obs, dict):
-            obs = {}
+        obs = _trusted_observations(c)
+        claims = _cell_poc_claims(c)
+        claim_fields = claims.get("fields", {}) if isinstance(claims, dict) else {}
+        if isinstance(claim_fields, dict) and claim_fields:
+            untrusted_claim_field_count += len(claim_fields)
+            if len(poc_claim_rows) < 16:
+                poc_claim_rows.append({
+                    "version": c.get("version"),
+                    "safe_mode": c.get("safe_mode"),
+                    "precondition": c.get("precondition"),
+                    "source": claims.get("source", "unknown"),
+                    "fields": {
+                        str(key): _trace_values(value)[:4]
+                        for key, value in list(claim_fields.items())[:12]
+                    },
+                    "trust": "untrusted-claim",
+                })
         experiment = c.get("experiment") or {}
         declared_sequence = c.get("sequence", experiment.get("sequence", [])) or []
         declared_concurrency = c.get(
@@ -1220,21 +2312,19 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
                 "precondition": c["precondition"], "concurrency": int(conc),
                 "service_unavailable": unavailable,
             })
-        # HTTP-layer evidence (web apps): HTTP_CODE with a digit status, and/or
-        # RESP_MATCH / EVIDENCE with a concrete marker (not a placeholder).
+        # HTTP transport evidence comes only from the harness observer. Status
+        # and body digest help review, but do not establish content or impact.
         code = str(obs.get("HTTP_CODE", "")).strip()
-        match = str(obs.get("RESP_MATCH", "")).strip()
-        ev = str(obs.get("EVIDENCE", "")).strip()
-        if code.isdigit() or (match and match.lower() not in _FALSY_MARKERS) or \
-                (ev and ev.lower() not in _FALSY_MARKERS):
+        if code.isdigit():
+            provenance = c.get("observation_provenance") or {}
+            responses = obs.get("HTTP_RESPONSES", [])
             rec = {"version": c["version"], "safe": c["safe_mode"],
-                   "precondition": c["precondition"]}
-            if code.isdigit():
-                rec["http_code"] = int(code)
-            if match and match.lower() not in _FALSY_MARKERS:
-                rec["resp_match"] = match[:200]
-            if ev and ev.lower() not in _FALSY_MARKERS:
-                rec["evidence"] = ev[:200]
+                   "precondition": c["precondition"],
+                   "cell_id": c.get("cell_id", ""),
+                   "observer_run_id": provenance.get("run_id", ""),
+                   "observer": provenance.get("collector_version", ""),
+                   "response_count": len(responses),
+                   "http_code": int(code)}
             http_evidence.append(rec)
         residual_id = str(obs.get("RESIDUAL_ID", "")).strip().lower()
         residual_status = str(obs.get("RESIDUAL_STATUS", "")).strip().lower()[:40]
@@ -1279,11 +2369,66 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
         "authz_boundary_violations": authz_boundary_violations,
         "residual_falsifiers": residual_falsifiers[:32],
         "residual_falsifier_count": len(residual_falsifiers),
-        "cells_ran": len(cells),
+        "poc_claims": poc_claim_rows,
+        "untrusted_claim_field_count": untrusted_claim_field_count,
+        "evidence_policy_version": S4_EVIDENCE_POLICY_VERSION,
+        "cells_ran": sum(1 for c in cells if c.get("returncode") == 0
+                         and not c.get("compile_error") and not c.get("harness_error")
+                         and not c.get("timed_out")),
+        "cells_attempted": sum(1 for c in cells if c.get("returncode") is not None),
     }
     if harness_errors:
         summary["harness_error"] = harness_errors[0]
     if compile_errors:
         summary["compile_error"] = compile_errors[0]
     summary.update(classify_s4_execution(cells))
+    observer_reported_unavailable = any(
+        cell.get("policy_status") == "needs-harness-observer" for cell in cells)
+    explicit_observer_gaps = sorted({
+        str(gap)
+        for cell in cells
+        if cell.get("policy_status") == "needs-harness-observer"
+        for gap in (cell.get("observation_gaps") or [])
+        if str(gap).strip()
+    })
+    missing_http_capture = any(
+        gap in {"no-proxied-response-captured",
+                "expected-http-code-not-independently-observed"}
+        for cell in cells
+        for gap in (cell.get("observation_gaps") or [])
+    )
+    java_observer_gap = any(
+        (str(cell.get("lang", "")).lower() == "java" or cell.get("poc_class"))
+        and cell.get("returncode") == 0
+        and not cell.get("compile_error")
+        and not cell.get("harness_error")
+        and not cell.get("timed_out")
+        and not _trusted_observations(cell)
+        for cell in cells
+    )
+    if observer_reported_unavailable:
+        summary["evidence_gap"] = "needs-harness-observer"
+        summary["observation_gaps"] = (explicit_observer_gaps or
+                                        ["runner-reported-needs-harness-observer"])
+        summary.setdefault("validation_issues", []).append(
+            "needs-harness-observer: runner reported unsupported independent "
+            "observation (%s)" % ", ".join(
+                summary["observation_gaps"][:8]))
+    elif missing_http_capture:
+        summary["evidence_gap"] = "no-independent-http-response"
+        summary.setdefault("validation_issues", []).append(
+            "no independent HTTP response was captured; this does not establish "
+            "that the candidate had no effect")
+    elif java_observer_gap:
+        summary["evidence_gap"] = "needs-harness-observer"
+        summary["observation_gaps"] = [
+            "java-runtime-effect-not-independently-observed"]
+        summary.setdefault("validation_issues", []).append(
+            "Java cell executed, but this adapter has no independent JVM effect "
+            "observer; PoC output remains an untrusted claim")
+    if untrusted_claim_field_count:
+        summary.setdefault("validation_issues", []).append(
+            "%d PoC output fields are retained as untrusted claims; they do not "
+            "establish a target effect"
+            % untrusted_claim_field_count)
     return summary

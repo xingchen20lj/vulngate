@@ -238,7 +238,7 @@ class ResearchMemoryTests(unittest.TestCase):
             "runtime_lab": {"enabled": True, "replay_runs": 3,
                              "safe_modes": [False, True]},
             "service_lifecycle": {
-                "schema_version": "service-lifecycle-v1",
+                "schema_version": "service-lifecycle-v2",
                 "status": "started-ready", "ready": True,
                 "config_digest": "service-config-1",
                 "healthcheck": {"kind": "url", "configured": True,
@@ -665,7 +665,10 @@ class ResearchMemoryTests(unittest.TestCase):
                          json.loads(target_pack.read_text(
                              encoding="utf-8"))["claim_status"])
         closure = json.loads(round_coverage_closure.read_text(encoding="utf-8"))
-        self.assertEqual("scope-invalid", closure["state"])
+        # Direct S8 execution has no current S1 coverage artifact.  That is
+        # an incomplete audit scope, not evidence that the configured source
+        # scope itself was explicitly invalid.
+        self.assertEqual("scope-incomplete", closure["state"])
         self.assertFalse(closure["stop_condition_met"])
         self.assertEqual("not-a-finding", closure["claim_status"])
         self.assertEqual(closure, result["coverage"])

@@ -1,7 +1,10 @@
 import json
+import os
 import sys
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
@@ -11,11 +14,14 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from agent.sandbox.approval import ApprovalGate  # noqa: E402
 from agent.sandbox.runner import (CommandRunner, validate_global_command,
                                   validate_poc_command)  # noqa: E402
+from agent.sandbox.network_sandbox import (SEATBELT_DENY_ALL_POLICY,
+                                           wrap_network_command)  # noqa: E402
 from agent.tools.authz import (assert_authz_observations, authz_env,
                                authz_fixture_id, authz_jvm_props,
                                normalize_authz_case)  # noqa: E402
 from agent.tools.build import (MatrixCell, ShellMatrixRunner, ShellPOCSpec,
-                               scan_source_egress, summarize_candidate)  # noqa: E402
+                               _trusted_observations, scan_source_egress,
+                               summarize_candidate)  # noqa: E402
 from agent.tools.patch_variants import analyze_patch_history  # noqa: E402
 from agent.tools.source_evidence import (build_source_sink_graph,
                                          match_source_sink_paths)  # noqa: E402
@@ -29,6 +35,32 @@ from agent.tools.cvss import check_impact_consistency  # noqa: E402
 
 
 class PolicyTests(unittest.TestCase):
+    def test_macos_poc_writes_are_confined_to_the_run_scratch(self):
+        if sys.platform != "darwin":
+            self.skipTest("macOS Seatbelt is required for this integration path")
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scratch = root / "scratch"
+            scratch.mkdir()
+            allowed = scratch / "allowed.txt"
+            denied = root / "denied.txt"
+            command = [
+                "/bin/sh", "-c",
+                "printf allowed > '%s'; printf denied > '%s' 2>/dev/null; true"
+                % (allowed, denied),
+            ]
+            isolated, policy = wrap_network_command(
+                command, filesystem_workspace=root,
+                writable_paths=[scratch])
+            self.assertEqual(policy, SEATBELT_DENY_ALL_POLICY)
+            result = subprocess.run(
+                isolated, text=True, capture_output=True, timeout=5, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(allowed.read_text() == "allowed")
+            self.assertFalse(denied.exists())
+
     def test_remote_command_is_denied_and_logged(self):
         with tempfile.TemporaryDirectory() as td:
             log = Path(td) / "approval.jsonl"
@@ -75,6 +107,39 @@ class PolicyTests(unittest.TestCase):
             ["bash", "/tmp/probe.sh"],
             {"JAVA_HOME": "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"},
             False, set()))
+
+    def test_unspecified_address_is_not_treated_as_loopback(self):
+        self.assertIsNotNone(validate_poc_command(
+            ["curl", "http://0.0.0.0:8080/"], {}, False, set()))
+
+    def test_posix_poc_runner_applies_hard_resource_limits(self):
+        if os.name != "posix":
+            self.skipTest("POSIX resource limits are required")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            script = root / "show_limits.py"
+            script.write_text(
+                "import json, resource\n"
+                "print(json.dumps({name: resource.getrlimit(getattr(resource, name)) "
+                "for name in ('RLIMIT_CPU','RLIMIT_FSIZE','RLIMIT_NOFILE',"
+                "'RLIMIT_NPROC','RLIMIT_CORE')}))\n",
+                encoding="utf-8")
+            runner = CommandRunner(root)
+            result = runner.run([sys.executable, str(script)], cwd=root,
+                                timeout=17, minimal_env=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            limits = json.loads(result.stdout)
+            self.assertEqual(limits["RLIMIT_CPU"], [18, 18])
+            self.assertEqual(limits["RLIMIT_FSIZE"], [64 * 1024 * 1024] * 2)
+            self.assertEqual(limits["RLIMIT_NOFILE"], [512, 512])
+            self.assertEqual(limits["RLIMIT_NPROC"][1],
+                             result.resource_limits["max_user_processes"])
+            self.assertLessEqual(
+                result.resource_limits["max_user_processes"] -
+                result.resource_limits["user_process_baseline"], 128)
+            self.assertEqual(limits["RLIMIT_CORE"], [0, 0])
+            self.assertEqual(result.resource_limits["policy"],
+                             "posix-rlimit-as4g-cpu-fsize64m-nofile512-nproc128-core0-v4")
 
     def test_patch_history_extracts_fix_variants_read_only(self):
         with tempfile.TemporaryDirectory() as td:
@@ -174,7 +239,8 @@ class EvidenceTests(unittest.TestCase):
             "target_classes": ["com.example.Exploit"],
         }, cells)
         self.assertEqual(result, "候选（待验证）")
-        self.assertTrue(summary["safe_equivalent"])
+        self.assertEqual([], summary["safe_equivalent"])
+        self.assertGreater(summary["untrusted_claim_field_count"], 0)
 
     def test_authz_context_is_metadata_only(self):
         case = normalize_authz_case({
@@ -233,23 +299,46 @@ class EvidenceTests(unittest.TestCase):
         self.assertFalse(result["boundary_violation"])
 
     def test_shell_matrix_passes_structured_authz_context(self):
+        if sys.platform != "darwin":
+            self.skipTest("macOS Seatbelt is required for this integration path")
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             src = root / "poc" / "demo" / "round-01" / "src"
             src.mkdir(parents=True)
+            class Handler(BaseHTTPRequestHandler):
+                def do_GET(self):  # noqa: N802
+                    self.send_response(403)
+                    self.end_headers()
+
+                def log_message(self, *_args):
+                    return
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
             (src / "probe.sh").write_text(
-                "#!/bin/sh\nprintf 'HTTP_CODE=403\\n'\n"
-                "printf 'OBJECT_MUTATED=false\\n'\n"
-                "printf 'AUTHZ_RESULT=deny\\n'\n", encoding="utf-8")
-            case = {"case_id": "cross-tenant", "principal": "u1", "role": "user",
-                    "tenant_id": "a", "object_id": "o7",
-                    "expected_http_codes": [403], "expected_object_mutated": False,
-                    "expected_authz": "deny"}
+                "#!/bin/sh\ncurl -sS -o /dev/null \"$VULNGATE_TARGET_URL\"\n"
+                "printf 'HTTP_CODE=200\\n'\n", encoding="utf-8")
+            case = {"case_id": "cross-tenant", "expected_http_codes": [403]}
             spec = ShellPOCSpec(
                 candidate_id="A1", script="probe.sh",
+                urls={"local": "http://127.0.0.1:%d/authz" % server.server_port},
                 cells=[MatrixCell(version="local", safe_mode=False, authz=case)])
-            results = ShellMatrixRunner(root, "demo", 1).run_manifest([spec])["A1"]
+            try:
+                results = ShellMatrixRunner(root, "demo", 1).run_manifest([spec])["A1"]
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+            self.assertEqual(results[0]["observations"]["HTTP_CODE"], "403")
+            self.assertEqual(_trusted_observations(results[0])["HTTP_CODE"], "403")
+            self.assertEqual(results[0]["poc_claims"]["fields"]["HTTP_CODE"], ["200"])
             self.assertEqual(results[0]["authz_assertion"]["status"], "passed")
+            forged_limits = dict(results[0]["resource_limits"])
+            forged_limits["max_file_bytes"] = 2**40
+            tampered = dict(results[0])
+            tampered["resource_limits"] = forged_limits
+            self.assertEqual(_trusted_observations(tampered), {})
 
     def test_finding_report_contains_structured_sections(self):
         report = render_finding_md({
@@ -265,7 +354,7 @@ class EvidenceTests(unittest.TestCase):
                        "Novelty 证据", "CVSS 与前置一致性"):
             self.assertIn(marker, report)
 
-    def test_real_command_marker_can_confirm_rce(self):
+    def test_poc_command_marker_claim_cannot_confirm_rce(self):
         cells = [{
             "version": "1.0", "safe_mode": False, "precondition": "none",
             "observations": {
@@ -279,7 +368,9 @@ class EvidenceTests(unittest.TestCase):
             "surface": "RCE",
             "target_classes": ["com.example.Exploit"],
         }, cells)
-        self.assertEqual(result, "确认")
+        self.assertEqual(result, "候选（待验证）")
+        self.assertEqual([], summary["effect_evidence"])
+        self.assertGreater(summary["untrusted_claim_field_count"], 0)
 
     def test_high_availability_requires_concurrency_proof(self):
         candidate = {"surface": "CPU denial of service"}

@@ -38,6 +38,7 @@ from ..analysis.research_strategy import (apply_strategy_observations,
                                            write_research_strategy)
 from ..analysis.research_agenda import (build_research_agenda,
                                         load_research_agenda,
+                                        selected_candidate_ids,
                                         write_research_agenda)
 from ..analysis.research_agenda_outcomes import (
     build_research_agenda_outcomes,
@@ -51,19 +52,22 @@ from ..analysis.research_budget import (
     write_research_budget,
 )
 from ..memory.state import CheckpointStore
-from ..analysis.languages import ALL_SUFFIXES, resolve_source_dirs
+from ..analysis.languages import (ALL_SUFFIXES, SOURCE_INVENTORY_POLICY_VERSION,
+                                  SourceFilter, SourceScanTimeout,
+                                  resolve_source_dirs)
 from ..sandbox.approval import ApprovalGate
 from ..sandbox.runner import CommandRunner
 from ..tools import search as srch
 from ..tools.build import (JavaMatrixRunner, MatrixCell, POCSpec,
                            ShellMatrixRunner, ShellPOCSpec, summarize_candidate,
-                           converge_s4_cells)
+                           converge_s4_cells, S4_EVIDENCE_POLICY_VERSION,
+                           S4ExecutionBudget)
 from ..tools.authz import (assert_authz_observations, authz_fixture_id,
                            normalize_authz_case, normalize_authz_cases)
 from ..tools.conclusion import conclusion_status, derive_conclusion, is_confirmed_conclusion
 from ..tools.cvss import base_score, check_impact_consistency
-from ..tools.source_evidence import (DANGER_PATTERNS, build_source_sink_graph,
-                                     grep_hits, match_source_sink_paths)
+from ..tools.source_evidence import (build_source_sink_graph,
+                                     match_source_sink_paths)
 from ..tools.patch_variants import analyze_patch_history, fix_completeness_candidate
 from ..tools.project_profile import build_project_profile
 from ..tools.experiment_planner import plan_candidate_experiments
@@ -71,13 +75,14 @@ from ..tools.experiment import capability_contract_from_candidate
 from ..tools.research_strategies import composite_chain_candidates
 from ..tools.s4_runtime_lab import run_s4_runtime_lab
 from ..tools.service_lifecycle import ServiceLifecycle
-from ..tools.target_rules import collect_target_rule_hits, composite_chain_hints
+from ..tools.target_rules import composite_chain_hints, scan_s1_source_rules
 from ..tools.novelty import (Disclosure, NoveltyChecker, UpstreamRef,
-                             mechanism_audit_llm)
-from ..tools.public_scan import scan_all
+                             mechanism_audit_llm,
+                             upstream_ref_from_search_hit)
+from ..tools.public_scan import (NOVELTY_QUERY_POLICY_VERSION, scan_all)
 from .config import TargetConfig
 from .gates import (GateResult, g0_dead_code, g1_reachable, g1b_gate_blocks,
-                    g3_novelty, g4_runtime, g5_cvss)
+                    g3_novelty, g4_runtime, g5_cvss, g5_record_valid)
 
 
 class StageContext:
@@ -144,6 +149,24 @@ class StageContext:
             value = load_replay_cohort_file(path)
         self._replay_cohort_cache = value
         return dict(value)
+
+
+def _coverage_scope_incomplete(summary: Any) -> bool:
+    """Whether a coverage artifact is unsafe to use as a current universe."""
+    if not isinstance(summary, dict) or not summary:
+        return True
+    if summary.get("status") in {"incomplete", "failed"}:
+        return True
+    scope = summary.get("scope")
+    if not isinstance(scope, dict):
+        return True
+    if scope.get("valid") is not True:
+        return True
+    if scope.get("status") != "matched":
+        return True
+    audit_status = summary.get("audit_status")
+    return (isinstance(audit_status, dict)
+            and audit_status.get("scope_valid") is False)
 
 
 def _effective_source_dirs(ctx: StageContext) -> List[str]:
@@ -228,6 +251,8 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
                                       coverage_scope_status, persist_inventory)
 
     store = CoverageStore(ctx.workspace, ctx.target)
+    scan_filter = SourceFilter(scan_timeout_seconds=int(
+        getattr(ctx.config, "coverage_scan_timeout_seconds", 600) or 0))
     required = ("source-inventory", "flow-index", "symbol-index",
                 ctl.CONTROL_MAP_INDEX, diff.DIFFERENTIAL_INDEX,
                 capability.CAPABILITY_GRAPH_INDEX,
@@ -243,27 +268,56 @@ def _build_coverage_index(ctx: StageContext) -> Dict[str, Any]:
     missing = [name for name in required if not store.path(name).exists()]
     scope_before = coverage_scope_status(
         store, ctx.workspace, ctx.config.source_dirs,
-        target_type=ctx.config.target_type)
+        source_filter=scan_filter, target_type=ctx.config.target_type)
     # ``invalid`` is a meaningful persisted result: rebuilding the same typo
     # every round adds cost without repairing the audit universe.  Missing,
     # legacy, and mismatched contracts on the other hand are unsafe to reuse.
     scope_requires_rebuild = scope_before["status"] in {
-        "missing", "legacy", "mismatch",
+        "missing", "legacy", "mismatch", "incomplete", "running", "failed",
     }
     built = False
     if missing or scope_requires_rebuild:
+        store.write("coverage-build-status", {
+            "status": "running", "started_at": datetime.now().isoformat(timespec="seconds"),
+            "timeout_seconds": scan_filter.scan_timeout_seconds,
+            "source_dirs": list(ctx.config.source_dirs or ["."]),
+        })
+        ctx.store.write_artifact("S1", "coverage-progress.json", {
+            "status": "running", "started_at": datetime.now().isoformat(timespec="seconds"),
+            "timeout_seconds": scan_filter.scan_timeout_seconds,
+            "source_dirs": list(ctx.config.source_dirs or ["."]),
+        })
+
+        def report_progress(progress: Dict[str, Any]) -> None:
+            ctx.store.write_artifact("S1", "coverage-progress.json", {
+                "status": "running", "timeout_seconds": scan_filter.scan_timeout_seconds,
+                **progress,
+            })
+
         result = build_inventory(ctx.workspace, ctx.config.source_dirs,
                                  target=ctx.target,
                                  target_type=ctx.config.target_type,
-                                 fix_history=_fix_history(ctx))
+                                 fix_history=_fix_history(ctx),
+                                 source_filter=scan_filter,
+                                 progress_callback=report_progress)
         persist_inventory(store, result, target_type=ctx.config.target_type)
+        store.write("coverage-build-status", {
+            "status": "complete", "completed_at": datetime.now().isoformat(timespec="seconds"),
+            "scope_id": result.scope.get("scope_id", ""),
+            "source_files": len(result.files), "elapsed_ms": result.elapsed_ms,
+        })
+        ctx.store.write_artifact("S1", "coverage-progress.json", {
+            "status": "complete", "elapsed_ms": result.elapsed_ms,
+            "files_seen": result.scanned_files,
+            "source_files": len(result.files),
+        })
         built = True
     info = cov.refresh_candidate_coverage(store, ctx.workspace, ctx.target)
     info["rebuilt"] = built
     info["missing_indices"] = missing
     scope_after = coverage_scope_status(
         store, ctx.workspace, ctx.config.source_dirs,
-        target_type=ctx.config.target_type)
+        source_filter=scan_filter, target_type=ctx.config.target_type)
     scope_actual = scope_after.get("actual") or {}
     info["scope"] = {
         "before": scope_before["status"],
@@ -461,6 +515,10 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
     per-entry danger-hit counts as reachability clues.
     """
     source_dirs = _effective_source_dirs(ctx)
+    inventory_timeout = getattr(ctx.config, "coverage_scan_timeout_seconds", 600)
+    if (isinstance(inventory_timeout, bool)
+            or not isinstance(inventory_timeout, int) or inventory_timeout < 0):
+        raise ValueError("coverage_scan_timeout_seconds must be a nonnegative integer")
     jars_info = []
     class_sets = {}
     for j in ctx.config.jars:
@@ -494,16 +552,24 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
             "removed": sorted(base - head)[:200],
         }
     # Danger call-site map (source dirs only; jar scan is name-level).
-    danger_sites = []
+    try:
+        danger_sites, target_rule_hits = scan_s1_source_rules(
+            ctx.config.target_type, source_dirs, ctx.workspace,
+            danger_limit=8, target_limit=8, timeout=inventory_timeout)
+        source_rule_status = {"status": "complete",
+                              "timeout_seconds": inventory_timeout,
+                              "claim_status": "not-a-finding"}
+    except SourceScanTimeout as exc:
+        danger_sites, target_rule_hits = [], []
+        source_rule_status = {
+            "status": "incomplete", "timeout_seconds": inventory_timeout,
+            "error": str(exc), "progress": exc.progress,
+            "claim_status": "not-a-finding",
+        }
     per_file_hits: Dict[str, int] = {}
-    for pat, label in DANGER_PATTERNS:
-        for h in grep_hits(pat, source_dirs, ctx.workspace, max_lines=8):
-            fl = str(h["file"])
-            per_file_hits[fl] = per_file_hits.get(fl, 0) + 1
-            danger_sites.append({
-                "label": label, "pattern": pat,
-                "file": fl, "line": h["line"], "text": h["text"],
-            })
+    for hit in danger_sites:
+        fl = str(hit["file"])
+        per_file_hits[fl] = per_file_hits.get(fl, 0) + 1
     entries = []
     # ``count_references`` shells out to ripgrep per entry.  With the entry
     # inventory no longer capped (spec §6.1) that would be one rg per entry;
@@ -542,9 +608,24 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
         entries.append(entry)
     gate_scan = _gate_scan(ctx)
     patch_history = analyze_patch_history(ctx.workspace, max_count=30)
-    source_sink_graph = build_source_sink_graph(source_dirs, ctx.workspace)
-    target_rule_hits = collect_target_rule_hits(
-        ctx.config.target_type, source_dirs, ctx.workspace)
+    graph_timeout = min(inventory_timeout, 120) if inventory_timeout else 0
+    graph_filter = SourceFilter(scan_timeout_seconds=graph_timeout)
+    try:
+        source_sink_graph = build_source_sink_graph(
+            source_dirs, ctx.workspace, source_filter=graph_filter)
+        source_sink_status = {
+            "status": "complete", "path_count": len(source_sink_graph),
+            "timeout_seconds": graph_timeout,
+            "claim_status": "not-a-finding",
+        }
+    except SourceScanTimeout as exc:
+        source_sink_graph = []
+        source_sink_status = {
+            "status": "incomplete", "error": str(exc),
+            "progress": exc.progress,
+            "timeout_seconds": graph_timeout,
+            "claim_status": "not-a-finding",
+        }
     chain_hints = composite_chain_hints(source_sink_graph)
     chain_candidates = composite_chain_candidates(chain_hints)
     project_profile = build_project_profile(
@@ -556,6 +637,8 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
     ctx.store.write_artifact("S1", "gate-scan.json", gate_scan)
     ctx.store.write_artifact("S1", "version-diff.json", version_diff)
     ctx.store.write_artifact("S1", "danger-call-sites.json", danger_sites)
+    ctx.store.write_artifact("S1", "source-rule-scan-status.json",
+                             source_rule_status)
     ctx.store.write_artifact("S1", "security-fix-history.json", patch_history)
     ctx.store.write_artifact("S1", "patch-variants.json", [
         {k: fix[k] for k in ("short_commit", "commit", "parent", "subject",
@@ -563,6 +646,8 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
         for fix in patch_history
     ])
     ctx.store.write_artifact("S1", "source-sink-graph.json", source_sink_graph)
+    ctx.store.write_artifact("S1", "source-sink-graph-status.json",
+                             source_sink_status)
     ctx.store.write_artifact("S1", "project-profile.json", project_profile)
     ctx.store.write_artifact("S1", "target-rules.json", {
         "target_type": ctx.config.target_type,
@@ -576,9 +661,52 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
     # gap is visible rather than silent.
     try:
         coverage_index = _build_coverage_index(ctx)
+    except SourceScanTimeout as exc:
+        from ..analysis.inventory import CoverageStore
+
+        coverage_index = {
+            "status": "incomplete", "scope_complete": False,
+            "error": str(exc), "progress": exc.progress,
+            "claim_status": "not-a-finding",
+        }
+        ctx.store.write_artifact("S1", "coverage-progress.json", {
+            "status": "timed-out", **exc.progress, "error": str(exc),
+        })
+        CoverageStore(ctx.workspace, ctx.target).write("coverage-build-status", {
+            "status": "incomplete", "failed_at": datetime.now().isoformat(timespec="seconds"),
+            "error": str(exc), "progress": exc.progress,
+        })
     except Exception as exc:  # pragma: no cover - defensive
-        coverage_index = {"error": "%s: %s" % (type(exc).__name__, exc)}
+        from ..analysis.inventory import CoverageStore
+
+        coverage_index = {
+            "status": "incomplete", "scope_complete": False,
+            "error": "%s: %s" % (type(exc).__name__, exc),
+            "claim_status": "not-a-finding",
+        }
+        CoverageStore(ctx.workspace, ctx.target).write("coverage-build-status", {
+            "status": "failed", "failed_at": datetime.now().isoformat(timespec="seconds"),
+            "error": coverage_index["error"],
+        })
+    coverage_incomplete = _coverage_scope_incomplete(coverage_index)
+    if coverage_incomplete:
+        coverage_index["status"] = "incomplete"
+        coverage_index["scope_complete"] = False
     ctx.store.write_artifact("S1", "coverage-summary.json", coverage_index)
+    if coverage_incomplete:
+        return {
+            "jars": jars_info, "entries": entries,
+            "gate_scan_count": len(gate_scan), "version_diff": version_diff,
+            "danger_site_count": len(danger_sites),
+            "security_fix_count": len(patch_history),
+            "source_sink_path_count": len(source_sink_graph),
+            "target_rule_hit_count": len(target_rule_hits),
+            "composite_chain_hint_count": len(chain_hints),
+            "composite_chain_candidate_count": len(chain_candidates),
+            "source_dirs": source_dirs, "coverage": coverage_index,
+            "project_profile": project_profile,
+            "coverage_policy_version": SOURCE_INVENTORY_POLICY_VERSION,
+        }
     # Keep the graph and its candidates visible in the round checkpoint as
     # well as in the target-scoped coverage store.  This makes S1 evidence
     # auditable without duplicating the graph-building logic.
@@ -661,7 +789,8 @@ def run_s1(ctx: StageContext) -> Dict[str, Any]:
             "composite_chain_candidate_count": len(chain_candidates),
             "source_dirs": source_dirs,
             "coverage": coverage_index,
-            "project_profile": project_profile}
+            "project_profile": project_profile,
+            "coverage_policy_version": SOURCE_INVENTORY_POLICY_VERSION}
 
 
 def run_s2(ctx: StageContext) -> Dict[str, Any]:
@@ -680,7 +809,13 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
     artifact with a citable ``file:line``, and the spec asks for them to be
     promoted automatically rather than left in a JSON file nobody reads.
     """
-    patch_history = ctx.store.read_artifact("S1", "security-fix-history.json") or []
+    coverage = ctx.store.read_artifact("S1", "coverage-summary.json") or {}
+    partial_coverage = _coverage_scope_incomplete(coverage)
+    # The pipeline controls whether this partial mode is allowed to proceed;
+    # stage callers still need fail-safe candidate/index handling either way.
+    partial_round = partial_coverage
+    patch_history = ([] if partial_round else
+                     ctx.store.read_artifact("S1", "security-fix-history.json") or [])
     existing_ids = {str(c.get("candidate_id")) for c in ctx.config.candidates}
     generated = []
     for fix in patch_history:
@@ -694,7 +829,7 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
     # authz/effect matrix can test whether the observed authorization still
     # protects the transformed object at the sink.
     chain_candidates = []
-    if bool(getattr(ctx.config, "static_candidates", True)):
+    if not partial_round and bool(getattr(ctx.config, "static_candidates", True)):
         chain_candidates = ctx.store.read_artifact(
             "S1", "composite-chain-candidates.json") or []
     generated_chain = []
@@ -705,13 +840,34 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
         ctx.config.candidates.append(candidate)
         existing_ids.add(cid)
         generated_chain.append(candidate)
-    pool, static_added = _merge_static_candidates(ctx, list(ctx.config.candidates))
+    if partial_round:
+        # Incomplete inventory can leave target-scoped files from an earlier
+        # successful run. Do not let their candidates or review state steer
+        # this partial audit.
+        pool, static_added = list(ctx.config.candidates), []
+    else:
+        pool, static_added = _merge_static_candidates(ctx, list(ctx.config.candidates))
     from ..analysis import scheduler as sched
     slots = _candidate_budget(ctx)
+    from ..analysis.research_agenda import normalize_candidate_ids
+    agenda_priority_ids = ([] if partial_round else selected_candidate_ids(
+        load_research_agenda(ctx.workspace, ctx.target),
+        current_round=ctx.round_no))
+    configured_priority_ids = normalize_candidate_ids(
+        getattr(ctx.config, "priority_candidate_ids", []))
+    priority_ids = normalize_candidate_ids(
+        configured_priority_ids + agenda_priority_ids)
     active_pool, candidate_intake = sched.bounded_candidate_intake(
-        pool, slots=slots, round_no=ctx.round_no)
+        pool, slots=slots, round_no=ctx.round_no,
+        priority_ids=priority_ids)
     ctx.store.write_artifact("S2", "candidate-intake.json", candidate_intake)
-    selected, plan, schedule_note = _schedule_round(ctx, active_pool, slots)
+    if partial_round:
+        selected, plan = active_pool[:slots], None
+        schedule_note = ("partial coverage: configured candidates only; "
+                         "coverage-aware scheduling bypassed")
+    else:
+        selected, plan, schedule_note = _schedule_round(
+            ctx, active_pool, slots, priority_ids=configured_priority_ids)
     if candidate_intake["deferred_intake_candidates"]:
         intake_note = ("candidate intake %d/%d active; %d queued for rotation"
                        % (candidate_intake["active_candidates"],
@@ -791,6 +947,14 @@ def run_s2(ctx: StageContext) -> Dict[str, Any]:
               "active_pool_size": len(active_pool),
               "candidate_intake": candidate_intake,
               "schedule_note": schedule_note,
+              "coverage_scope": {
+                  "state": "scope-incomplete" if partial_round else
+                           ("incomplete" if partial_coverage else "current"),
+                  "candidate_source": "configured-only" if partial_round else
+                                      "configured-and-derived",
+                  "coverage_claims_allowed": not partial_coverage,
+                  "claim_status": "not-a-finding",
+              },
               "benchmark_feedback": {
                   "benchmark_id": benchmark_feedback.get("benchmark_id", ""),
                   "alerts": [item.get("code") for item in
@@ -861,7 +1025,8 @@ def _candidate_budget(ctx: StageContext) -> int:
 
 
 def _schedule_round(ctx: StageContext,
-                    pool: List[Dict[str, Any]], slots: Optional[int] = None
+                    pool: List[Dict[str, Any]], slots: Optional[int] = None,
+                    priority_ids: Optional[List[str]] = None
                     ) -> "tuple[List[Dict[str, Any]], Any, str]":
     """Run the coverage-aware scheduler for one round, never raising.
 
@@ -882,6 +1047,7 @@ def _schedule_round(ctx: StageContext,
         return sched.round_selection(
             ctx.workspace, ctx.target, pool, slots,
             round_no=ctx.round_no, refresh=False,
+            priority_ids=priority_ids or (),
             benchmark_feedback=ctx.benchmark_feedback())
     except Exception as exc:  # pragma: no cover - defensive by design
         return pool[:slots], None, (
@@ -1065,6 +1231,9 @@ def _service_gap_row(spec: Any, cell: MatrixCell,
 
 def run_s4(ctx: StageContext) -> Dict[str, Any]:
     """Minimal PoC + verification matrix: version x safe-mode x precondition."""
+    execution_budget = S4ExecutionBudget(
+        getattr(ctx.config, "s4_timeout_seconds", 5400),
+        getattr(ctx.config, "s4_candidate_timeout_seconds", 900))
     _stage_pocs(ctx)
     jars_by_version = ctx.config.resolve_jars(ctx.workspace)
     source_revision_artifacts = ctx.config.resolve_source_revision_artifacts(
@@ -1073,7 +1242,8 @@ def run_s4(ctx: StageContext) -> Dict[str, Any]:
     java_specs = _poc_specs(ctx)
     shell_specs = _shell_poc_specs(ctx)
     service = ServiceLifecycle(ctx.workspace, ctx.target, ctx.round_no,
-                               ctx.config, approval=ctx.approval)
+                               ctx.config, approval=ctx.approval,
+                               execution_budget=execution_budget)
     service_info = service.snapshot()
     try:
         if service.configured and service.enabled and (java_specs or shell_specs):
@@ -1083,7 +1253,9 @@ def run_s4(ctx: StageContext) -> Dict[str, Any]:
             and not service_info.get("ready", False))
 
         if java_specs:
-            matrix_runner = JavaMatrixRunner(ctx.workspace, ctx.target, ctx.round_no, ctx.approval)
+            matrix_runner = JavaMatrixRunner(
+                ctx.workspace, ctx.target, ctx.round_no, ctx.approval,
+                execution_budget=execution_budget)
             if service_unavailable:
                 for spec in java_specs:
                     cells = [_service_gap_row(spec, cell, service_info, "java")
@@ -1094,7 +1266,9 @@ def run_s4(ctx: StageContext) -> Dict[str, Any]:
                 for cid, cells in matrix_runner.run_manifest(java_specs, jars_by_version).items():
                     results.setdefault(cid, []).extend(cells)
         if shell_specs:
-            shell_runner = ShellMatrixRunner(ctx.workspace, ctx.target, ctx.round_no, ctx.approval)
+            shell_runner = ShellMatrixRunner(
+                ctx.workspace, ctx.target, ctx.round_no, ctx.approval,
+                execution_budget=execution_budget)
             if service_unavailable:
                 for spec in shell_specs:
                     cells = [_service_gap_row(spec, cell, service_info, "shell")
@@ -1112,7 +1286,8 @@ def run_s4(ctx: StageContext) -> Dict[str, Any]:
                 version_universe=sorted(set(jars_by_version)
                                         | set(ctx.config.target_urls)),
                 service_lifecycle=service,
-                source_revision_artifacts=source_revision_artifacts)
+                source_revision_artifacts=source_revision_artifacts,
+                execution_budget=execution_budget)
         except Exception as exc:  # keep ordinary S4 usable while preserving gap
             runtime_lab = {
                 "schema_version": "runtime-lab-v1",
@@ -1171,12 +1346,18 @@ def run_s4(ctx: StageContext) -> Dict[str, Any]:
     ctx.store.write_artifact("S4", "execution-status.json", {
         cid: {
             key: value for key, value in summary.items()
-            if key.endswith("_count") or key in ("execution_state", "cells_ran", "s4_result_sources")
+            if key.endswith("_count") or key in ("execution_state", "cells_ran",
+                                                   "cells_attempted", "s4_result_sources",
+                                                   "evidence_policy_version")
         }
         for cid, summary in summaries.items()
     })
+    ctx.store.write_artifact("S4", "execution-budget.json",
+                             execution_budget.snapshot())
     ctx.store.write_artifact("S4", "authz-matrix.json", authz_matrix)
-    return {"summaries": summaries, "runtime_lab": runtime_lab}
+    return {"summaries": summaries, "runtime_lab": runtime_lab,
+            "evidence_policy_version": S4_EVIDENCE_POLICY_VERSION,
+            "execution_budget": execution_budget.snapshot()}
 
 
 def _derive_conclusion(candidate: Dict[str, Any], summary: Dict[str, Any],
@@ -1196,6 +1377,7 @@ def run_s5(ctx: StageContext) -> Dict[str, Any]:
     coverage = {
         "offline": ctx.offline,
         "public_scan_channels": pub.get("channels", {}),
+        "public_scan_channel_status": pub.get("channel_status", {}),
         "public_scan_errors": pub.get("errors", []),
         "public_disclosure_count": len(pub.get("disclosures", [])),
         "configured_public_channels": bool(
@@ -1213,6 +1395,8 @@ def run_s5(ctx: StageContext) -> Dict[str, Any]:
             }
             continue
         refs = []
+        query_attempts_before = len(checker.query_attempts)
+        query_errors_before = set(checker.query_errors)
         for r in cand.get("upstream_refs", []):
             refs.append(UpstreamRef(**r))
         # Live scan: refresh config refs via API and search by keywords.
@@ -1237,17 +1421,12 @@ def run_s5(ctx: StageContext) -> Dict[str, Any]:
                         refs[refs.index(r)] = live
             for kw in cand.get("novelty_keywords", [])[:keyword_limit]:
                 for item in checker.search(repo, kw)[:result_limit]:
-                    number = item.get("number")
-                    ref = UpstreamRef(
-                        ref=("#%d" % number) if number else item.get("title", "")[:24],
-                        kind="pull_request" if item.get("pull_request") else "issue",
-                        title=item.get("title", ""),
-                        state=item.get("state", ""),
-                        created_at=item.get("created_at", ""),
-                        url=item.get("html_url", ""),
-                        evidence_source="live GitHub search",
-                    )
-                    if ref.ref not in {x.ref for x in refs}:
+                    ref = upstream_ref_from_search_hit(
+                        repo, item, "GitHub search API/fixture")
+                    if ref is None:
+                        checker.query_errors.append("search:malformed-hit")
+                        continue
+                    if (ref.kind, ref.ref) not in {(x.kind, x.ref) for x in refs}:
                         refs.append(ref)
         disclosures = []
         for d in cand.get("disclosures", []):
@@ -1256,8 +1435,14 @@ def run_s5(ctx: StageContext) -> Dict[str, Any]:
         # Baseline #7: when any public-info channel failed (or the run is
         # offline / rate-limited), absence of a record is NOT a 0day claim.
         query_metadata = checker.query_metadata()
-        query_failed = bool(pub.get("errors")) or checker.last_rate_limit is not None \
-            or bool(checker.query_errors) or ctx.offline or bool(query_metadata.get("query_failed"))
+        github_query_attempted = len(checker.query_attempts) > query_attempts_before
+        candidate_query_errors = set(checker.query_errors) - query_errors_before
+        successful_public_channels = bool(pub.get("channel_status")) and all(
+            status in ("success-with-hits", "success-empty")
+            for status in pub.get("channel_status", {}).values())
+        query_failed = (bool(pub.get("errors")) or checker.last_rate_limit is not None
+                        or bool(candidate_query_errors) or ctx.offline
+                        or not (github_query_attempted or successful_public_channels))
         nv = checker.evaluate(refs, disclosures, ctx.config.discovery_date,
                               increments_hint=cand.get("increments_hint", []),
                               query_failed=query_failed)
@@ -1295,7 +1480,9 @@ def run_s5(ctx: StageContext) -> Dict[str, Any]:
     if checker.query_errors:
         results["api_query_errors"] = sorted(set(checker.query_errors))
     results["public_scan"] = {
-        "channels": pub["channels"], "errors": pub["errors"],
+        "channels": pub["channels"],
+        "channel_status": pub.get("channel_status", {}),
+        "errors": pub["errors"],
         "disclosure_ids": [d.id for d in pub["disclosures"]],
     }
     results["github_query"] = checker.query_metadata()
@@ -1309,7 +1496,8 @@ def run_s5(ctx: StageContext) -> Dict[str, Any]:
                                   and not ctx.offline)
     ctx.store.write_artifact("S5", "novelty-coverage.json", coverage)
     ctx.store.write_artifact("S5", "novelty.json", results)
-    return {"novelty": results}
+    return {"novelty": results,
+            "query_policy_version": NOVELTY_QUERY_POLICY_VERSION}
 
 
 def run_s6(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, str]) -> Dict[str, Any]:
@@ -1317,13 +1505,23 @@ def run_s6(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
     out = {}
     for cand in ctx.config.candidates:
         cid = cand["candidate_id"]
-        if conclusions.get(cid) != "确认":
+        if not is_confirmed_conclusion(conclusions.get(cid)):
             continue
         vector = cand.get("cvss_vector", "AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N")
         tier = cand.get("precondition_tier_hint", "single-feature")
-        score, severity = base_score(vector)
-        g5 = g5_cvss(tier, vector, cand.get("implicit_default_on", False))
-        impact_ok, impact_reason = check_impact_consistency(cand, summaries.get(cid, {}), vector)
+        try:
+            score, severity = base_score(vector)
+            g5 = g5_cvss(tier, vector, cand.get("implicit_default_on", False))
+            impact_ok, impact_reason = check_impact_consistency(
+                cand, summaries.get(cid, {}), vector)
+        except ValueError as exc:
+            out[cid] = {
+                "vector": vector,
+                "blocked": True,
+                "g5": {"passed": False, "verdict": "invalid-cvss-vector",
+                       "evidence": [str(exc)]},
+            }
+            continue
         if not impact_ok:
             g5.passed = False
             g5.evidence = (g5.evidence or []) + [impact_reason]
@@ -1333,14 +1531,22 @@ def run_s6(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
             "score": round(score, 1),
             "severity": severity,
             "tier": tier,
+            "implicit_default_on": bool(cand.get("implicit_default_on", False)),
             "g5": g5.__dict__,
             "impact": cand.get("impact", []),
+            "attack_class": cand.get("attack_class", ""),
+            "surface": cand.get("surface", ""),
+            "logic": cand.get("logic", ""),
+            "hypothesis": cand.get("hypothesis", ""),
+            "availability_proof": summaries.get(cid, {}).get(
+                "availability_proof", []),
             "boundary": cand.get("boundary", ""),
         }
         if not g5.passed:
             out[cid]["blocked"] = True
     ctx.store.write_artifact("S6", "severity.json", out)
-    return {"severity": out}
+    return {"severity": out,
+            "evidence_policy_version": S4_EVIDENCE_POLICY_VERSION}
 
 
 def _evidence_from_summary(summary: Dict[str, Any], candidate: Dict[str, Any]) -> List[str]:
@@ -1353,6 +1559,9 @@ def _evidence_from_summary(summary: Dict[str, Any], candidate: Dict[str, Any]) -
         ev.append("S4_EXECUTION_STATE=" + str(summary["execution_state"]))
     if summary.get("s4_result_sources"):
         ev.append("S4_RESULT_SOURCES=" + ",".join(summary["s4_result_sources"]))
+    for claim in summary.get("poc_claims", [])[:4]:
+        ev.append("POC_CLAIM_UNTRUSTED=%s" % json.dumps(
+            claim.get("fields", {}), ensure_ascii=False, separators=(",", ":"))[:360])
     for i in summary.get("instantiated", [])[:4]:
         ev.append("%s SafeMode=%s %s -> INSTANTIATED %s" % (
             i["version"], i["safe"], i["precondition"], i["class"]))
@@ -1406,6 +1615,9 @@ def run_s7(ctx: StageContext, rows: List[Dict[str, Any]], summaries: Dict[str, A
     reports_dir = ctx.workspace / "reports" / ctx.target / ("round-%02d" % ctx.round_no)
     reports_dir.mkdir(parents=True, exist_ok=True)
     written = []
+    withheld = []
+    prior_stage = ctx.store.load_stage("S7") or {}
+    prior_docs = set(prior_stage.get("finding_docs", []))
     idx = 0
     for cand in ctx.config.candidates:
         cid = cand["candidate_id"]
@@ -1414,8 +1626,12 @@ def run_s7(ctx: StageContext, rows: List[Dict[str, Any]], summaries: Dict[str, A
         row = next((r for r in rows if r.get("candidate_id") == cid), {})
         if not is_confirmed_conclusion(row.get("conclusion")):
             continue
+        if not g5_record_valid(severities.get(cid)):
+            withheld.append({"candidate_id": cid,
+                             "reason": "G5 severity record missing or invalid"})
+            continue
         idx += 1
-        sev = severities.get(cid, {})
+        sev = severities[cid]
         novelty_record = (ctx.store.read_artifact("S5", "novelty.json") or {}).get(cid, {})
         affected_versions = cand.get("affected_versions") or [
             str(j.get("version")) for j in ctx.config.jars if j.get("version")]
@@ -1450,7 +1666,25 @@ def run_s7(ctx: StageContext, rows: List[Dict[str, Any]], summaries: Dict[str, A
         (reports_dir / fname).write_text(
             render_finding_md(finding, lang=ctx.config.output_lang), encoding="utf-8")
         written.append(fname)
-    return {"finding_docs": written, "dir": str(reports_dir.relative_to(ctx.workspace))}
+    stale_docs = sorted(prior_docs - set(written))
+    stale_marker = ("> 状态更新：该报告来自旧版 S4 证据策略，当前轮次已无法用其材料确认此发现。"
+                    "请以本轮 S8 Ledger 为准。\n\n")
+    for name in stale_docs:
+        path = reports_dir / name
+        if path.is_file():
+            old = path.read_text(encoding="utf-8", errors="replace")
+            if stale_marker not in old:
+                path.write_text(stale_marker + old, encoding="utf-8")
+    if stale_docs:
+        ctx.store.write_artifact("S7", "superseded-finding-docs.json", {
+            "evidence_policy_version": S4_EVIDENCE_POLICY_VERSION,
+            "files": stale_docs,
+            "reason": "G4/G5 did not revalidate the prior confirmation",
+        })
+    return {"finding_docs": written, "withheld": withheld,
+            "superseded_docs": stale_docs,
+            "evidence_policy_version": S4_EVIDENCE_POLICY_VERSION,
+            "dir": str(reports_dir.relative_to(ctx.workspace))}
 
 
 def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, str],
@@ -1513,21 +1747,22 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
                         "unconfirmed-novelty-hypothesis")
                     row["evidence"].append(
                         "S8_NOVELTY_UNCONFIRMED=not-a-finding")
-        if cid in severities:
-            severity = severities[cid]
-            if severity.get("blocked"):
+        severity = severities.get(cid)
+        if is_confirmed_conclusion(row["conclusion"]):
+            if not g5_record_valid(severity):
                 row["conclusion"] = "候选（待验证）"
-                row["evidence"].append(
-                    "G5_BLOCKED=" + "; ".join(severity.get("g5", {}).get("evidence", [])))
+                evidence = ((severity or {}).get("g5") or {}).get("evidence", [])
+                label = "G5_BLOCKED=" if severity else "G5_MISSING="
+                row["evidence"].append(label + "; ".join(evidence or [
+                    "S6 severity record missing or invalid"]))
                 checks.append({"gate": "G5", "passed": False,
-                               "verdict": "cvss-consistency-blocked"})
-            elif is_confirmed_conclusion(row["conclusion"]):
+                               "verdict": "cvss-record-missing-or-invalid"})
+            else:
                 row["cvss"] = {"vector": severity["vector"], "score": severity["score"]}
                 checks.append({"gate": "G5", "passed": True,
                                "verdict": "cvss-attached"})
-            else:
-                row["evidence"].append(
-                    "S8_CVSS_WITHHELD=unconfirmed-not-a-finding")
+        elif severity:
+            row["evidence"].append("S8_CVSS_WITHHELD=unconfirmed-not-a-finding")
         row["status"] = conclusion_status(row.get("conclusion"))
         rows.append(row)
         final_evidence_rows.append({
@@ -1890,15 +2125,26 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
     # cannot accidentally describe the previous round's coverage.  This is a
     # coverage state machine, not a finding gate: it neither promotes a static
     # lead nor relaxes the S4/G4 runtime requirement for confirmation.
+    s1_coverage = ctx.store.read_artifact("S1", "coverage-summary.json") or {}
+    partial_coverage = _coverage_scope_incomplete(s1_coverage)
     try:
         from ..analysis import coverage as cov
         from ..analysis.inventory import CoverageStore
 
         coverage_store = CoverageStore(ctx.workspace, ctx.target)
-        coverage_refresh = cov.refresh_candidate_coverage(
-            coverage_store, ctx.workspace, ctx.target, round_no=ctx.round_no,
-            extra_rows=rows)
         coverage_summary = coverage_store.read("coverage-summary") or {}
+        if not isinstance(coverage_summary, dict):
+            coverage_summary = {}
+        if partial_coverage:
+            # Do not mark rows against an older inventory. The current round's
+            # candidate evidence remains in the ledger; global coverage needs
+            # a complete, current source universe before it can be refreshed.
+            coverage_refresh = {}
+        else:
+            coverage_refresh = cov.refresh_candidate_coverage(
+                coverage_store, ctx.workspace, ctx.target,
+                round_no=ctx.round_no, extra_rows=rows)
+            coverage_summary = coverage_store.read("coverage-summary") or {}
         coverage_closure = {
             "artifact": "state/%s/coverage/coverage-summary.json" % ctx.target,
             "state": (coverage_summary.get("audit_status") or {}).get(
@@ -1915,6 +2161,55 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
                 "stop_condition_met", False)),
             "claim_status": "not-a-finding",
         }
+        if partial_coverage:
+            # Invalidate any old target-level coverage summary too, so later
+            # readers cannot mistake its denominator for this round's scope.
+            previous_counts = coverage_summary.get("counts")
+            previous_scope = coverage_summary.get("scope")
+            previous_uncovered = coverage_store.read_records(
+                "uncovered-regions")
+            coverage_summary["previous_inventory_counts"] = previous_counts
+            if previous_scope is not None:
+                coverage_summary["previous_inventory_scope"] = previous_scope
+            if previous_uncovered:
+                coverage_store.write_records(
+                    "previous-uncovered-regions", previous_uncovered)
+            coverage_store.write_records("uncovered-regions", [])
+            coverage_summary["scope"] = {
+                "status": "incomplete", "scope_id": "", "valid": False,
+                "claim_status": "not-a-finding",
+            }
+            coverage_summary["counts"] = {}
+            coverage_summary["metrics"] = {
+                key: None for key in (coverage_summary.get("metrics") or {})}
+            coverage_summary["acceptance"] = {
+                key: {"target": (row or {}).get("target"),
+                      "actual": None, "met": False}
+                for key, row in (coverage_summary.get("acceptance") or {}).items()
+            }
+            coverage_summary["uncovered_regions"] = []
+            coverage_summary["high_risk_uncovered"] = None
+            coverage_summary["stop_condition_met"] = False
+            coverage_summary["coverage_inventory_current"] = False
+            coverage_summary["audit_status"] = {
+                "state": "scope-incomplete",
+                "scope_id": "",
+                "scope_valid": False,
+                "scope_present": True,
+                "blockers": ["coverage-inventory-incomplete"],
+                "claim_status": "not-a-finding",
+            }
+            coverage_summary["status"] = "incomplete"
+            coverage_store.write("coverage-summary", coverage_summary)
+            coverage_closure.update({
+                "state": "scope-incomplete",
+                "scope_id": "",
+                "scope_valid": False,
+                "blockers": ["coverage-inventory-incomplete"],
+                "high_risk_uncovered": None,
+                "stop_condition_met": False,
+                "claim_status": "not-a-finding",
+            })
     except Exception as exc:  # pragma: no cover - preserve a completed ledger
         coverage_closure = {
             "artifact": "state/%s/coverage/coverage-summary.json" % ctx.target,
@@ -1926,6 +2221,16 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
             "stop_condition_met": False,
             "claim_status": "not-a-finding",
         }
+    if partial_coverage:
+        coverage_closure.update({
+            "state": "scope-incomplete",
+            "scope_id": "",
+            "scope_valid": False,
+            "blockers": ["coverage-inventory-incomplete"],
+            "high_risk_uncovered": None,
+            "stop_condition_met": False,
+            "claim_status": "not-a-finding",
+        })
     metrics["覆盖状态"] = coverage_closure["state"]
     metrics["高风险未覆盖数"] = coverage_closure["high_risk_uncovered"]
     summary["coverage_closure"] = coverage_closure
@@ -1954,7 +2259,8 @@ def run_s8(ctx: StageContext, summaries: Dict[str, Any], conclusions: Dict[str, 
                 "research_replay_cohort", {
                     "claim_status": "not-a-finding"}),
             "research_strategy": summary.get("research_strategy", {
-                "claim_status": "not-a-finding"})}
+                "claim_status": "not-a-finding"}),
+            "evidence_policy_version": S4_EVIDENCE_POLICY_VERSION}
 
 
 def _precondition_distribution(rows: List[Dict[str, Any]]) -> str:

@@ -22,6 +22,7 @@ import signal
 import socket
 import ssl
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -30,12 +31,19 @@ import ipaddress
 
 from ..sandbox.approval import ApprovalGate
 from ..sandbox.runner import (CommandRunner, minimal_poc_env,
+                              POC_MAX_PROCESS_TREE_RSS_BYTES,
+                              POC_PROCESS_TREE_RSS_POLICY_VERSION,
+                              POC_PROCESS_TREE_SAMPLE_INTERVAL_SECONDS,
+                              POC_PROCESS_TABLE_TIMEOUT_SECONDS,
+                              _process_tree_snapshot,
+                              prepare_posix_resource_limited_command,
                               validate_global_command, validate_poc_command)
 from .redaction import redact_text
 
 
-SERVICE_SCHEMA_VERSION = "service-lifecycle-v1"
-PROCESS_SCHEMA_VERSION = "service-processes-v1"
+SERVICE_SCHEMA_VERSION = "service-lifecycle-v5-isolation-contract"
+PROCESS_SCHEMA_VERSION = "service-processes-v4-isolation-contract"
+SERVICE_ISOLATION_POLICY_VERSION = "managed-service-host-isolation-unavailable-v1"
 CLAIM_STATUS = "not-a-finding"
 MAX_COMMAND_TOKENS = 32
 MAX_ENV_KEYS = 32
@@ -59,15 +67,23 @@ def _digest(value: Any) -> str:
 
 
 def _loopback(host: str) -> bool:
+    return bool(_loopback_connect_host(host))
+
+
+def _loopback_connect_host(host: str) -> str:
+    """Return a numeric loopback address without resolving arbitrary names."""
     host = str(host or "").strip().lower().rstrip(".")
     if host.startswith("[") and host.endswith("]"):
         host = host[1:-1]
-    if host in {"localhost", "localhost.localdomain", "::1"}:
-        return True
+    # Map these conventional aliases directly rather than asking the system
+    # resolver, whose hosts/DNS configuration could redirect the healthcheck.
+    if host in {"localhost", "localhost.localdomain"}:
+        return "127.0.0.1"
     try:
-        return ipaddress.ip_address(host).is_loopback
+        address = ipaddress.ip_address(host.split("%", 1)[0])
     except ValueError:
-        return False
+        return ""
+    return str(address) if address.is_loopback else ""
 
 
 def _command(value: Any) -> List[str]:
@@ -146,13 +162,18 @@ class ServiceLifecycle:
     """Manage one optional workspace-local service for a bounded S4 lab."""
 
     def __init__(self, workspace: Path, target: str, round_no: int,
-                 config: Any, approval: Optional[ApprovalGate] = None):
+                 config: Any, approval: Optional[ApprovalGate] = None,
+                 execution_budget: Optional[Any] = None):
         self.workspace = Path(workspace).resolve()
         self.target = str(target)
         self.round_no = int(round_no)
         self.configured, raw = _raw_service(config)
         self.raw = raw
         self.enabled = self.configured and raw.get("enabled", True) is not False
+        # Managed services need inbound network permission. macOS Seatbelt's
+        # localhost inbound filter is not limited to the loopback interface,
+        # so never start one implicitly as if it were contained.
+        self.allow_unconfined_start = raw.get("allow_unconfined_start") is True
         self.start_command = _command(raw.get("start_command", raw.get("start")))
         self.stop_command = _command(raw.get("stop_command", raw.get("stop")))
         # A healthcheck may observe a service that the operator started
@@ -193,14 +214,21 @@ class ServiceLifecycle:
         self.env = dict(list(sorted(self.env.items()))[:MAX_ENV_KEYS])
         self.approval = approval or ApprovalGate()
         self.runner = CommandRunner(self.workspace, self.approval)
+        self.execution_budget = execution_budget
         self.state_dir = (self.workspace / "state" / self.target
                           / ("round-%02d" % self.round_no) / "S4")
         self.process_registry = self.state_dir / "processes.json"
         self.lock_path = self.state_dir / "service.lock"
         self._lock_handle = None
         self.registry_error = ""
+        self.resource_limits: Dict[str, Any] = {}
+        self.resource_limit_error = ""
         self.process: Optional[subprocess.Popen] = None
         self.registry_pid: Optional[int] = None
+        self._managed_service_started = False
+        self._tree_monitor_stop = threading.Event()
+        self._tree_monitor_thread: Optional[threading.Thread] = None
+        self._tracked_process_start_times: Dict[int, str] = {}
         self._state: Dict[str, Any] = self.snapshot()
 
     def _within_workspace(self, path: Path) -> bool:
@@ -267,6 +295,7 @@ class ServiceLifecycle:
             "configured": bool(self.configured),
             "enabled": bool(self.enabled),
             "start_command_configured": bool(self.start_command),
+            "allow_unconfined_start": bool(self.allow_unconfined_start),
             "stop_command_configured": bool(self.stop_command),
             "stop_external": bool(self.stop_external),
             "start_command_digest": _digest(self.start_command)[:24] if self.start_command else "",
@@ -275,6 +304,10 @@ class ServiceLifecycle:
             if self._within_workspace(self.working_dir) else "outside-workspace",
             "process_registry": str(self.process_registry.relative_to(self.workspace)),
             "process_registry_error": self.registry_error,
+            "resource_limits": dict(self.resource_limits),
+            "resource_limit_error": self.resource_limit_error,
+            "isolation_policy": SERVICE_ISOLATION_POLICY_VERSION,
+            **self._isolation_contract("pending"),
             "env_keys": sorted(self.env),
             "healthcheck": self._health_url_info() if self.health_url
             else {"configured": bool(self.health_command), "kind": "command" if self.health_command else "none"},
@@ -283,12 +316,38 @@ class ServiceLifecycle:
             "shutdown_timeout": self.shutdown_timeout,
             "config_digest": _digest({
                 "enabled": self.enabled, "start": self.start_command,
+                "allow_unconfined_start": self.allow_unconfined_start,
                 "stop": self.stop_command, "health_url": self.health_url,
                 "health_command": self.health_command, "working_dir": str(self.working_dir),
                 "env_keys": sorted(self.env), "expected_status": self.expected_status,
                 "stop_external": self.stop_external,
+                "isolation_policy": SERVICE_ISOLATION_POLICY_VERSION,
             })[:24],
             "claim_status": CLAIM_STATUS,
+        }
+
+    def _isolation_contract(self, status: str) -> Dict[str, Any]:
+        if self._managed_service_started:
+            isolation_status = "unconfined"
+            reason = ("managed target service has no OS network or filesystem "
+                      "sandbox; only the recorded POSIX resource limits apply")
+        elif status == "external-ready":
+            isolation_status = "unknown-external-process"
+            reason = ("VulnGate did not start or sandbox this already-ready "
+                      "service; its host access is unknown")
+        else:
+            isolation_status = "not-started"
+            reason = "no target service process was started by this lifecycle"
+        result = {
+            "policy": SERVICE_ISOLATION_POLICY_VERSION,
+            "status": isolation_status,
+            "enforced": False,
+            "reason": reason,
+            "claim_status": CLAIM_STATUS,
+        }
+        return {
+            "network_isolation": dict(result),
+            "filesystem_isolation": dict(result),
         }
 
     def _read_process_registry(self) -> List[Dict[str, Any]]:
@@ -351,6 +410,8 @@ class ServiceLifecycle:
             "port": health.get("port") if health.get("configured") else None,
             "healthcheck_url_digest": health.get("url_digest", ""),
             "config_digest": self.snapshot().get("config_digest", ""),
+            "resource_limits": dict(self.resource_limits),
+            **self._isolation_contract("started"),
             "active": True,
             "status": "started",
             "started_at": int(time.time()),
@@ -366,6 +427,11 @@ class ServiceLifecycle:
     def _mark_process_stopped(self, pid: Optional[int], status: str) -> None:
         if pid is None:
             return
+        tree_limits = self.resource_limits.get("process_tree_rss")
+        still_active = (status in {"cleanup-incomplete", "stop-timeout"}
+                        or (isinstance(tree_limits, dict)
+                            and tree_limits.get("cleanup_status") in {
+                                "incomplete", "unverified"}))
         records = self._read_process_registry()
         changed = False
         for item in records:
@@ -374,8 +440,10 @@ class ServiceLifecycle:
             except (TypeError, ValueError):
                 same_pid = False
             if same_pid and item.get("target") == _text(self.target, 120):
-                item.update({"active": False, "status": status,
-                             "stopped_at": int(time.time()),
+                item.update({"active": still_active,
+                             "status": status,
+                             "stopped_at": None if still_active else int(time.time()),
+                             "resource_limits": dict(self.resource_limits),
                              "claim_status": CLAIM_STATUS})
                 changed = True
         if changed:
@@ -387,9 +455,221 @@ class ServiceLifecycle:
     def _base_result(self, status: str, ready: bool, **extra: Any) -> Dict[str, Any]:
         result = self.snapshot()
         result.update({"status": status, "ready": bool(ready), "claim_status": CLAIM_STATUS})
+        result.update(self._isolation_contract(status))
         result.update(extra)
         self._state = result
         return result
+
+    def _start_process_tree_monitor(self) -> None:
+        limits = self.resource_limits.get("process_tree_rss")
+        if not isinstance(limits, dict) or self.process is None:
+            return
+        limits["status"] = "monitoring"
+        self._tree_monitor_stop.clear()
+
+        def observe(snapshot: Dict[str, Any]) -> bool:
+            limits["sample_count"] += 1
+            limits["tracked_process_count"] = max(
+                limits["tracked_process_count"],
+                len(self._tracked_process_start_times))
+            limits["peak_process_count"] = max(
+                limits["peak_process_count"], snapshot["process_count"])
+            limits["peak_rss_bytes"] = max(
+                limits["peak_rss_bytes"], snapshot["rss_bytes"])
+            if snapshot["rss_bytes"] > limits["max_bytes"]:
+                limits["status"] = "limit-exceeded"
+                self.resource_limit_error = "process-tree-rss-exceeded"
+                return True
+            return False
+
+        def abort_service(status: str, error: str = "") -> None:
+            limits["status"] = status
+            if error:
+                limits["monitor_error"] = error
+            self.resource_limit_error = (
+                "process-tree-rss-exceeded" if status == "limit-exceeded"
+                else "process-tree-rss-monitor-unavailable")
+            if self.execution_budget is not None:
+                self.execution_budget.abort(
+                    "managed-service-process-tree-" + status)
+            self._cleanup_managed_process_tree(immediate=True)
+            self._mark_tree_monitor_failure()
+
+        # Take the first sample synchronously, before startup code can call
+        # Popen.poll() and reap a short-lived leader. That sample establishes
+        # the root PID/start-time identity and captures children before they
+        # can be reparented.
+        snapshot, error = _process_tree_snapshot(
+            self.process.pid, self._tracked_process_start_times)
+        if error or snapshot is None:
+            abort_service("monitor-error", error or
+                          "process-tree-snapshot-unavailable")
+            return
+        if observe(snapshot):
+            abort_service("limit-exceeded")
+            return
+
+        def monitor() -> None:
+            while not self._tree_monitor_stop.wait(
+                    POC_PROCESS_TREE_SAMPLE_INTERVAL_SECONDS):
+                process = self.process
+                if process is None:
+                    return
+                snapshot, error = _process_tree_snapshot(
+                    process.pid, self._tracked_process_start_times)
+                if error or snapshot is None:
+                    abort_service(
+                        "monitor-error",
+                        error or "process-tree-snapshot-unavailable")
+                    return
+                if observe(snapshot):
+                    abort_service("limit-exceeded")
+                    return
+
+        self._tree_monitor_thread = threading.Thread(
+            target=monitor, name="vulngate-service-rss-%d" % self.process.pid,
+            daemon=True)
+        self._tree_monitor_thread.start()
+
+    def _mark_tree_monitor_failure(self) -> None:
+        limits = self.resource_limits.get("process_tree_rss")
+        if not isinstance(limits, dict) or not isinstance(self._state, dict):
+            return
+        status = ("resource-limit-exceeded"
+                  if limits.get("status") == "limit-exceeded"
+                  else "resource-monitor-error")
+        self._state.update({
+            "status": status,
+            "ready": False,
+            "reason": self.resource_limit_error or status,
+            "resource_limits": dict(self.resource_limits),
+            "resource_limit_error": self.resource_limit_error,
+        })
+
+    def _signal_managed_process_tree(self, signum: int) -> Optional[Dict[str, Any]]:
+        process = self.process
+        limits = self.resource_limits.get("process_tree_rss")
+        if process is None:
+            return None
+        snapshot, error = _process_tree_snapshot(
+            process.pid, self._tracked_process_start_times)
+        if error or snapshot is None:
+            if isinstance(limits, dict):
+                limits["cleanup_status"] = "unverified"
+                limits["cleanup_error"] = error or "process-tree-snapshot-unavailable"
+            if signum == signal.SIGKILL and process.poll() is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                except OSError:
+                    if isinstance(limits, dict):
+                        limits["cleanup_status"] = "incomplete"
+            return None
+        if snapshot["process_group_tracked"]:
+            try:
+                os.killpg(process.pid, signum)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                if isinstance(limits, dict):
+                    limits["cleanup_status"] = "incomplete"
+        for pid in snapshot["pids"]:
+            if pid == process.pid:
+                continue
+            try:
+                os.kill(pid, signum)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                if isinstance(limits, dict):
+                    limits["cleanup_status"] = "incomplete"
+        if signum == signal.SIGKILL and process.poll() is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            except OSError:
+                if isinstance(limits, dict):
+                    limits["cleanup_status"] = "incomplete"
+        return snapshot
+
+    def _cleanup_managed_process_tree(self, immediate: bool) -> str:
+        process = self.process
+        limits = self.resource_limits.get("process_tree_rss")
+        if process is None:
+            return "not-managed"
+        timed_out = False
+        if immediate:
+            self._signal_managed_process_tree(signal.SIGKILL)
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    if isinstance(limits, dict):
+                        limits["cleanup_status"] = "incomplete"
+        else:
+            self._signal_managed_process_tree(signal.SIGTERM)
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=self.shutdown_timeout)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    self._signal_managed_process_tree(signal.SIGKILL)
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        if isinstance(limits, dict):
+                            limits["cleanup_status"] = "incomplete"
+        # The group leader may exit before descendants. Re-snapshot and kill
+        # observed survivors individually; never signal an unverified PGID.
+        cleanup_deadline = time.monotonic() + 0.5
+        while True:
+            snapshot, error = _process_tree_snapshot(
+                process.pid, self._tracked_process_start_times)
+            if error or snapshot is None:
+                if isinstance(limits, dict):
+                    limits["cleanup_status"] = "unverified"
+                    limits["cleanup_error"] = error or "process-tree-snapshot-unavailable"
+                break
+            survivors = [pid for pid in snapshot["live_pids"]
+                         if pid != process.pid]
+            if not survivors:
+                if (isinstance(limits, dict) and limits.get("cleanup_status")
+                        not in {"incomplete", "unverified"}):
+                    limits["cleanup_status"] = "complete"
+                break
+            self._signal_managed_process_tree(signal.SIGKILL)
+            if time.monotonic() >= cleanup_deadline:
+                if isinstance(limits, dict):
+                    limits["cleanup_status"] = "incomplete"
+                    limits["cleanup_remaining_count"] = len(survivors)
+                break
+            time.sleep(0.05)
+        if isinstance(limits, dict) and limits.get("cleanup_status") == "complete":
+            if limits.get("status") == "monitoring":
+                limits["status"] = "completed"
+        if isinstance(limits, dict) and limits.get("cleanup_status") in {
+                "incomplete", "unverified"}:
+            self.resource_limit_error = (
+                self.resource_limit_error or "process-tree-cleanup-incomplete")
+        if timed_out:
+            return "killed-after-timeout"
+        if isinstance(limits, dict) and limits.get("cleanup_status") != "complete":
+            return "cleanup-incomplete"
+        return "stopped"
+
+    def _stop_process_tree_monitor(self) -> None:
+        self._tree_monitor_stop.set()
+        thread = self._tree_monitor_thread
+        if (thread is not None and thread.is_alive()
+                and thread is not threading.current_thread()):
+            thread.join(timeout=POC_PROCESS_TABLE_TIMEOUT_SECONDS + 2)
+            if thread.is_alive():
+                limits = self.resource_limits.get("process_tree_rss")
+                if isinstance(limits, dict):
+                    limits["cleanup_status"] = "unverified"
+                    limits["cleanup_error"] = "process-tree-monitor-did-not-stop"
 
     def _probe(self) -> Dict[str, Any]:
         if self.health_url:
@@ -404,13 +684,17 @@ class ServiceLifecycle:
             # redirects, uses a proxy, or contacts a non-loopback host.
             parsed = urlparse(self.health_url)
             host = parsed.hostname or ""
+            connect_host = _loopback_connect_host(host)
+            if not connect_host:
+                return {"kind": "url", "ready": False,
+                        "status": "policy-denied"}
             port = parsed.port or (443 if parsed.scheme == "https" else 80)
             target = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
             connection = None
             phase = "connect"
             try:
                 connection = socket.create_connection(
-                    (host, port), timeout=self.health_timeout)
+                    (connect_host, port), timeout=self.health_timeout)
                 if parsed.scheme == "https":
                     phase = "tls"
                     connection = ssl.create_default_context().wrap_socket(
@@ -485,6 +769,12 @@ class ServiceLifecycle:
             return self._base_result("precondition-unavailable", False,
                                      health=existing,
                                      reason="service is not ready and start_command is absent")
+        if not self.allow_unconfined_start:
+            reason = "managed service start requires allow_unconfined_start=true; the process has no OS network/filesystem sandbox"
+            self.approval.request("policy_denied", "service lifecycle start: " + reason)
+            self._release_lock()
+            return self._base_result("policy-denied", False,
+                                     health=existing, reason=reason)
         error = self._validate_command(self.start_command)
         if error:
             self.approval.request("policy_denied", "service lifecycle start: " + error)
@@ -494,30 +784,75 @@ class ServiceLifecycle:
             self.approval.assert_allowed(
                 "service_lifecycle",
                 "start local service for target %s" % self.target)
+        except PermissionError as exc:
+            self._release_lock()
+            return self._base_result("policy-denied", False,
+                                     health=existing, reason=str(exc))
+        service_env = minimal_poc_env({
+            **self.env, "VULNGATE_SERVICE_LIFECYCLE": "true"})
+        try:
+            limited_command, self.resource_limits = (
+                prepare_posix_resource_limited_command(
+                    self._resolve_command_paths(self.start_command), service_env,
+                    cpu_seconds_per_process=3600, preflight_timeout=5))
+            self.resource_limits["process_tree_rss"] = {
+                "policy": POC_PROCESS_TREE_RSS_POLICY_VERSION,
+                "status": "pending",
+                "max_bytes": POC_MAX_PROCESS_TREE_RSS_BYTES,
+                "sample_interval_ms": int(
+                    POC_PROCESS_TREE_SAMPLE_INTERVAL_SECONDS * 1000),
+                "peak_rss_bytes": 0,
+                "peak_process_count": 0,
+                "sample_count": 0,
+                "tracked_process_count": 0,
+            }
+        except PermissionError as exc:
+            self.resource_limit_error = str(exc)[:300]
+            self.approval.request(
+                "policy_denied", "service resource limit preflight: " +
+                self.resource_limit_error)
+            self._release_lock()
+            return self._base_result("policy-denied", False,
+                                     health=existing,
+                                     reason="service resource limits unavailable")
+        try:
             self.process = subprocess.Popen(
-                self._resolve_command_paths(self.start_command),
+                limited_command,
                 cwd=str(self.working_dir),
-                env=minimal_poc_env({**self.env, "VULNGATE_SERVICE_LIFECYCLE": "true"}),
+                env=service_env,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 text=True, start_new_session=True)
+            self._managed_service_started = True
             self.registry_pid = int(self.process.pid)
             self._register_process(self.registry_pid)
-        except (OSError, PermissionError) as exc:
+            self._start_process_tree_monitor()
+        except OSError as exc:
             self._release_lock()
             return self._base_result("run-failed", False,
                                      reason=type(exc).__name__)
         deadline = time.monotonic() + self.startup_timeout
         last_health: Dict[str, Any] = {}
         while time.monotonic() < deadline:
+            tree_limits = self.resource_limits.get("process_tree_rss")
+            if (isinstance(tree_limits, dict) and tree_limits.get("status") in
+                    {"limit-exceeded", "monitor-error"}):
+                status = ("resource-limit-exceeded"
+                          if tree_limits.get("status") == "limit-exceeded"
+                          else "resource-monitor-error")
+                stop_info = self.stop()
+                return self._base_result(
+                    status, False, health=last_health,
+                    stop=stop_info, reason=self.resource_limit_error or status)
             if self.process.poll() is not None:
-                result = self._base_result("run-failed", False,
-                                           returncode=self.process.returncode,
-                                           health=last_health)
-                self._mark_process_stopped(self.registry_pid, "run-failed")
-                self.registry_pid = None
-                self.process = None
-                self._release_lock()
-                return result
+                returncode = self.process.returncode
+                stop_info = self.stop()
+                return self._base_result(
+                    "run-failed", False, returncode=returncode,
+                    health=last_health, stop=stop_info,
+                    reason=("managed service resource monitor: "
+                            + self.resource_limit_error)
+                    if self.resource_limit_error else
+                    "managed service exited before healthcheck")
             last_health = self._probe()
             if last_health.get("ready"):
                 return self._base_result("started-ready", True, health=last_health,
@@ -533,26 +868,18 @@ class ServiceLifecycle:
         stopped = False
         stop_status = "not-managed"
         managed_pid = self.registry_pid
-        if self.process is not None and self.process.poll() is None:
+        if self.process is not None:
             managed_pid = int(self.process.pid)
-            try:
-                self.approval.assert_allowed(
-                    "service_lifecycle",
-                    "stop local service for target %s" % self.target)
-                os.killpg(self.process.pid, signal.SIGTERM)
-                self.process.wait(timeout=self.shutdown_timeout)
-                stopped = True
-                stop_status = "stopped"
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(self.process.pid, signal.SIGKILL)
-                    self.process.wait(timeout=2)
-                    stopped = True
-                    stop_status = "killed-after-timeout"
-                except (OSError, ProcessLookupError, subprocess.TimeoutExpired):
-                    stop_status = "stop-timeout"
-            except (OSError, PermissionError) as exc:
-                stop_status = type(exc).__name__
+            self._stop_process_tree_monitor()
+            stop_status = self._cleanup_managed_process_tree(immediate=False)
+            tree_limits = self.resource_limits.get("process_tree_rss")
+            if isinstance(tree_limits, dict):
+                if tree_limits.get("status") == "limit-exceeded":
+                    stop_status = "resource-limit-exceeded"
+                elif tree_limits.get("status") == "monitor-error":
+                    stop_status = "resource-monitor-error"
+            stopped = (self.process.poll() is not None
+                       and stop_status not in {"cleanup-incomplete", "stop-timeout"})
         elif (self.stop_external and self.stop_command and self.configured
               and self.enabled):
             error = self._validate_command(self.stop_command)
@@ -573,14 +900,24 @@ class ServiceLifecycle:
                     stop_status = "stopped" if stopped else "run-failed"
                 except (OSError, PermissionError) as exc:
                     stop_status = type(exc).__name__
-        if self.process is not None and self.process.poll() is not None:
+        tree_limits = self.resource_limits.get("process_tree_rss")
+        still_active = (stop_status in {"cleanup-incomplete", "stop-timeout"}
+                        or (isinstance(tree_limits, dict)
+                            and tree_limits.get("cleanup_status") in {
+                                "incomplete", "unverified"}))
+        if (self.process is not None and self.process.poll() is not None
+                and not still_active):
             self.process = None
         self._mark_process_stopped(managed_pid, stop_status)
-        self.registry_pid = None
-        self._release_lock()
+        if not still_active:
+            self.registry_pid = None
+            self._release_lock()
         return {
             "status": stop_status,
             "stopped": stopped,
+            "process_tree_cleanup_status": (
+                tree_limits.get("cleanup_status", "")
+                if isinstance(tree_limits, dict) else ""),
             "process_registry_error": self.registry_error,
             "claim_status": CLAIM_STATUS,
         }

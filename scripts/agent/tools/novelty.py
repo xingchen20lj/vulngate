@@ -53,8 +53,36 @@ class UpstreamRef:
     def predates(self, discovery: str) -> bool:
         try:
             return date.fromisoformat(self.created_at[:10]) <= date.fromisoformat(discovery[:10])
-        except ValueError:
-            return True
+        except (TypeError, ValueError):
+            return False
+
+
+def upstream_ref_from_search_hit(repo: str, item: Dict[str, Any],
+                                 evidence_source: str = "GitHub search") -> Optional[UpstreamRef]:
+    """Normalize a GitHub issue/PR search hit without losing merged/date data."""
+    if not isinstance(item, dict):
+        return None
+    try:
+        number = int(item.get("number"))
+    except (TypeError, ValueError):
+        return None
+    if number <= 0:
+        return None
+    pr = item.get("pull_request") or {}
+    is_pr = isinstance(pr, dict) and bool(pr)
+    merged_at = pr.get("merged_at") if isinstance(pr, dict) else None
+    state = "merged" if merged_at else str(item.get("state") or "unknown").lower()
+    return UpstreamRef(
+        ref="#%d" % number,
+        kind="pull_request" if is_pr else "issue",
+        title=str(item.get("title") or "")[:300],
+        state=state,
+        created_at=str(item.get("created_at") or "")[:32],
+        url=str(item.get("html_url") or "")[:1000],
+        evidence_source=evidence_source,
+        merged_at=str(merged_at) if merged_at else None,
+        repo=repo,
+    )
 
 
 @dataclass

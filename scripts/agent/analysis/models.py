@@ -455,6 +455,7 @@ class CandidateCoverageRecord:
     entries: List[str] = field(default_factory=list)
     sinks: List[str] = field(default_factory=list)
     flows: List[str] = field(default_factory=list)
+    controls: List[str] = field(default_factory=list)
     files: List[str] = field(default_factory=list)
     categories: List[str] = field(default_factory=list)
     mechanisms: List[str] = field(default_factory=list)
@@ -468,6 +469,7 @@ class CandidateCoverageRecord:
             "entries": list(self.entries),
             "sinks": list(self.sinks),
             "flows": list(self.flows),
+            "controls": list(self.controls),
             "files": list(self.files),
             "categories": list(self.categories),
             "mechanisms": list(self.mechanisms),

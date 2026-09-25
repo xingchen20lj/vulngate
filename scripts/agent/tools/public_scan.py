@@ -38,6 +38,9 @@ from ..orchestrator.config import TargetConfig
 from .github_auth import resolve_github_token
 from .novelty import Disclosure
 
+
+NOVELTY_QUERY_POLICY_VERSION = "novelty-query-completeness-v1"
+
 UA = {"User-Agent": "vulngate-public-scan/1.0"}
 
 
@@ -212,10 +215,24 @@ def scan_all(cfg: TargetConfig, offline: bool = False,
     """Run all configured channels; returns disclosures + per-channel notes.
     Never raises: failed channels are recorded in `errors`."""
     ps = getattr(cfg, "public_scan", None) or {}
-    result: Dict[str, Any] = {"disclosures": [], "channels": {}, "errors": []}
+    result: Dict[str, Any] = {
+        "disclosures": [], "channels": {}, "channel_status": {}, "errors": [],
+        "query_failed": False,
+    }
     if offline:
+        configured = []
+        if (getattr(cfg, "public_scan", None) or {}).get("maven_package"):
+            configured.append("osv")
+        configured.extend("nvd:" + str(k) for k in
+                          (getattr(cfg, "public_scan", None) or {}).get("nvd_keywords", []))
+        if ((getattr(cfg, "public_scan", None) or {}).get("advisories_repo")
+                or getattr(cfg, "upstream_repo", "")):
+            configured.append("github_advisories")
+        result["channel_status"] = {name: "offline" for name in configured}
+        result["query_failed"] = True
         return result
     if not ps:
+        result["query_failed"] = True
         return result
     cache_dir = cache_dir or (Path.cwd() / "agent" / "regression" / "cache" / "api")
     pkg = ps.get("maven_package") or ""
@@ -224,23 +241,35 @@ def scan_all(cfg: TargetConfig, offline: bool = False,
             disc, note = scan_osv(pkg, ps.get("ecosystem", "Maven"), cache_dir)
             result["disclosures"] += disc
             result["channels"]["osv"] = note
+            result["channel_status"]["osv"] = (
+                "success-with-hits" if disc else "success-empty")
         except ScanError as exc:
             result["errors"].append(str(exc))
+            result["channel_status"]["osv"] = "failed"
     for kw in ps.get("nvd_keywords", []):
         try:
             disc, note = scan_nvd([kw], cache_dir)
             result["disclosures"] += disc
             result["channels"]["nvd:" + kw] = note
+            failed = " failed:" in note
+            result["channel_status"]["nvd:" + kw] = (
+                "failed" if failed else "success-with-hits" if disc else "success-empty")
+            if failed:
+                result["errors"].append(note)
         except ScanError as exc:
             result["errors"].append(str(exc))
+            result["channel_status"]["nvd:" + kw] = "failed"
     repo = ps.get("advisories_repo") or getattr(cfg, "upstream_repo", "") or ""
     if repo:
         try:
             disc, note = scan_github_advisories(repo, cache_dir=cache_dir)
             result["disclosures"] += disc
             result["channels"]["github_advisories"] = note
+            result["channel_status"]["github_advisories"] = (
+                "success-with-hits" if disc else "success-empty")
         except ScanError as exc:
             result["errors"].append(str(exc))
+            result["channel_status"]["github_advisories"] = "failed"
     # dedup by id, keep first
     seen = set()
     dedup = []
@@ -249,4 +278,8 @@ def scan_all(cfg: TargetConfig, offline: bool = False,
             seen.add(d.id)
             dedup.append(d)
     result["disclosures"] = dedup
+    result["query_failed"] = bool(
+        result["errors"] or not result["channel_status"]
+        or any(status in ("failed", "offline")
+               for status in result["channel_status"].values()))
     return result

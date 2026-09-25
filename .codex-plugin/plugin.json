@@ -1,14 +1,14 @@
 {
   "name": "vulngate",
-  "version": "1.2.0+codex.20260922065311",
+  "version": "1.2.0+codex.20260925221441",
   "description": "VulnGate \u2014 a Codex-native source-audit pipeline for ANY codebase: libraries (parsing/serialization), web frameworks (Spring/Struts), middleware/servers (Tomcat/Jetty), logging libraries (Log4j/Logback), expression engines, message/RPC stacks, and applications. Runs the S1\u2192S8 audit loop (attack-surface map \u2192 candidates \u2192 source audit \u2192 PoC matrix \u2192 novelty gate \u2192 CVSS \u2192 disclosure-ready report) with hard evidence gates (G0\u2013G5) driven by the host agent.\n\nAliases: @vulngate, @vg, \u6f0f\u6d1e\u5ba1\u8ba1, \u6e90\u7801\u5ba1\u8ba1, \u5ba1\u8ba1\u7ba1\u7ebf, vuln audit.\n\nCoverage-driven auditing: full source inventory, heuristic call graphs and flows, security control gaps, sibling differentials, candidate scheduling, and macOS/Electron/native application reconstruction.",
   "author": {
-    "name": "xingchen20lj",
-    "email": "71823107+xingchen20lj@users.noreply.github.com",
-    "url": "https://github.com/xingchen20lj"
+    "name": "Zer0Gate",
+    "email": "71823107+Zer0Gate@users.noreply.github.com",
+    "url": "https://github.com/Zer0Gate"
   },
-  "homepage": "https://github.com/xingchen20lj/vulngate",
-  "repository": "https://github.com/xingchen20lj/vulngate",
+  "homepage": "https://github.com/Zer0Gate/vulngate",
+  "repository": "https://github.com/Zer0Gate/vulngate",
   "license": "MIT",
   "keywords": [
     "security",
@@ -28,14 +28,14 @@
     "displayName": "VulnGate",
     "shortDescription": "\u8986\u76d6\u7387\u9a71\u52a8\u7684 Codex \u6e90\u7801\u5ba1\u8ba1\uff0c\u652f\u6301 macOS / Electron",
     "longDescription": "VulnGate \u4ee5\u539f\u751f\u63d2\u4ef6\u5f62\u5f0f\u628a S1\u2192S8 \u6e90\u7801\u5ba1\u8ba1\u6d41\u7a0b\u5d4c\u5165 Codex\uff0c\u9002\u7528\u4e8e\u4efb\u610f\u4ee3\u7801\u5e93\uff1a\u89e3\u6790/\u5e8f\u5217\u5316\u5e93\u3001Web \u6846\u67b6\uff08Spring/Struts\uff09\u3001\u4e2d\u95f4\u4ef6\uff08Tomcat/Jetty\uff09\u3001\u65e5\u5fd7\u5e93\uff08Log4j/Logback\uff09\u3001\u8868\u8fbe\u5f0f\u5f15\u64ce\u3001\u6d88\u606f/RPC \u6808\u4e0e\u5e94\u7528\u3002\u5bbf\u4e3b Agent \u8d1f\u8d23\u5019\u9009\u751f\u6210\u3001\u9759\u6001\u5ba1\u8ba1\u4e0e\u7ed3\u8bba\u5224\u5b9a\uff0c\u6346\u7ed1 CLI \u8d1f\u8d23\u77e9\u9635\u8dd1\u6d4b\u3001Novelty \u68c0\u7d22\u3001CVSS \u6821\u9a8c\u4e0e\u8d26\u672c\u843d\u76d8\u3002\u6bcf\u6761\u201c\u786e\u8ba4\u201d\u7ed3\u8bba\u90fd\u5fc5\u987b\u6709\u8fd0\u884c\u65f6 PoC \u8bc1\u636e\uff1b\u4e0a\u6e38\u516c\u5f00\u62ab\u9732\u547d\u4e2d\u5373\u964d\u7ea7\uff0c\u4e25\u7981\u58f0\u79f0 0day\u3002\n\nEnglish: VulnGate embeds the S1\u2192S8 source-audit pipeline natively in Codex for ANY codebase \u2014 libraries, web frameworks (Spring/Struts), middleware (Tomcat/Jetty), logging (Log4j/Logback), expression engines, message/RPC stacks, and applications. The host agent owns reasoning; the bundled CLI owns deterministic work (PoC matrix, novelty scan, CVSS consistency, ledger). Every \"confirmed\" finding requires runtime PoC evidence; upstream public disclosure degrades novelty; never claim 0day without it.\n\n\u65b0\u589e\u5b8c\u6574\u6e90\u7801\u8986\u76d6\u7387\u3001\u542f\u53d1\u5f0f\u8c03\u7528\u56fe\u3001\u5b89\u5168\u63a7\u5236\u7f3a\u53e3\u4e0e\u540c\u65cf\u5dee\u5206\u3001\u5019\u9009\u8c03\u5ea6\uff0c\u4ee5\u53ca macOS .app/.dmg/.pkg\u3001Mach-O\u3001Electron ASAR \u548c source map \u9002\u914d\u3002\u9759\u6001\u7ebf\u7d22\u4e0d\u66ff\u4ee3\u8fd0\u884c\u65f6\u8bc1\u636e\u3002",
-    "developerName": "xingchen20lj",
+    "developerName": "Zer0Gate",
     "category": "Engineering",
     "capabilities": [
       "Interactive",
       "Read",
       "Write"
     ],
-    "websiteURL": "https://github.com/xingchen20lj/vulngate",
+    "websiteURL": "https://github.com/Zer0Gate/vulngate",
     "defaultPrompt": [
       "\u5ba1\u8ba1\u8fd9\u4e2a\u4ee3\u7801\u5e93\uff0c\u6309\u8986\u76d6\u7387\u9a71\u52a8 S1\u2192S8 \u5168\u6d41\u7a0b",
       "\u5ba1\u8ba1\u8fd9\u4e2a macOS \u5e94\u7528\uff0c\u91cd\u5efa\u653b\u51fb\u9762\u5e76\u9a8c\u8bc1\u5019\u9009",

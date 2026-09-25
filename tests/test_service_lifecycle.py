@@ -11,7 +11,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from agent.orchestrator.config import TargetConfig  # noqa: E402
-from agent.tools.service_lifecycle import ServiceLifecycle  # noqa: E402
+from agent.tools.service_lifecycle import (  # noqa: E402
+    ServiceLifecycle,
+    _loopback_connect_host,
+)
 
 
 def _free_port():
@@ -48,6 +51,15 @@ def _nc_http_start_command(root, port):
 
 
 class ServiceLifecycleTests(unittest.TestCase):
+    def test_healthcheck_hosts_never_require_external_name_resolution(self):
+        self.assertEqual(_loopback_connect_host("localhost"), "127.0.0.1")
+        self.assertEqual(_loopback_connect_host("localhost.localdomain"),
+                         "127.0.0.1")
+        self.assertEqual(_loopback_connect_host("127.9.8.7"), "127.9.8.7")
+        self.assertEqual(_loopback_connect_host("::1"), "::1")
+        self.assertEqual(_loopback_connect_host("health.example.invalid"), "")
+        self.assertEqual(_loopback_connect_host("192.0.2.10"), "")
+
     def test_starts_healthchecks_and_kills_owned_process_group(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -56,6 +68,7 @@ class ServiceLifecycleTests(unittest.TestCase):
                 name="service-lab", discovery_date="2026-09-21",
                 runtime_lab={"service": {
                     "start_command": _nc_http_start_command(root, port),
+                    "allow_unconfined_start": True,
                     "healthcheck_url": "http://127.0.0.1:%d/" % port,
                     "startup_timeout": 5,
                     "poll_interval": 0.05,
@@ -82,6 +95,7 @@ class ServiceLifecycleTests(unittest.TestCase):
                 name="proxied-service", discovery_date="2026-09-21",
                 runtime_lab={"service": {
                     "start_command": _nc_http_start_command(root, port),
+                    "allow_unconfined_start": True,
                     "healthcheck_url": "http://127.0.0.1:%d/" % port,
                     "startup_timeout": 5,
                     "poll_interval": 0.05,
@@ -132,6 +146,29 @@ class ServiceLifecycleTests(unittest.TestCase):
             self.assertEqual(result["status"], "precondition-unavailable")
             self.assertFalse((root / "state" / "no-health" / "round-01" /
                               "S4" / "service-lifecycle.log").exists())
+
+    def test_managed_start_requires_explicit_unconfined_opt_in(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            port = _free_port()
+            cfg = TargetConfig(
+                name="unconfined-opt-in", discovery_date="2026-09-21",
+                runtime_lab={"service": {
+                    "start_command": _nc_http_start_command(root, port),
+                    "healthcheck_url": "http://127.0.0.1:%d/" % port,
+                    "startup_timeout": 1,
+                }},
+            )
+            lifecycle = ServiceLifecycle(root, "unconfined-opt-in", 1, cfg)
+            result = lifecycle.ensure_ready()
+            self.assertFalse(result["ready"])
+            self.assertEqual(result["status"], "policy-denied")
+            self.assertIn("allow_unconfined_start=true", result["reason"])
+            self.assertFalse(result["allow_unconfined_start"])
+            self.assertIsNone(lifecycle.process)
+            self.assertEqual(lifecycle.approval.decisions[-1]["operation"],
+                             "policy_denied")
+            self.assertEqual(lifecycle.approval.decisions[-1]["allowed"], False)
 
     def test_external_ready_service_is_not_stopped_implicitly(self):
         with tempfile.TemporaryDirectory() as td:

@@ -4,17 +4,13 @@
 
 本指南带您完成 VulnGate 的第一次运行。
 
-## 0. 让子 Agent 并行稳定生效（重要）
+## 0. 子 Agent 并行按需启用
 
-Codex 宿主默认 `multi_agent_mode=explicitRequestOnly`：只有"用户或技能明确要求"时
-才允许 spawn 子 Agent。技能内已写明强制要求，但最稳妥的开关是**在你的审计提示词里
-显式授权**，例如：
-
-> 审计过程中 S4/S5 必须使用 spawn 子 Agent 并行（每候选一个，最多同时 3 个），
-> 子 Agent 只回传原始证据；S4 开工前必须先跑 spawn 探针，探针失败才允许整轮
-> 降级宿主顺序执行并记录 degraded mode；只有 spawn 工具明确报错时才允许中途降级。
-
-加上这句后，模型不会再因系统层保守策略而跳过并行。
+并行是加速手段，不是每轮必做项。只有任务彼此独立、输出路径隔离，且预计节省时间
+大于探针、协调和复核成本时才 spawn；最多同时 3 个 worker。候选共享构建/测试环境、
+存在磁盘争用、时间预算不足或当前宿主没有可用的 spawn 工具时，按顺序执行，不要为了
+满足并行要求反复探针或重试。选择并行时先跑一次 spawn-probe，失败后记录实际错误并
+顺序降级。worker 只回原始证据，主 Agent 负责复核和结论。
 
 ## 1. 开发者自审计（先查依赖，再查代码）
 
@@ -33,7 +29,7 @@ python3 scripts/agent_cli.py deps --target ./my-project --out deps-report.md
 ## 2. 安装
 
 ```bash
-git clone https://github.com/xingchen20lj/vulngate.git
+git clone https://github.com/Zer0Gate/vulngate.git
 cd vulngate
 ./install.sh
 ```
@@ -87,9 +83,9 @@ Feature）——它决定了每一条发现的前置分级。
 （也可写 `java_bin`）。VulnGate 会用该 cell 的 `java` 和同一 JDK 的 `javac`，并在
 `cells.json` 记录实际路径与版本；找不到或版本不匹配时只记录前置不可用，不会假装用默认 JDK。
 
-普通 S4 PoC 还会生成有界重放/差分产物 `S4/runtime-lab.json`。如果某个 PoC
-有意不可重复，可在目标配置中设置 `runtime_lab.enabled=false`，或在候选上关闭；默认
-适配器会把稳定重放、版本 × SafeMode 差异和 harness 缺口与 G4/G5 结论分开保存。
+普通 S4 的重放/差分默认关闭，因为它会重复运行 PoC 并占用同一候选预算。确实需要稳定性
+或版本 × SafeMode 对照时，在目标配置中设置 `runtime_lab.enabled=true`；结果仍与
+G4/G5 结论分开保存。未提供 `runtime_lab` 配置或配置为空时，不会额外重放。
 
 有状态 Web/中间件 PoC 可以让 VulnGate 管理一个本地服务。命令必须是 argv 数组，工作目录
 必须在 workspace 内，并且必须提供回环健康检查；不要把 Token、Cookie 或 Password 放入配置：
@@ -99,6 +95,7 @@ Feature）——它决定了每一条发现的前置分级。
   "runtime_lab": {
     "service": {
       "start_command": ["python3", "-m", "http.server", "8080", "--bind", "127.0.0.1"],
+      "allow_unconfined_start": true,
       "healthcheck_url": "http://127.0.0.1:8080/",
       "startup_timeout": 20,
       "shutdown_timeout": 8
@@ -111,7 +108,7 @@ Feature）——它决定了每一条发现的前置分级。
 `S4/processes.json`。`S4/runtime-lab.json` 的 `configuration` 是脱敏快照，授权/租户/对象
 用例会生成稳定的 `authz_fixture_id`；服务未就绪只记录为
 `precondition-unavailable`，不会被解释成漏洞不存在。禁止使用 shell `-c`、远程命令或非回环
-健康地址。
+健康地址。托管服务没有 OS 网络/文件系统沙箱；启动前会预检并使用 POSIX CPU、单文件大小、文件描述符、UID 进程数和 core dump 限额，但不限制内存、文件读取范围或网络。只有明确接受该边界并设置 `allow_unconfined_start: true` 后才会启动。
 
 ## 5. 运行管线（自主模式）
 

@@ -11,6 +11,9 @@ Usage:
   agent_cli.py source-evidence --root <dir> --file <rel> [--line N|--class-header]
   agent_cli.py matrix --workspace <dir> --target <name> --round <N> [--manifest <json>]
                            [--authorized-staging --staging-host <host>]
+  agent_cli.py audit-budget start|status <target> --workspace <dir> --round <N>
+  agent_cli.py audit-exec <target> --workspace <dir> --root <source-root> \
+                           --round <N> [--cwd <relative-dir>] [--timeout <seconds>] -- <argv...>
   agent_cli.py novelty --query <json> [--fixtures <dir>] [--offline] [--cache <dir>]
   agent_cli.py novelty --evidence <json>
   agent_cli.py cvss --vector <CVSS:3.1/...> [--tier <tier>] [--implicit-default-on]
@@ -78,6 +81,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -104,6 +108,7 @@ from agent.tools.novelty import (  # noqa: E402
     Disclosure,
     NoveltyChecker,
     UpstreamRef,
+    upstream_ref_from_search_hit,
 )
 from agent.tools.github_auth import github_token_source  # noqa: E402
 from agent.tools import source_evidence as se  # noqa: E402
@@ -171,8 +176,14 @@ def cmd_source_map(args: argparse.Namespace) -> int:
 
 def cmd_source_evidence(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
-    path = root / args.file
-    if not path.exists():
+    path = (root / args.file).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        _out({"error": "file is outside the authorized root",
+              "file": args.file, "root": str(root)})
+        return 2
+    if not path.is_file():
         _out({"error": "file not found", "file": args.file, "root": str(root)})
         return 2
     if args.class_header:
@@ -200,7 +211,10 @@ def _matrix_cell(c: Dict[str, Any]) -> MatrixCell:
         concurrency=c.get("concurrency", 1),
         availability_probe=c.get("availability_probe", False),
         capability_contract=c.get("capability_contract", {}),
+        residual_contracts=list(c.get("residual_contracts", [])),
+        variant_context=dict(c.get("variant_context", {})),
         consistency_action=c.get("consistency_action", {}),
+        consistency_lane=str(c.get("consistency_lane", "")),
         required_runtime=str(c.get("required_runtime", c.get("requested_runtime", ""))),
         java_bin=str(c.get("java_bin", "")),
         java_home=str(c.get("java_home", "")),
@@ -231,6 +245,7 @@ def _shell_poc_spec(s: Dict[str, Any]) -> ShellPOCSpec:
         script=str(s["script"]),
         cells=[_matrix_cell(c) for c in s.get("cells", [])],
         env=dict(s.get("env", {})),
+        urls=dict(s.get("urls", {})),
         entry=str(s.get("entry", "")),
         input_shape=str(s.get("input_shape", "")),
         logic=str(s.get("logic", "")),
@@ -240,6 +255,38 @@ def _shell_poc_spec(s: Dict[str, Any]) -> ShellPOCSpec:
 
 def cmd_matrix(args: argparse.Namespace) -> int:
     workspace = Path(args.workspace).resolve()
+    from agent.analysis.audit_budget import (
+        budget_path as audit_budget_path,
+        load_round_budget,
+        round_budget_snapshot,
+    )
+    from agent.tools.build import S4ExecutionBudget
+
+    round_execution_budget = None
+    try:
+        deadline_path = audit_budget_path(workspace, args.target, args.round)
+    except ValueError as exc:
+        _out({"error": "invalid audit-round identity", "detail": str(exc)})
+        return 2
+    if deadline_path.exists():
+        try:
+            persisted_budget = load_round_budget(workspace, args.target, args.round)
+            deadline = round_budget_snapshot(persisted_budget)
+        except (OSError, ValueError, TypeError) as exc:
+            _out({"error": "invalid audit-round deadline; refusing matrix run",
+                  "detail": str(exc), "path": str(deadline_path)})
+            return 2
+        remaining = int(deadline["remaining_seconds"])
+        if deadline["expired"] or remaining < 1:
+            _out({"error": "audit-round deadline expired; refusing matrix run",
+                  "audit_budget": deadline})
+            return 3
+        # Direct host-native matrix runs share the round deadline and a
+        # 45-minute S4 envelope. The usual per-candidate limit remains 15m.
+        round_execution_budget = S4ExecutionBudget(
+            round_timeout_seconds=min(45 * 60, remaining),
+            candidate_timeout_seconds=min(15 * 60, remaining),
+        )
     staging_hosts = [str(h).strip().lower().rstrip(".") for h in (args.staging_host or []) if str(h).strip()]
     if args.authorized_staging and not staging_hosts:
         _out({"error": "--authorized-staging requires at least one --staging-host allowlist entry"})
@@ -260,19 +307,22 @@ def cmd_matrix(args: argparse.Namespace) -> int:
         specs = [_shell_poc_spec(s) for s in raw_specs]
         runner = ShellMatrixRunner(
             workspace, args.target, args.round,
-            authorized_staging=args.authorized_staging, staging_hosts=staging_hosts)
+            authorized_staging=args.authorized_staging, staging_hosts=staging_hosts,
+            execution_budget=round_execution_budget)
         results = runner.run_manifest(specs)
     else:
         specs = [_poc_spec(s) for s in raw_specs]
         jars = {v: [Path(p) for p in ps] for v, ps in manifest.get("jars", {}).items()}
         runner = JavaMatrixRunner(
             workspace, args.target, args.round,
-            authorized_staging=args.authorized_staging, staging_hosts=staging_hosts)
+            authorized_staging=args.authorized_staging, staging_hosts=staging_hosts,
+            execution_budget=round_execution_budget)
         results = runner.run_manifest(specs, jars)
     summary = {cid: summarize_candidate(cells) for cid, cells in results.items()}
     _out({"target": args.target, "round": args.round,
           "lang": args.lang, "candidates": summary,
-          "cells_written_to": str(runner.matrix_dir)})
+          "cells_written_to": str(runner.matrix_dir),
+          "s4_execution_budget": runner.execution_budget.snapshot()})
     return 0
 
 
@@ -307,6 +357,8 @@ def cmd_staging_exec(args: argparse.Namespace) -> int:
     _out({"host": args.host, "returncode": result.returncode,
           "stdout": result.stdout, "stderr": result.stderr,
           "duration_ms": result.duration_ms, "timed_out": result.timed_out,
+          "timeout_seconds": result.timeout_seconds,
+          "timeout_capped": result.timeout_capped,
           "evidence_role": "environment-preparation-only"})
     return result.returncode if result.returncode >= 0 else 2
 
@@ -333,7 +385,10 @@ def cmd_staging_copy(args: argparse.Namespace) -> int:
     _out({"host": args.host, "source": str(source), "destination": args.destination,
           "returncode": result.returncode, "stdout": result.stdout,
           "stderr": result.stderr, "duration_ms": result.duration_ms,
-          "timed_out": result.timed_out, "evidence_role": "environment-preparation-only"})
+          "timed_out": result.timed_out,
+          "timeout_seconds": result.timeout_seconds,
+          "timeout_capped": result.timeout_capped,
+          "evidence_role": "environment-preparation-only"})
     return result.returncode if result.returncode >= 0 else 2
 
 
@@ -385,10 +440,23 @@ def cmd_novelty(args: argparse.Namespace) -> int:
             refs.append(r)
         else:
             query_failed = True
-    for q in data.get("queries", []):
+    queries = list(data.get("queries", []))
+    if not repo or not queries and not data.get("issue_numbers") and not data.get("pr_numbers"):
+        query_failed = True
+    for q in queries:
         hits = checker.search(repo, q)
         if hits is None:
             query_failed = True
+            continue
+        for item in hits:
+            ref = upstream_ref_from_search_hit(
+                repo, item,
+                "offline fixture search" if args.offline else "live GitHub search")
+            if ref and ref.ref not in {existing.ref for existing in refs}:
+                refs.append(ref)
+    query_metadata = checker.query_metadata()
+    if query_metadata.get("attempts", 0) == 0 and not refs:
+        query_failed = True
     result = checker.evaluate(refs, [], data.get("discovery_date", "2026-01-01"),
                               increments_hint=data.get("increments"),
                               query_failed=query_failed)
@@ -408,7 +476,7 @@ def cmd_novelty(args: argparse.Namespace) -> int:
 def cmd_cvss(args: argparse.Namespace) -> int:
     try:
         score, severity = base_score(args.vector)
-    except KeyError as exc:
+    except (KeyError, TypeError, ValueError) as exc:
         _out({"error": "invalid CVSS vector: %s" % exc, "vector": args.vector})
         return 2
     payload: Dict[str, Any] = {
@@ -1324,6 +1392,434 @@ def cmd_research_budget(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_audit_budget(args: argparse.Namespace) -> int:
+    """Start or inspect an immutable host-native round deadline."""
+    from agent.analysis.audit_budget import (
+        DEFAULT_BUDGET_SECONDS,
+        budget_path,
+        load_round_budget,
+        round_budget_snapshot,
+        start_round_budget,
+    )
+    from agent.analysis.audit_guard import (
+        register_active_audit,
+        release_active_audit,
+    )
+
+    workspace = Path(args.workspace).resolve()
+    try:
+        source_root = None
+        if args.root:
+            source_root = Path(args.root).expanduser().resolve(
+                strict=args.action != "release")
+            if args.action != "release" and not source_root.is_dir():
+                raise ValueError("source root must be a directory")
+        if args.action == "start" and source_root is None:
+            raise ValueError("--root is required to register the active-audit shell guard")
+        if args.action == "release":
+            if source_root is None:
+                raise ValueError("--root is required to release the matching audit guard")
+            released = release_active_audit(
+                workspace, args.target, args.round, root=source_root)
+            payload = {
+                "target": args.target,
+                "round": args.round,
+                "source_root": str(source_root),
+                "guard_released": released,
+                "claim_status": "not-a-finding",
+            }
+            if args.json:
+                _out(payload)
+            else:
+                print("audit command guard: %s" % (
+                    "released" if released else "no active registration"))
+            return 0
+        if args.action == "start":
+            record = start_round_budget(
+                workspace, args.target, args.round,
+                args.budget_seconds or DEFAULT_BUDGET_SECONDS)
+        else:
+            record = load_round_budget(workspace, args.target, args.round)
+        payload = round_budget_snapshot(record)
+        payload["artifact"] = str(budget_path(
+            workspace, args.target, args.round).relative_to(workspace))
+        if source_root is not None:
+            if payload["expired"]:
+                payload["command_guard"] = "expired-blocked-until-release"
+            else:
+                register_active_audit(
+                    source_root, workspace, args.target, args.round,
+                    str(payload["deadline_at"]))
+                payload["command_guard"] = "registered"
+        else:
+            payload["command_guard"] = "root-not-specified"
+        if args.action == "start":
+            payload["start_result"] = record.get("start_result", "started")
+    except (OSError, ValueError, TypeError) as exc:
+        _out({"error": str(exc), "target": args.target, "round": args.round})
+        return 2
+
+    if args.json:
+        _out(payload)
+    else:
+        print("audit-round budget: %s" % payload["artifact"])
+        print("  elapsed=%ss remaining=%ss expired=%s" % (
+            payload["elapsed_seconds"], payload["remaining_seconds"],
+            payload["expired"]))
+        print("  command_guard=%s" % payload.get("command_guard", "unknown"))
+        if "start_result" in payload:
+            print("  start=%s" % payload["start_result"])
+    return 3 if payload["expired"] else 0
+
+
+def cmd_audit_exec(args: argparse.Namespace) -> int:
+    """Run one bounded host-side audit command under the active round deadline."""
+    import fcntl
+    import time
+    from datetime import datetime, timezone
+    from agent.analysis.audit_budget import (
+        load_round_budget,
+        round_budget_snapshot,
+    )
+    from agent.sandbox.approval import ApprovalGate
+    from agent.sandbox.runner import (
+        AUDIT_COMMAND_ENV_POLICY_VERSION,
+        MAX_COMMAND_WALL_TIMEOUT_SECONDS,
+        CommandRunner,
+    )
+
+    workspace = Path(args.workspace).resolve()
+    try:
+        source_root = Path(args.root).resolve(strict=True)
+        if not source_root.is_dir():
+            raise ValueError("source root must be a directory")
+        command = list(args.command or [])
+        if command and command[0] == "--":
+            command = command[1:]
+        if not command:
+            raise ValueError("audit-exec requires a command after --")
+        shell_names = {"sh", "bash", "zsh", "fish", "csh", "tcsh"}
+        executable_name = Path(command[0]).name.lower()
+        inspected_command = command
+        git_subcommand = ""
+        # `env bash -c ...` is still a shell wrapper. Unwrap the common env
+        # forms so the simple bypass does not evade the command contract.
+        if executable_name == "env":
+            index = 1
+            while index < len(command):
+                token = command[index]
+                if token == "--":
+                    index += 1
+                    break
+                if token in {"-u", "--unset", "-C", "--chdir"}:
+                    index += 2
+                    continue
+                if token in {"-S", "--split-string"}:
+                    if index + 1 >= len(command):
+                        break
+                    try:
+                        inspected_command = (shlex.split(command[index + 1])
+                                             + command[index + 2:])
+                    except ValueError:
+                        inspected_command = []
+                    break
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    index += 1
+                    continue
+                if token.startswith("--split-string="):
+                    try:
+                        inspected_command = (
+                            shlex.split(token.split("=", 1)[1])
+                            + command[index + 1:])
+                    except ValueError:
+                        inspected_command = []
+                    break
+                if token.startswith("-") or re.fullmatch(
+                        r"[A-Za-z_][A-Za-z0-9_]*=.*", token):
+                    index += 1
+                    continue
+                break
+            else:
+                index = len(command)
+            if inspected_command is command:
+                inspected_command = command[index:]
+            executable_name = (Path(inspected_command[0]).name.lower()
+                               if inspected_command else "")
+        if (executable_name in shell_names and any(
+                token.startswith("-") and "c" in token[1:]
+                or token == "--command" or token.startswith("--command=")
+                for token in inspected_command[1:])):
+            raise ValueError("audit-exec rejects shell -c commands; pass argv directly")
+        network_tools = {
+            "curl", "wget", "nc", "ncat", "socat", "ssh", "scp", "sftp",
+            "rsync", "telnet", "rlogin", "ftp", "mosh",
+        }
+        if executable_name in network_tools:
+            raise ValueError(
+                "audit-exec is for local audit commands; use the approved network adapter")
+        if executable_name == "git":
+            git_index = 1
+            while git_index < len(inspected_command):
+                token = inspected_command[git_index]
+                if token in {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}:
+                    git_index += 2
+                    continue
+                if token.startswith("-"):
+                    git_index += 1
+                    continue
+                git_subcommand = token.lower()
+                break
+            if git_subcommand in {
+                    "clone", "fetch", "pull", "push", "remote", "submodule",
+                    "ls-remote", "fetch-pack", "send-pack", "receive-pack",
+                    "upload-pack"}:
+                raise ValueError(
+                    "audit-exec blocks Git remote operations; use approved source/network workflows")
+        if isinstance(args.timeout, bool) or int(args.timeout) < 1:
+            raise ValueError("timeout must be a positive number of seconds")
+        if not 1000 <= int(args.max_output_chars) <= 200_000:
+            raise ValueError("max-output-chars must be between 1000 and 200000")
+        retry_reason = str(args.retry_reason or "").strip()[:400]
+
+        env_extra: Dict[str, str] = {}
+        for assignment in args.env or []:
+            key, separator, value = str(assignment).partition("=")
+            if (not separator or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
+                    or any(secret_word in key.upper() for secret_word in
+                           ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH",
+                            "PROXY", "API_KEY", "ACCESS_KEY"))):
+                raise ValueError("--env requires a non-secret KEY=VALUE assignment")
+            env_extra[key] = value
+
+        if args.cwd:
+            requested_cwd = Path(args.cwd)
+            cwd = (requested_cwd if requested_cwd.is_absolute()
+                   else source_root / requested_cwd).resolve(strict=True)
+        else:
+            cwd = source_root
+        if not cwd.is_dir() or not (
+                str(cwd) == str(source_root)
+                or str(cwd).startswith(str(source_root) + os.sep)):
+            raise ValueError("cwd must be a directory under --root")
+
+        command_digest = hashlib.sha256(json.dumps(
+            command, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")).hexdigest()
+        cwd_relative = ("." if cwd == source_root else
+                        cwd.relative_to(source_root).as_posix())
+        run_log = (workspace / "state" / args.target
+                   / ("round-%02d" % args.round) / "S0"
+                   / "host-command-runs.jsonl")
+
+        def write_run_record(record: Dict[str, Any], check_duplicate: bool = False
+                             ) -> Optional[Dict[str, Any]]:
+            run_log.parent.mkdir(parents=True, exist_ok=True)
+            with run_log.open("a+b") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                prior_rows = []
+                handle.seek(0, os.SEEK_END)
+                log_size = handle.tell()
+                tail_start = max(0, log_size - 16 * 1024 * 1024)
+                handle.seek(tail_start)
+                tail = handle.read()
+                if tail_start:
+                    tail = tail.partition(b"\n")[2]
+                for line in tail.splitlines()[-4096:]:
+                    try:
+                        row = json.loads(line.decode("utf-8", "replace"))
+                    except (TypeError, ValueError):
+                        continue
+                    if isinstance(row, dict):
+                        prior_rows.append(row)
+                if check_duplicate:
+                    for previous in reversed(prior_rows):
+                        if (previous.get("source_root") == str(source_root)
+                                and previous.get("cwd") == cwd_relative
+                                and previous.get("command_digest") == command_digest
+                                and previous.get("status") in {
+                                    "running", "timed-out", "cleanup-incomplete",
+                                    "command-failed", "command-error"}):
+                            if not retry_reason:
+                                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                                return previous
+                            break
+                handle.seek(0, os.SEEK_END)
+                handle.write((json.dumps(
+                    record, ensure_ascii=False, separators=(",", ":"))
+                    + "\n").encode("utf-8"))
+                handle.flush()
+                os.fsync(handle.fileno())
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            return None
+
+        budget_record = load_round_budget(workspace, args.target, args.round)
+        budget_before = round_budget_snapshot(budget_record)
+        remaining = float(budget_before["remaining_seconds"])
+        if budget_before["expired"] or remaining < 1.0:
+            _out({"error": "audit round deadline expired; command not started",
+                  "audit_budget": budget_before,
+                  "claim_status": "not-a-finding"})
+            return 3
+
+        requested_timeout = int(args.timeout)
+        inspection_executables = {
+            "rg", "grep", "egrep", "fgrep", "ack", "ag", "find", "fd",
+            "du",
+        }
+        bounded_git_inspections = {"grep", "status", "diff", "ls-files"}
+        inline_code_flags = {
+            "perl": {"-e", "-p", "-n"},
+            "ruby": {"-e"},
+            "node": {"-e", "--eval", "-p", "--print", "-"},
+            "osascript": {"-e"},
+        }
+        python_interpreter = bool(re.fullmatch(
+            r"(?:python|pypy)(?:\d+(?:\.\d+)*)?", executable_name))
+        inline_flags = inline_code_flags.get(executable_name, set())
+        inline_code_command = any(
+            (python_interpreter and (token in {"-", "-c", "--command"}
+             or token.startswith("-") and "c" in token[1:]))
+            or token in inline_flags
+            for token in inspected_command[1:])
+        is_bounded_inspection = (
+            executable_name in inspection_executables
+            or (executable_name == "git"
+                and git_subcommand in bounded_git_inspections)
+            or inline_code_command)
+        inspection_timeout_cap = 120
+        command_timeout_cap = min(
+            MAX_COMMAND_WALL_TIMEOUT_SECONDS,
+            inspection_timeout_cap if is_bounded_inspection
+            else MAX_COMMAND_WALL_TIMEOUT_SECONDS)
+        timeout_cap_reason = (
+            "inline-code" if inline_code_command else
+            "recursive-search-or-inspection" if executable_name in inspection_executables else
+            "git-metadata-inspection" if executable_name == "git"
+            and git_subcommand in bounded_git_inspections else "")
+        timeout_policy = (
+            "audit-host-command-timeout-v3-inspection-120s"
+            if is_bounded_inspection else "audit-host-command-timeout-v1")
+        effective_timeout = min(
+            requested_timeout, command_timeout_cap, max(1, int(remaining)))
+        attempt_id = secrets.token_hex(8)
+        executable = Path(command[0]).name
+        started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        initial_record = {
+            "schema_version": "audit-host-command-v1",
+            "attempt_id": attempt_id,
+            "target": args.target,
+            "round": args.round,
+            "source_root": str(source_root),
+            "cwd": cwd_relative,
+            "command_executable": executable,
+            "command_digest": command_digest,
+            "status": "running",
+            "started_at": started_at,
+            "requested_timeout_seconds": requested_timeout,
+            "applied_timeout_seconds": effective_timeout,
+            "timeout_policy": timeout_policy,
+            "timeout_cap_seconds": command_timeout_cap,
+            "timeout_cap_reason": timeout_cap_reason,
+            "retry_reason": retry_reason,
+            "claim_status": "not-a-finding",
+        }
+        duplicate = write_run_record(initial_record, check_duplicate=True)
+        if duplicate:
+            _out({
+                "error": "same command previously timed out, failed, or remained running; inspect its process/output, then use --retry-reason only if the scope or environment changed",
+                "previous_attempt": duplicate,
+                "command_digest": command_digest,
+                "claim_status": "not-a-finding",
+            })
+            return 2
+
+        approval_path = (workspace / "state" / args.target
+                         / ("round-%02d" % args.round) / "approval-log.jsonl")
+        runner = CommandRunner(
+            source_root,
+            approval=ApprovalGate(log_path=approval_path),
+            default_timeout=effective_timeout,
+            max_output_chars=int(args.max_output_chars))
+        command_started = time.monotonic()
+        try:
+            result = runner.run(
+                command, cwd=cwd, timeout=effective_timeout,
+                env_extra=env_extra, audit_command_env=True)
+        except Exception as exc:
+            write_run_record({
+                **initial_record,
+                "status": "command-error",
+                "finished_at": datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"),
+                "duration_ms": int((time.monotonic() - command_started) * 1000),
+                "error_type": type(exc).__name__,
+                "error": str(exc)[:300],
+            })
+            raise
+        budget_after = round_budget_snapshot(budget_record)
+        cleanup_status = str(
+            (result.process_tree_cleanup or {}).get("status") or "unknown")
+        run_status = (
+            "timed-out" if result.timed_out else
+            "cleanup-incomplete" if cleanup_status in {"incomplete", "unverified"} else
+            "completed" if result.returncode == 0 else "command-failed")
+        write_run_record({
+            **initial_record,
+            "status": run_status,
+            "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "duration_ms": result.duration_ms,
+            "returncode": result.returncode,
+            "timed_out": result.timed_out,
+            "process_tree_cleanup": result.process_tree_cleanup,
+            "stdout_chars": len(result.stdout),
+            "stdout_sha256": hashlib.sha256(
+                result.stdout.encode("utf-8", "replace")).hexdigest(),
+            "stderr_chars": len(result.stderr),
+            "stderr_sha256": hashlib.sha256(
+                result.stderr.encode("utf-8", "replace")).hexdigest(),
+        })
+        _out({
+            "attempt_id": attempt_id,
+            "run_log": str(run_log.relative_to(workspace)),
+            "target": args.target,
+            "round": args.round,
+            "source_root": str(source_root),
+            "cwd": cwd_relative,
+            "command_executable": Path(command[0]).name,
+            "command_digest": command_digest,
+            "returncode": result.returncode,
+            "timed_out": result.timed_out,
+            "duration_ms": result.duration_ms,
+            "requested_timeout_seconds": requested_timeout,
+            "applied_timeout_seconds": result.timeout_seconds,
+            "timeout_policy": timeout_policy,
+            "timeout_cap_seconds": command_timeout_cap,
+            "timeout_cap_reason": timeout_cap_reason,
+            "timeout_capped": (requested_timeout > effective_timeout
+                               or result.timeout_capped),
+            "audit_budget_before": budget_before,
+            "audit_budget_after": budget_after,
+            "environment_policy": AUDIT_COMMAND_ENV_POLICY_VERSION,
+            "explicit_env_keys": sorted(env_extra),
+            "process_tree_cleanup": result.process_tree_cleanup,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "network_isolation": "not-applied-to-host-audit-commands",
+            "filesystem_isolation": "cwd-checked-only; no OS sandbox",
+            "evidence_role": "host-command-output-not-finding",
+            "claim_status": "not-a-finding",
+        })
+        if result.timed_out:
+            return 124
+        if cleanup_status in {"incomplete", "unverified"}:
+            return 2
+        return result.returncode if result.returncode >= 0 else 2
+    except (OSError, PermissionError, ValueError, TypeError) as exc:
+        _out({"error": str(exc), "target": args.target,
+              "round": args.round, "claim_status": "not-a-finding"})
+        return 2
+
+
 def cmd_coverage(args: argparse.Namespace) -> int:
     """Security audit coverage report (spec §16).
 
@@ -1336,11 +1832,14 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     from agent.analysis.inventory import (CoverageStore, build_inventory,
                                           coverage_scope_status,
                                           persist_inventory)
+    from agent.analysis.languages import SourceFilter
 
     workspace = Path(args.workspace).resolve()
     target = args.target
     store = CoverageStore(workspace, target)
     payload: Dict[str, Any] = {"target": target, "workspace": str(workspace)}
+    scan_filter = SourceFilter(scan_timeout_seconds=int(
+        getattr(args, "scan_timeout_seconds", 600) or 0))
 
     missing_indices = [
         name for name in (
@@ -1351,7 +1850,11 @@ def cmd_coverage(args: argparse.Namespace) -> int:
             "semantic-python-binding-evidence", "evidence-provenance",
         ) if not store.path(name).exists()
     ]
-    need_build = args.rebuild or bool(missing_indices)
+    build_status = store.read("coverage-build-status") or {}
+    build_incomplete = (isinstance(build_status, dict)
+                        and build_status.get("status") in {
+                            "running", "incomplete", "failed"})
+    need_build = args.rebuild or bool(missing_indices) or build_incomplete
 
     # A caller that supplies a source root, source dir, or target type is
     # asking for a particular audit universe.  Never silently render a prior
@@ -1373,7 +1876,7 @@ def cmd_coverage(args: argparse.Namespace) -> int:
             return 2
         scope_check = coverage_scope_status(
             store, root, list(args.source_dir or []) or None,
-            target_type=args.target_type)
+            source_filter=scan_filter, target_type=args.target_type)
         payload["scope_check"] = {
             "status": scope_check["status"],
             "usable": scope_check["usable"],
@@ -1391,9 +1894,34 @@ def cmd_coverage(args: argparse.Namespace) -> int:
                           "which writes state/<target>/coverage/"})
             return 2
         source_dirs = list(args.source_dir or [])
-        result = build_inventory(root, source_dirs or None, target=target,
-                                 target_type=args.target_type)
+        def report_progress(progress: Dict[str, Any]) -> None:
+            print("[coverage] %.1fs: %d source files, %d files seen, %d dirs; %s" % (
+                progress.get("elapsed_seconds", 0), progress.get("source_files", 0),
+                progress.get("files_seen", 0), progress.get("directories_seen", 0),
+                progress.get("current_path", "")), file=sys.stderr, flush=True)
+
+        store.write("coverage-build-status", {
+            "status": "running", "timeout_seconds": scan_filter.scan_timeout_seconds,
+            "source_dirs": source_dirs or ["."],
+        })
+        try:
+            result = build_inventory(root, source_dirs or None, target=target,
+                                     target_type=args.target_type,
+                                     source_filter=scan_filter,
+                                     progress_callback=report_progress)
+        except Exception as exc:
+            from agent.analysis.languages import SourceScanTimeout
+            store.write("coverage-build-status", {
+                "status": "incomplete" if isinstance(exc, SourceScanTimeout) else "failed",
+                "error": str(exc),
+                "progress": getattr(exc, "progress", {}),
+            })
+            raise
         persist_inventory(store, result, target_type=args.target_type)
+        store.write("coverage-build-status", {
+            "status": "complete", "scope_id": result.scope.get("scope_id", ""),
+            "source_files": len(result.files), "elapsed_ms": result.elapsed_ms,
+        })
         payload["rebuilt"] = {
             "root": str(root), "source_dirs": source_dirs,
             "counts": result.counts(), "missing_indices": missing_indices,
@@ -1605,7 +2133,7 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     return 0
 
 
-def _load_candidate_pool(args: argparse.Namespace) -> "tuple[List[Dict[str, Any]], int, str]":
+def _load_candidate_pool(args: argparse.Namespace) -> "tuple[List[Dict[str, Any]], int, str, List[str]]":
     """Read the candidate pool for ``schedule`` from a file or a target config.
 
     Accepts the three shapes the pipeline already emits -- a bare list, a
@@ -1618,26 +2146,28 @@ def _load_candidate_pool(args: argparse.Namespace) -> "tuple[List[Dict[str, Any]
     if args.candidates:
         path = Path(args.candidates)
         if not path.exists():
-            return [], 0, "candidate file not found: %s" % path
+            return [], 0, "candidate file not found: %s" % path, []
         try:
             data = _json.loads(path.read_text(encoding="utf-8"))
         except ValueError as exc:
-            return [], 0, "candidate file is not JSON: %s" % exc
+            return [], 0, "candidate file is not JSON: %s" % exc, []
         if isinstance(data, dict):
             data = data.get("candidates") or data.get("matrix") or []
         if not isinstance(data, list):
-            return [], 0, "candidate file must hold a list or {\"candidates\": [...]}"
-        return [c for c in data if isinstance(c, dict)], 0, ""
+            return [], 0, "candidate file must hold a list or {\"candidates\": [...]}", []
+        return [c for c in data if isinstance(c, dict)], 0, "", []
 
     if args.config:
         from agent.orchestrator.config import TargetConfig
+        from agent.analysis.research_agenda import normalize_candidate_ids
         path = Path(args.config)
         if not path.exists():
-            return [], 0, "config not found: %s" % path
+            return [], 0, "config not found: %s" % path, []
         cfg = TargetConfig.load(path)
-        return list(cfg.candidates), int(cfg.max_candidates or 0), ""
+        return (list(cfg.candidates), int(cfg.max_candidates or 0), "",
+                normalize_candidate_ids(cfg.priority_candidate_ids))
 
-    return [], 0, "no candidate pool: pass --candidates <file> or --config <file>"
+    return [], 0, "no candidate pool: pass --candidates <file> or --config <file>", []
 
 
 def cmd_schedule(args: argparse.Namespace) -> int:
@@ -1655,7 +2185,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
 
     workspace = Path(args.workspace).resolve()
     store = CoverageStore(workspace, args.target)
-    pool, config_slots, error = _load_candidate_pool(args)
+    pool, config_slots, error, config_priority_ids = _load_candidate_pool(args)
     if error:
         _out({"error": error})
         return 2
@@ -1671,8 +2201,22 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         slots = sched.DEFAULT_SLOTS
     if args.limit_pool:
         pool = pool[:args.limit_pool]
+    from agent.analysis.research_agenda import (
+        load_research_agenda, normalize_candidate_ids,
+        selected_candidate_ids,
+    )
+    agenda_priority_ids = selected_candidate_ids(
+        load_research_agenda(workspace, args.target),
+        current_round=args.round)
+    priority_ids = normalize_candidate_ids(
+        list(getattr(args, "priority_candidate", []) or [])
+        + config_priority_ids + agenda_priority_ids)
+    explicit_priority_ids = normalize_candidate_ids(
+        list(getattr(args, "priority_candidate", []) or [])
+        + config_priority_ids)
     active_pool, candidate_intake = sched.bounded_candidate_intake(
-        pool, slots=slots, round_no=args.round)
+        pool, slots=slots, round_no=args.round,
+        priority_ids=priority_ids)
 
     benchmark_feedback = {}
     if args.benchmark_result:
@@ -1689,7 +2233,8 @@ def cmd_schedule(args: argparse.Namespace) -> int:
 
     selected, plan, note = sched.round_selection(
         workspace, args.target, active_pool, slots, round_no=args.round,
-        refresh=not args.no_refresh, benchmark_feedback=benchmark_feedback)
+        refresh=not args.no_refresh, priority_ids=explicit_priority_ids,
+        benchmark_feedback=benchmark_feedback)
     if plan is None:
         _out({"error": note, "target": args.target,
               "hint": "run S1 or `agent_cli coverage --rebuild` first"})
@@ -1784,9 +2329,12 @@ def _ensure_coverage_analysis(args: argparse.Namespace,
     from agent.analysis.inventory import (CoverageStore, build_inventory,
                                           coverage_scope_status,
                                           persist_inventory)
+    from agent.analysis.languages import SourceFilter
 
     workspace = Path(args.workspace).resolve()
     store = CoverageStore(workspace, args.target)
+    scan_filter = SourceFilter(scan_timeout_seconds=int(
+        getattr(args, "scan_timeout_seconds", 600) or 0))
     missing = [name for name in required if not store.path(name).exists()]
     scope_requested = bool(getattr(args, "root", None)
                            or getattr(args, "source_dir", [])
@@ -1804,9 +2352,15 @@ def _ensure_coverage_analysis(args: argparse.Namespace,
             raise FileNotFoundError(root)
         scope_check = coverage_scope_status(
             store, root, list(getattr(args, "source_dir", []) or []) or None,
+            source_filter=scan_filter,
             target_type=getattr(args, "target_type", None))
 
+    build_status = store.read("coverage-build-status") or {}
+    build_incomplete = (isinstance(build_status, dict)
+                        and build_status.get("status") in {
+                            "running", "incomplete", "failed"})
     needs_rebuild = (getattr(args, "rebuild", False) or bool(missing)
+                     or build_incomplete
                      or (scope_check is not None and not scope_check["usable"]))
     if not needs_rebuild:
         return workspace, store, None, ""
@@ -1823,10 +2377,34 @@ def _ensure_coverage_analysis(args: argparse.Namespace,
             note = ("fix history: %d record(s) from the newest S1 artifact"
                     % len(fix_history))
     source_dirs = list(getattr(args, "source_dir", []) or [])
-    result = build_inventory(root, source_dirs or None, target=args.target,
-                             target_type=getattr(args, "target_type", None),
-                             fix_history=fix_history)
+    def report_progress(progress: Dict[str, Any]) -> None:
+        print("[coverage] %.1fs: %d source files, %d files seen, %d dirs; %s" % (
+            progress.get("elapsed_seconds", 0), progress.get("source_files", 0),
+            progress.get("files_seen", 0), progress.get("directories_seen", 0),
+            progress.get("current_path", "")), file=sys.stderr, flush=True)
+
+    store.write("coverage-build-status", {
+        "status": "running", "timeout_seconds": scan_filter.scan_timeout_seconds,
+        "source_dirs": source_dirs or ["."],
+    })
+    try:
+        result = build_inventory(root, source_dirs or None, target=args.target,
+                                 target_type=getattr(args, "target_type", None),
+                                 fix_history=fix_history,
+                                 source_filter=scan_filter,
+                                 progress_callback=report_progress)
+    except Exception as exc:
+        from agent.analysis.languages import SourceScanTimeout
+        store.write("coverage-build-status", {
+            "status": "incomplete" if isinstance(exc, SourceScanTimeout) else "failed",
+            "error": str(exc), "progress": getattr(exc, "progress", {}),
+        })
+        raise
     persist_inventory(store, result, target_type=getattr(args, "target_type", None))
+    store.write("coverage-build-status", {
+        "status": "complete", "scope_id": result.scope.get("scope_id", ""),
+        "source_files": len(result.files), "elapsed_ms": result.elapsed_ms,
+    })
     rebuilt = {"root": str(root), "source_dirs": source_dirs,
                "counts": result.counts(), "missing_indices": missing,
                "reason": ("explicit-rebuild" if getattr(args, "rebuild", False) else
@@ -2692,9 +3270,38 @@ def cmd_parallel_receipt(args: argparse.Namespace) -> int:
         and len(challenge.get("token")) >= 12
         and challenge.get("expected_artifact") == expected_artifact)
 
+    receipt = store.read_artifact("S4", receipt_name)
+    receipt = receipt if isinstance(receipt, dict) else {}
+    receipt_matches = bool(
+        receipt.get("schema_version") == "parallel-receipt-v1"
+        and receipt.get("candidate_id") == candidate
+        and receipt.get("token") == challenge.get("token"))
+
+    if getattr(args, "inspect", False):
+        if not receipt_matches:
+            _out({"candidate_id": candidate, "status": "missing",
+                  "progress_count": 0, "last_progress": None,
+                  "artifact_count": 0, "claim_status": "not-a-finding"})
+            return 0
+        events = receipt.get("events") if isinstance(receipt.get("events"), list) else []
+        last_progress = next((event for event in reversed(events)
+                              if isinstance(event, dict)
+                              and event.get("kind") == "progress"), None)
+        artifacts = receipt.get("artifacts") if isinstance(
+            receipt.get("artifacts"), list) else []
+        _out({
+            "candidate_id": candidate,
+            "status": receipt.get("status", "unknown"),
+            "started_at": receipt.get("started_at"),
+            "updated_at": receipt.get("updated_at"),
+            "progress_count": int(receipt.get("progress_count") or 0),
+            "last_progress": last_progress,
+            "artifact_count": len(artifacts),
+            "claim_status": "not-a-finding",
+        })
+        return 0
+
     if getattr(args, "verify", False):
-        receipt = store.read_artifact("S4", receipt_name)
-        receipt = receipt if isinstance(receipt, dict) else {}
         artifacts = receipt.get("artifacts") if isinstance(
             receipt.get("artifacts"), list) else []
         valid_artifacts = []
@@ -2727,8 +3334,8 @@ def cmd_parallel_receipt(args: argparse.Namespace) -> int:
         return 0 if verified else 2
 
     status = str(getattr(args, "status", "") or "").lower()
-    if status not in {"received", "completed", "partial"}:
-        _out({"error": "--status received|completed|partial is required unless --prepare/--verify"})
+    if status not in {"received", "progress", "completed", "partial"}:
+        _out({"error": "--status received|progress|completed|partial is required unless --prepare/--verify"})
         return 2
     supplied_token = str(getattr(args, "token", "") or "")
     artifact_rows = []
@@ -2736,29 +3343,67 @@ def cmd_parallel_receipt(args: argparse.Namespace) -> int:
         checked = _parallel_artifact(store, candidate, value)
         if checked and checked not in artifact_rows:
             artifact_rows.append(checked)
-    expected_present = any(row["path"] == expected_artifact
-                           for row in artifact_rows)
     if not challenge_valid or supplied_token != challenge.get("token"):
         _out({"error": "receipt challenge missing or token mismatch",
               "candidate_id": candidate})
         return 2
+    prior_artifacts = []
+    if receipt_matches:
+        for item in (receipt.get("artifacts") or [])[:8]:
+            if not isinstance(item, dict):
+                continue
+            checked = _parallel_artifact(store, candidate, item.get("path"))
+            if checked and checked == {key: item.get(key) for key in checked}:
+                prior_artifacts.append(checked)
+    all_artifacts = list(prior_artifacts)
+    for row in artifact_rows:
+        if row not in all_artifacts:
+            all_artifacts.append(row)
+    all_artifacts = all_artifacts[:8]
+    expected_present = any(row["path"] == expected_artifact
+                           for row in all_artifacts)
+    if status == "progress":
+        step = " ".join(str(getattr(args, "progress_step", "") or "").split())
+        step = "".join(ch for ch in step if ch.isprintable())[:120]
+        if not step:
+            _out({"error": "--status progress requires a concise --progress-step",
+                  "candidate_id": candidate, "claim_status": "not-a-finding"})
+            return 2
+    else:
+        step = {"received": "task-accepted", "partial": "partial-result",
+                "completed": "matrix-complete"}[status]
     if status == "completed" and not expected_present:
         _out({"error": "completed receipt requires %s" % expected_artifact,
               "candidate_id": candidate, "claim_status": "not-a-finding"})
         return 2
+    now = datetime.now().isoformat(timespec="seconds")
+    events = list(receipt.get("events") or []) if receipt_matches else []
+    events = [event for event in events if isinstance(event, dict)][-15:]
+    event = {"kind": "progress" if status == "progress" else status,
+             "step": step, "recorded_at": now}
+    if artifact_rows:
+        event["artifacts"] = [row["path"] for row in artifact_rows]
+    events.append(event)
+    progress_count = int(receipt.get("progress_count") or 0) if receipt_matches else 0
+    if status == "progress":
+        progress_count += 1
     payload = {
         "schema_version": "parallel-receipt-v1",
         "stage": "S4",
         "candidate_id": candidate,
         "token": supplied_token,
-        "status": status,
-        "artifacts": artifact_rows,
-        "recorded_at": datetime.now().isoformat(timespec="seconds"),
+        "status": ("running" if status in {"received", "progress"} else status),
+        "artifacts": all_artifacts,
+        "started_at": receipt.get("started_at") if receipt_matches else now,
+        "updated_at": now,
+        "progress_count": progress_count,
+        "events": events[-16:],
         "claim_status": "not-a-finding",
     }
     out = store.write_artifact("S4", receipt_name, payload)
     _out({"written_to": str(out), "candidate_id": candidate, "status": status,
-          "artifact_count": len(artifact_rows), "claim_status": "not-a-finding"})
+          "progress_count": progress_count,
+          "artifact_count": len(all_artifacts), "claim_status": "not-a-finding"})
     return 0
 
 
@@ -2767,6 +3412,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     d = sub.add_parser("doctor", help="environment check")
+    d.add_argument("--json", action="store_true",
+                   help="accepted for consistency; doctor output is always JSON")
     d.set_defaults(fn=cmd_doctor)
 
     sm = sub.add_parser("source-map", help="build entry inventory via rg")
@@ -3052,6 +3699,50 @@ def build_parser() -> argparse.ArgumentParser:
                     help="machine-readable output")
     rb.set_defaults(fn=cmd_research_budget)
 
+    ab = sub.add_parser(
+        "audit-budget",
+        help="start, inspect, or release the persistent audit deadline and shell guard",
+    )
+    ab.add_argument("action", choices=["start", "status", "release"],
+                    help="start once, inspect, or release an audit round")
+    ab.add_argument("target", help="target name (state/<target>/...)")
+    ab.add_argument("--workspace", required=True,
+                    help="workspace root containing state/<target>/")
+    ab.add_argument("--round", type=int, required=True,
+                    help="one-based audit round number")
+    ab.add_argument("--root", default=None,
+                    help="source root to register with the Codex Bash guard")
+    ab.add_argument("--budget-seconds", type=int, default=0,
+                    help="start duration; maximum 5400 seconds (90 minutes)")
+    ab.add_argument("--json", action="store_true",
+                    help="machine-readable output")
+    ab.set_defaults(fn=cmd_audit_budget)
+
+    ae = sub.add_parser(
+        "audit-exec",
+        help="run one host-side audit command under the round deadline",
+    )
+    ae.add_argument("target", help="target name (state/<target>/...)")
+    ae.add_argument("--workspace", required=True,
+                    help="audit workspace containing the active round deadline")
+    ae.add_argument("--root", required=True,
+                    help="authorized source root used to check the command cwd")
+    ae.add_argument("--round", type=int, required=True,
+                    help="one-based audit round with an initialized deadline")
+    ae.add_argument("--cwd", default=None,
+                    help="working directory under --root; default: --root")
+    ae.add_argument("--timeout", type=int, default=600,
+                    help="requested timeout; capped by 15 minutes and round time remaining")
+    ae.add_argument("--max-output-chars", type=int, default=200000,
+                    help="stdout/stderr capture bound (1000-200000)")
+    ae.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
+                    help="explicit non-secret environment value; ambient credentials are omitted")
+    ae.add_argument("--retry-reason", default="",
+                    help="explain why an identical failed/timed-out command is safe to retry")
+    ae.add_argument("command", nargs=argparse.REMAINDER,
+                    help="command argv; place -- before the executable")
+    ae.set_defaults(fn=cmd_audit_exec)
+
     rs = sub.add_parser(
         "research-strategy",
         help="show or rebuild the bounded cross-artifact research strategy",
@@ -3094,6 +3785,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="adds target-type rule patterns to the entry index")
     cvr.add_argument("--rebuild", action="store_true",
                      help="re-run the full source/entry/sink/control inventory first")
+    cvr.add_argument("--scan-timeout-seconds", type=int, default=600,
+                     help="stop source enumeration after this many seconds; 0 disables the limit")
     cvr.add_argument("--no-refresh", action="store_true",
                      help="skip re-deriving review state from the round ledgers")
     cvr.add_argument("--json", action="store_true", help="machine-readable output")
@@ -3125,6 +3818,9 @@ def build_parser() -> argparse.ArgumentParser:
     sch.add_argument("--slots", type=int, default=0,
                      help="candidate budget for the round (default: config value "
                           "or %d)" % 8)
+    sch.add_argument("--priority-candidate", action="append", default=[],
+                     help="select this candidate within the round slot budget, "
+                          "after runtime pins and before category quotas; repeatable")
     sch.add_argument("--round", type=int, default=0,
                      help="round number, recorded on the plan and in its filename")
     sch.add_argument("--limit-pool", type=int, default=0,
@@ -3310,9 +4006,13 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--candidate", required=True)
     pr.add_argument("--prepare", action="store_true")
     pr.add_argument("--verify", action="store_true")
+    pr.add_argument("--inspect", action="store_true",
+                    help="show bounded liveness metadata for the current receipt")
     pr.add_argument("--token", default="")
-    pr.add_argument("--status", choices=["received", "completed", "partial"],
+    pr.add_argument("--status", choices=["received", "progress", "completed", "partial"],
                     default=None)
+    pr.add_argument("--progress-step", default="",
+                    help="short evidence-producing task step for --status progress")
     pr.add_argument("--artifact", action="append", default=[],
                     help="S4/matrix-runs/<candidate>/ artifact produced by this worker")
     pr.set_defaults(fn=cmd_parallel_receipt)
@@ -3324,6 +4024,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         return int(args.fn(args) or 0)
     except Exception as exc:  # pragma: no cover - surface harness errors as JSON
+        from agent.analysis.languages import SourceScanTimeout
+        if isinstance(exc, SourceScanTimeout):
+            _out({"status": "incomplete", "scope_complete": False,
+                  "error": str(exc), "progress": exc.progress,
+                  "claim_status": "not-a-finding"})
+            return 2
         _out({"error": "%s: %s" % (type(exc).__name__, exc)})
         return 1
 

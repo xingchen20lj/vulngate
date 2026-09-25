@@ -450,8 +450,10 @@ def _touches(record_file: str, record_line: int,
         if file != record_file and not record_file.endswith(file) \
                 and not file.endswith(record_file):
             continue
+        # File-only and unknown-line locations remain leads. They cannot close
+        # every entry, sink, or control in the same source file.
         if not line or not record_line:
-            return True
+            continue
         if abs(int(record_line) - int(line)) <= window:
             return True
     return False
@@ -493,8 +495,10 @@ def build_candidate_coverage(ledger_rows: Iterable[Dict[str, Any]],
                             if _touches(str(c.get("file", "")), int(c.get("line") or 0),
                                         locations)]
         entry_ids = set(matched_entries)
+        sink_ids = set(matched_sinks)
         matched_flows = [str(f.get("flow_id")) for f in flows
-                         if str(f.get("entry_id")) in entry_ids]
+                         if str(f.get("entry_id")) in entry_ids
+                         and str(f.get("sink_id")) in sink_ids]
         mechanisms = [str(x) for x in (row.get("novelty_keywords") or [])]
         records.append(models.CandidateCoverageRecord(
             candidate_id=cid, round=round_no,
@@ -502,6 +506,7 @@ def build_candidate_coverage(ledger_rows: Iterable[Dict[str, Any]],
             entries=sorted(set(matched_entries)),
             sinks=sorted(set(matched_sinks)),
             flows=sorted(set(matched_flows)),
+            controls=sorted(set(matched_controls)),
             files=sorted({f for f, _ in locations if f}),
             categories=sorted(set(
                 [str(s.get("category")) for s in sinks

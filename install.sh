@@ -33,7 +33,8 @@ tar -C "$ROOT" -cf - \
   --exclude '__pycache__' \
   --exclude '*.pyc' \
   --exclude '.DS_Store' \
-  .codex-plugin skills scripts macos assets docs benchmarks \
+  --exclude 'docs/DEVELOPMENT-REVIEW.zh-CN.md' \
+  .codex-plugin hooks skills scripts macos assets docs benchmarks \
   README.md README.zh-CN.md LICENSE CHANGELOG.md PROVENANCE.md RELATED_WORK.md \
   SECURITY.md SECURITY.zh-CN.md CONTRIBUTING.md CONTRIBUTING.zh-CN.md \
   | tar -C "$DEST" -xf -

@@ -68,13 +68,13 @@ class S4RegressionTests(unittest.TestCase):
             root = Path(td)
             matrix = root / "state" / "demo" / "round-01" / "S4" / "matrix-runs" / "A1"
             matrix.mkdir(parents=True)
-            persisted = [{"version": "1.0", "safe_mode": False,
+            persisted = [{"candidate_id": "A1", "version": "1.0", "safe_mode": False,
                           "returncode": 0, "timed_out": False,
                           "observations": {"PARSED": "ok"}}]
             (matrix / "cells.json").write_text(json.dumps(persisted), encoding="utf-8")
             fallback = root / "state" / "demo" / "round-01" / "S4" / "host-fallback.json"
             fallback.write_text(json.dumps({"A1": [{
-                "version": "1.0", "safe_mode": True, "returncode": 0,
+                "candidate_id": "A1", "version": "1.0", "safe_mode": True, "returncode": 0,
                 "timed_out": False, "observations": {"PARSED": "safe"},
             }]}), encoding="utf-8")
             cells, meta = converge_s4_cells(root, "demo", 1, "A1", [])

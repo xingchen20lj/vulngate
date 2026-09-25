@@ -11,7 +11,7 @@ If you find a vulnerability in the plugin itself (not in a library audited with
 it), please report it privately:
 
 - Open a **private advisory** on GitHub:
-  `https://github.com/xingchen20lj/vulngate/security/advisories/new`
+  `https://github.com/Zer0Gate/vulngate/security/advisories/new`
 - Or email the maintainer (see repository metadata) with the subject
   `[VulnGate security] <short description>`.
 
@@ -27,16 +27,34 @@ before any public disclosure.
 
 ## Security posture of the pipeline
 
-- **Loopback-only side effects.** PoC code that references non-loopback URLs or IPs
-  is refused at compile time by the matrix runner.
-- **Approval logging.** Port listeners and external network operations require
-  explicit approval; every decision is recorded to an approval log.
-- **Local-first findings.** Reports are generated in the local workspace and are
-  never published by the pipeline.
+- **PoC isolation is platform-specific.** On supported macOS hosts, shell and
+  Java PoC commands require a successful Seatbelt preflight. Network access is
+  denied by default; supported HTTP cells are limited to their observer port.
+  Source-level egress screening is supplemental and is not an execution sandbox.
+- **Filesystem and resource limits have stated bounds.** PoC reads use a
+  default-deny Seatbelt policy on supported macOS hosts. POSIX process limits
+  are per process; RSS and scratch-size watchdogs are sampled best-effort
+  stop-losses, not hard aggregate quotas. Unsupported isolation fails closed.
+- **Managed runtime-lab services are different.** They do not inherit the PoC
+  network or filesystem profile. Starting target code this way requires explicit
+  operator authorization and `allow_unconfined_start: true`; only the documented
+  process resource limits and sampled RSS stop-loss apply.
+- **Evidence must be independently observed.** PoC stdout/stderr markers are
+  untrusted claims. The bundled HTTP observer captures response metadata, but
+  other effects need a matching observer. A missing observer or failed run is
+  inconclusive, not evidence that a candidate is harmless.
+- **Audit deadlines are operational guardrails.** The 90-minute round budget,
+  `audit-exec` wrapper, and trusted Codex hook cover integrated paths only; they
+  do not preempt host-model reasoning or every specialized tool path. The hook
+  is not an operating-system security boundary.
+- **Approval logging and local reports.** Scope-sensitive operations are
+  recorded, and findings are generated locally rather than published by the
+  pipeline.
 - **Conservative novelty.** `unknown-query-failed` is a first-class verdict;
   absence of evidence is not treated as evidence of absence.
-- **No credential handling.** The plugin reads API keys from the environment only
-  and never logs them. GitHub tokens are read from `GITHUB_TOKEN` / `GH_TOKEN`.
+- **Credential handling.** API keys are read from the environment and must not
+  be written to audit artifacts. GitHub tokens may be read from
+  `GITHUB_TOKEN` / `GH_TOKEN` for public-information queries.
 
 ## Scope
 

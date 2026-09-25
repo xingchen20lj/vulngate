@@ -15,7 +15,7 @@ design principle: **the host Codex agent decides; the bundled code computes.**
 │  ┌───────────────────────────────────────────────────────┐  │
 │  │ Host agent (main agent)                               │  │
 │  │  · owns reasoning: candidates, audit, judgments       │  │
-│  │  · owns parallelism: spawns sub-agents (S4/S5)        │  │
+│  │  · uses sub-agents when independent work saves time   │  │
 │  └───────────────┬───────────────────────────────────────┘  │
 │                  │ skill: vulngate-audit (SKILL.md)        │
 └──────────────────┼─────────────────────────────────────────┘
@@ -34,8 +34,109 @@ It defines:
 - the S1→S8 stage sequence and their artifacts;
 - the G0–G5 hard gates and what each one blocks;
 - the evidence contract (machine-readable observations drive conclusions);
-- the safety model (loopback-only, approval logging, no pre-fix disclosure);
+- the safety model (source-level egress screening, preflighted macOS Seatbelt
+  network confinement and bounded PoC write roots, approval logging, and no
+  pre-fix disclosure; PoC filesystem reads/writes use a macOS default-deny profile,
+  while runtime-lab services remain outside that OS profile);
 - the precondition-tier → CVSS mapping.
+
+Host-native rounds persist a 90-minute S0–S8 budget across assistant turns.
+Integrated runners, stage-boundary checks, and the trusted shell hook enforce
+that budget for the operations they cover. They cannot preempt host-model
+reasoning, an already-running unsupported tool, or specialized paths outside
+the hook; the budget is not a hard limit on the assistant's wall-clock turn.
+The host must check it before and after long work and stop when it expires. A
+three-candidate first wave and an early feasibility check for a matching
+target-revision test environment help keep work bounded. A timed-out
+whole-repository inventory may continue as a clearly marked partial audit; it
+cannot support coverage-complete claims, broad exclusions, or negative
+conclusions. One materially narrowed inventory retry is permitted.
+
+Each bundled `CommandRunner` call also has an independent 15-minute wall-clock
+cap, including direct build commands that bypass the S4 matrix budget. S4
+round and per-candidate budgets are capped at 90 and 15 minutes; configuration
+can lower those limits, and snapshots record requested and applied values.
+Artifacts record each command's applied timeout and whether the request was
+capped.
+
+Host-native audit commands against a target checkout use the `audit-exec` CLI
+wrapper, which requires the persisted round deadline and caps execution to the
+requested timeout, 15 minutes, or remaining budget. It captures bounded output
+and cleanup status in `S0/host-command-runs.jsonl`, and omits ambient
+credentials from the child environment. An identical command is blocked after
+timeout, failure, or incomplete cleanup unless the caller supplies
+`--retry-reason` after confirming the prior process is gone and the scope or
+environment changed. It is not an OS network/filesystem sandbox; its output is
+`not-a-finding` and cannot validate a PoC. `audit-budget start --root` also
+registers the active source root with a bundled Codex `PreToolUse` hook, which
+blocks ordinary Bash/Unified Exec calls whose working directory is inside the
+root, whose explicit path arguments resolve into it (including relative paths
+and symlink aliases), or which recursively inspect/execute from one of its
+ancestor directories, unless they invoke VulnGate's bundled deterministic
+CLI. Ambiguous shell syntax from an ancestor is blocked. Direct host commands still use
+`audit-exec`, and round-control calls must match the active project and round.
+If the hook cannot parse an event while an audit registration may exist, it
+denies the Bash call instead of silently allowing it.
+It also rejects commands above 64 KiB or 2,048 shell tokens before path
+inspection, keeping the hook's own work bounded.
+The hook must be reviewed and trusted in Codex; specialized tool paths may
+bypass it, so the wrapper remains the required path and this is not an OS
+enforcement boundary. Release the registration with `audit-budget release`
+when the round ends.
+
+For supported shell HTTP cells, a per-run loopback proxy records bounded
+response metadata and binds it to a run and cell digest; PoC output markers
+remain claims. On macOS, the exact Seatbelt profile is preflighted before the
+PoC starts and limits outbound traffic to the proxy's exact port on a
+host-owned address. Seatbelt's `localhost` filter is not interface-exact, so
+this is not a literal 127.0.0.1-only guarantee. Other
+platforms and rejected profiles stop before PoC execution. Offline shell and
+Java compile/run commands use a deny-all network profile; Java code that uses
+network APIs remains unsupported until a protocol observer exists. Missing
+responses are inconclusive. HTTPS, non-loopback origins, chunked requests, and
+request bodies above 16 MiB are unsupported. PoC writes are confined to
+per-run scratch/output roots. Reads from user-home trees, other mounted
+volumes, per-user and shared temp trees, keychain stores, local SSH configuration/host
+keys, sudoers, and Kerberos keytabs are denied except for explicit
+workspace/runtime roots. Reads are default-deny: only standard OS tools, their
+required libraries/frameworks, installed Command Line Tools/Xcode/Cryptex runtime
+roots, the audit workspace, and explicit runtime roots are readable. The PoC PATH
+is limited to `/usr/bin:/bin:/usr/sbin:/sbin`; credential stores remain denied
+even when nested under an allowed system root. POSIX runs set hard
+per-process CPU, virtual
+address-space (4 GiB maximum, or a lower inherited hard cap), per-file size,
+open-file and core-dump limits, plus a real-UID process ceiling based on the
+startup count +128. Descendants inherit the address-space cap. A separate
+process-tree watchdog sums sampled per-process RSS every 100 ms and stops the
+run above 2 GiB. This is best-effort, may overshoot between samples, and can
+double-count shared pages; monitor failure invalidates the run. It tracks
+observed descendants by PID/start-time and signals the original process group
+only while a sampled live member still confirms that group identity; detached
+children are killed individually when observed. It cannot guarantee cleanup if
+a child detaches and reparents between samples. Reads
+outside the explicit allowlist are denied; aggregate scratch file count has no
+hard quota. The runner samples each configured PoC scratch tree every 250 ms
+and stops the tracked process group after it observes more than 256 MiB or 4096
+entries. This best-effort stop-loss can overshoot between samples and misses
+unlinked-open-file usage. The
+Seatbelt profile denies direct `setsid` and `setpgid`
+syscalls, blocking the straightforward process-group escape path. The runner
+now enforces the wall-clock deadline even if a command closes both output
+streams, then attempts to kill the original process group after the leader
+exits. Darwin `posix_spawn` attributes can still request another
+group/session, and a PoC can ask an external service to launch work, so cleanup
+is not guaranteed for every spawn path.
+Runtime-lab service processes do not inherit this PoC Seatbelt network/
+filesystem profile. VulnGate reuses a healthy external service; a managed start
+requires `allow_unconfined_start: true` and a successful POSIX resource-limit
+preflight. Managed services inherit the per-process CPU, file-size, descriptor,
+UID-process, address-space and core-dump limits recorded in the service result
+and `S4/processes.json`. A managed service also gets the sampled 2 GiB
+process-tree RSS stop-loss. If the threshold is exceeded or its process-table
+monitor fails, VulnGate stops the observed tree and aborts the shared S4 budget;
+active PoC commands stop and later pipeline stages are skipped. This remains a
+best-effort monitor that can overshoot. External-ready services are not managed
+or monitored. The watchdog does not add filesystem-read or network isolation.
 
 ## Historical CVE benchmark boundary
 

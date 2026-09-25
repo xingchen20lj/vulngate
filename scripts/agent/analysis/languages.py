@@ -33,9 +33,13 @@ whose real source lives under ``target/``).
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+import math
+import subprocess
+import time
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import (Any, Callable, Dict, Iterable, Iterator, List, MutableMapping,
+                    Optional, Sequence, Set, Tuple)
 
 # --- spec §6.3 -------------------------------------------------------------
 #: Canonical suffix -> language table.  Order matters: the first language that
@@ -84,6 +88,14 @@ DEFAULT_EXCLUDE_DIRS: Tuple[str, ...] = (
     ".generated",
     "generated",
     "third_party",
+    # Large fuzz/test corpora contain data files, not implementation sources.
+    # Record them as explicit exclusions instead of walking millions of inputs.
+    "testdata",
+    "test_data",
+    "test_corpus",
+    "fuzz_corpus",
+    "fuzz_corpora",
+    "wasm_corpus",
 )
 
 #: Extra build/tooling directories excluded on top of :data:`DEFAULT_EXCLUDE_DIRS`.
@@ -141,9 +153,26 @@ TEST_FILE_NAMES: Tuple[str, ...] = (
 )
 
 #: Hard cap on how many files are counted *inside* an excluded directory.  The
-#: count only exists to make the exclusion auditable; it must never make a scan
-#: of e.g. node_modules unbounded.  ``ExcludedDir.count_capped`` records the cap.
-MAX_EXCLUDED_DIR_SCAN = 50_000
+#: count only exists to make the exclusion auditable; it must never become a
+#: second recursive audit of e.g. node_modules or a fuzz corpus.
+MAX_EXCLUDED_DIR_SCAN = 2_048
+DEFAULT_SCAN_TIMEOUT_SECONDS = 600
+SOURCE_INVENTORY_POLICY_VERSION = "git-index-bounded-v1"
+
+
+class SourceScanTimeout(RuntimeError):
+    """Raised when a bounded source scan exceeds its wall-clock budget."""
+
+    def __init__(self, progress: Dict[str, Any]):
+        self.progress = dict(progress)
+        super().__init__(
+            "source scan incomplete after %.1fs (%d files seen, %d source files, "
+            "%d directories; last path: %s)" % (
+                float(progress.get("elapsed_seconds", 0)),
+                int(progress.get("files_seen", 0)),
+                int(progress.get("source_files", 0)),
+                int(progress.get("directories_seen", 0)),
+                str(progress.get("current_path") or "unknown")))
 
 
 def register_language(language: str, suffixes: Sequence[str]) -> None:
@@ -242,6 +271,12 @@ class SourceFilter:
     extra_suffixes: List[str] = field(default_factory=list)
     max_file_bytes: int = 4 * 1024 * 1024
     follow_symlinks: bool = False
+    #: Wall-clock limit for directory enumeration. Zero disables it explicitly.
+    scan_timeout_seconds: int = DEFAULT_SCAN_TIMEOUT_SECONDS
+    #: Per-invocation stop-loss inherited from the enclosing audit round. This
+    #: is runtime-only and deliberately excluded from the persisted scope.
+    runtime_deadline_override_seconds: Optional[float] = field(
+        default=None, repr=False, compare=False)
 
     def effective_excludes(self) -> Tuple[str, ...]:
         names = list(self.exclude_dirs) + list(self.extra_exclude_dirs)
@@ -258,11 +293,13 @@ class SourceFilter:
 
     def as_dict(self) -> Dict[str, object]:
         return {
+            "inventory_policy_version": SOURCE_INVENTORY_POLICY_VERSION,
             "exclude_dirs": list(self.effective_excludes()),
             "include_overrides": list(self.include_overrides),
             "extra_suffixes": list(self.extra_suffixes),
             "max_file_bytes": self.max_file_bytes,
             "follow_symlinks": self.follow_symlinks,
+            "scan_timeout_seconds": self.scan_timeout_seconds,
         }
 
 
@@ -311,11 +348,15 @@ def classify_file(rel_path: str, path: Optional[Path] = None) -> Dict[str, objec
     detection (header markers); without it only path/name rules apply.
     """
     probe = Path(str(rel_path).replace("\\", "/"))
-    generated = _looks_generated(probe, str(rel_path)) if path is not None \
-        else (any(m in str(rel_path).lower() for m in GENERATED_PATH_MARKERS)
-              or any(m in probe.name.lower() for m in GENERATED_NAME_MARKERS))
     vendor = _looks_vendor(str(rel_path))
     test = _looks_test(probe, str(rel_path))
+    path_generated = (any(m in str(rel_path).lower() for m in GENERATED_PATH_MARKERS)
+                      or any(m in probe.name.lower() for m in GENERATED_NAME_MARKERS))
+    # Test/vendor files are already excluded from production indexing. Avoid
+    # opening each file just to collect an additional generated label.
+    generated = (_looks_generated(probe, str(rel_path))
+                 if path is not None and not (vendor or test)
+                 else path_generated)
     reasons: List[str] = []
     if generated:
         reasons.append("generated")
@@ -362,27 +403,35 @@ class ExcludedDir:
 
 
 def _count_files(directory: Path, cap: int = MAX_EXCLUDED_DIR_SCAN,
-                 follow_symlinks: bool = False) -> Tuple[int, bool]:
+                 follow_symlinks: bool = False,
+                 deadline: Optional[float] = None) -> Tuple[int, bool]:
     total = 0
+    visited = 0
     stack = [directory]
     while stack:
         current = stack.pop()
         try:
-            entries = list(os.scandir(current))
+            entries = os.scandir(current)
         except OSError:
             continue
-        for entry in entries:
-            if entry.is_symlink() and not follow_symlinks:
-                continue
-            try:
-                if entry.is_dir(follow_symlinks=follow_symlinks):
-                    stack.append(Path(entry.path))
-                else:
-                    total += 1
-            except OSError:
-                continue
-            if total >= cap:
-                return total, True
+        with entries:
+            for entry in entries:
+                visited += 1
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("excluded directory counting exceeded scan budget")
+                if entry.is_symlink() and not follow_symlinks:
+                    continue
+                try:
+                    if entry.is_dir(follow_symlinks=follow_symlinks):
+                        stack.append(Path(entry.path))
+                    else:
+                        total += 1
+                except OSError:
+                    continue
+                if total >= cap:
+                    return total, True
+                if visited >= cap * 8:
+                    return total, True
     return total, False
 
 
@@ -433,16 +482,278 @@ def resolve_source_dirs(root: Path, source_dirs: Optional[Sequence[str]] = None
     return bases, canonical, invalid
 
 
+def _git_index_files(root: Path, source_filter: SourceFilter,
+                     source_dirs: Optional[Sequence[str]], source_only: bool,
+                     stats: MutableMapping[str, Any],
+                     progress_callback: Optional[Callable[[Dict[str, Any]], None]],
+                     started: float, deadline: Optional[float]
+                     ) -> Optional[Tuple[List[Tuple[Path, str]], List[ExcludedDir]]]:
+    """Enumerate a Git working tree from its index, avoiding slow full walks.
+
+    Tracked files, non-ignored untracked files, deletions, symlinks, and
+    submodules are handled separately. A missing submodule is reported as a
+    scope gap instead of silently disappearing from coverage.
+    """
+    root = root.resolve()
+
+    def git(args: List[str]) -> Optional[bytes]:
+        timeout = None if deadline is None else max(0.1, deadline - time.monotonic())
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(root)] + args,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                timeout=timeout, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return result.stdout if result.returncode == 0 else None
+
+    try:
+        probe_timeout = (5.0 if deadline is None else
+                         max(0.1, min(5.0, deadline - time.monotonic())))
+        probe = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=probe_timeout, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise SourceScanTimeout({
+                "files_seen": 0, "source_files": 0, "directories_seen": 0,
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+                "current_path": "git rev-parse",
+            })
+        return None
+    if probe.returncode != 0:
+        return None
+    repo_root = Path(os.fsdecode(probe.stdout).strip()).resolve()
+    try:
+        repo_prefix = root.relative_to(repo_root).as_posix()
+    except ValueError:
+        return None
+    if repo_prefix == ".":
+        repo_prefix = ""
+    prefix = repo_prefix + "/" if repo_prefix else ""
+    _bases, canonical_dirs, invalid_dirs = resolve_source_dirs(root, source_dirs)
+    if not canonical_dirs:
+        stats.update({
+            "files_seen": 0, "source_files": 0, "non_source_files": 0,
+            "directories_seen": 0, "excluded_dirs_seen": 0,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "current_path": "", "git_index_used": True,
+            "analysis_gaps": [row["reason"] for row in invalid_dirs],
+            "gitlink_gaps": [],
+        })
+        return [], []
+    allowed = ["" if item == "." else item.rstrip("/")
+               for item in canonical_dirs]
+    if not allowed:
+        allowed = [""]
+    exclusions = set(source_filter.effective_excludes())
+    known_suffixes = source_filter.known_suffixes()
+    stage_data = git(["ls-files", "--stage", "-z"])
+    other_data = git(["ls-files", "--others", "--exclude-standard", "-z"])
+    deleted_data = git(["ls-files", "--deleted", "-z"])
+    if stage_data is None or other_data is None or deleted_data is None:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise SourceScanTimeout({
+                "files_seen": 0, "source_files": 0, "directories_seen": 0,
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+                "current_path": "git ls-files",
+            })
+        return None
+    def nul_records(data: bytes) -> Iterator[bytes]:
+        """Yield NUL-delimited Git paths without allocating a giant split list."""
+        offset = 0
+        while offset < len(data):
+            end = data.find(b"\0", offset)
+            if end < 0:
+                end = len(data)
+            if end > offset:
+                yield data[offset:end]
+            offset = end + 1
+
+    deleted = {os.fsdecode(item) for item in nul_records(deleted_data)}
+    files: List[Tuple[Path, str]] = []
+    excluded_counts: Dict[str, int] = {}
+    excluded_capped: Set[str] = set()
+    gaps: List[str] = []
+    seen: Set[str] = set()
+    state: Dict[str, Any] = {
+        "files_seen": 0, "source_files": 0, "non_source_files": 0,
+        "directories_seen": 0, "excluded_dirs_seen": 0,
+        "elapsed_seconds": 0.0, "current_path": "git index",
+        "git_index_used": True, "gitlink_gaps": [],
+        "tracked_files": 0, "untracked_files": 0,
+    }
+    last_progress = started
+
+    def tick(path: str = "git index", force: bool = False) -> None:
+        nonlocal last_progress
+        now = time.monotonic()
+        state["elapsed_seconds"] = round(now - started, 3)
+        if deadline is not None and now >= deadline:
+            state["current_path"] = path
+            stats.update(state)
+            if progress_callback is not None:
+                progress_callback(dict(state))
+            raise SourceScanTimeout(state)
+        if progress_callback is not None and (force or now - last_progress >= 10):
+            state["current_path"] = path
+            progress_callback(dict(state))
+            last_progress = now
+
+    def relative_path(repo_rel: str) -> Optional[str]:
+        if prefix and not repo_rel.startswith(prefix):
+            return None
+        rel = repo_rel[len(prefix):] if prefix else repo_rel
+        if not rel or rel == ".":
+            return None
+        if not any(not base or rel == base or rel.startswith(base + "/")
+                   for base in allowed):
+            return None
+        return rel
+
+    def excluded_parent(rel: str) -> Optional[str]:
+        selected_base = max(
+            (base for base in allowed
+             if not base or rel == base or rel.startswith(base + "/")),
+            key=len, default="")
+        tail = rel[len(selected_base):].lstrip("/") if selected_base else rel
+        parts = tail.split("/")
+        for index, part in enumerate(parts[:-1]):
+            if part in exclusions:
+                excluded_tail = "/".join(parts[:index + 1])
+                return (selected_base + "/" + excluded_tail
+                        if selected_base else excluded_tail)
+        return None
+
+    def add_path(repo_rel: str, mode: str = "", tracked: bool = False) -> None:
+        rel = relative_path(repo_rel)
+        if rel is None or rel in seen:
+            return
+        parent_exclusion = (
+            rel if mode in ("160000", "040000")
+            and Path(rel).name in exclusions and rel not in allowed
+            else excluded_parent(rel))
+        if parent_exclusion:
+            count = excluded_counts.get(parent_exclusion, 0)
+            if count < MAX_EXCLUDED_DIR_SCAN:
+                excluded_counts[parent_exclusion] = count + 1
+            else:
+                excluded_capped.add(parent_exclusion)
+            return
+        if repo_rel in deleted:
+            return
+        abs_path = repo_root / repo_rel
+        if mode == "160000" or mode == "040000":
+            if abs_path.is_dir():
+                nested_filter = source_filter
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        tick(rel, force=True)
+                    nested_filter = replace(
+                        source_filter, scan_timeout_seconds=remaining)
+                nested_stats: Dict[str, Any] = {}
+                nested_files, nested_excluded = scan_tree(
+                    abs_path, nested_filter, source_only=source_only,
+                    stats=nested_stats, progress_callback=progress_callback)
+                for nested_path, nested_rel in nested_files:
+                    combined_rel = rel + "/" + nested_rel
+                    if combined_rel not in seen:
+                        seen.add(combined_rel)
+                        files.append((nested_path, combined_rel))
+                for row in nested_excluded:
+                    excluded.append(ExcludedDir(
+                        rel_path=rel + "/" + row.rel_path,
+                        reason=row.reason, file_count=row.file_count,
+                        count_capped=row.count_capped,
+                        producer=row.producer, confidence=row.confidence,
+                        evidence_type=row.evidence_type))
+                for key in ("files_seen", "source_files", "non_source_files",
+                            "directories_seen", "excluded_dirs_seen"):
+                    state[key] += int(nested_stats.get(key, 0))
+                gaps.extend(str(item) for item in nested_stats.get("gitlink_gaps", []))
+                tick(rel)
+            else:
+                gap = "gitlink-content-unavailable:%s" % rel
+                gaps.append(gap)
+                excluded.append(ExcludedDir(
+                    rel_path=rel, reason="gitlink-content-unavailable",
+                    file_count=0, count_capped=True,
+                    producer="git-index", confidence="lower-bound",
+                    evidence_type="repository-metadata"))
+            return
+        if mode == "120000" or (not tracked and abs_path.is_symlink()):
+            excluded.append(ExcludedDir(
+                rel_path=rel, reason="symlink-not-followed", file_count=0,
+                count_capped=False, producer="git-index",
+                confidence="exact", evidence_type="repository-metadata"))
+            return
+        seen.add(rel)
+        state["files_seen"] += 1
+        if tracked:
+            state["tracked_files"] += 1
+        else:
+            state["untracked_files"] += 1
+        if Path(rel).suffix.lower() in known_suffixes:
+            state["source_files"] += 1
+            if not source_only:
+                files.append((abs_path, rel))
+            elif mode != "120000":
+                files.append((abs_path, rel))
+        else:
+            state["non_source_files"] += 1
+            if not source_only:
+                files.append((abs_path, rel))
+
+    for index, record in enumerate(nul_records(stage_data)):
+        try:
+            metadata, raw_path = record.split(b"\t", 1)
+            mode = metadata.split(b" ", 1)[0].decode("ascii", errors="ignore")
+            repo_rel = os.fsdecode(raw_path)
+        except ValueError:
+            continue
+        add_path(repo_rel, mode, tracked=True)
+        if index % 8192 == 0:
+            tick(repo_rel)
+
+    for index, raw_path in enumerate(nul_records(other_data)):
+        repo_rel = os.fsdecode(raw_path)
+        add_path(repo_rel, tracked=False)
+        if index % 8192 == 0:
+            tick(repo_rel)
+
+    for rel, count in sorted(excluded_counts.items()):
+        excluded.append(ExcludedDir(
+            rel_path=rel, reason="excluded-dir:%s" % Path(rel).name,
+            file_count=count, count_capped=rel in excluded_capped,
+            producer="git-index", confidence="lower-bound",
+            evidence_type="repository-metadata"))
+    if invalid_dirs:
+        state["analysis_gaps"] = [row["reason"] for row in invalid_dirs]
+    state["gitlink_gaps"] = sorted(set(gaps))
+    state["excluded_dirs_seen"] = len(excluded)
+    state["elapsed_seconds"] = round(time.monotonic() - started, 3)
+    tick(force=True)
+    stats.update(state)
+    files.sort(key=lambda item: item[1])
+    excluded.sort(key=lambda item: item.rel_path)
+    return files, excluded
+
+
 def scan_tree(root: Path, source_filter: Optional[SourceFilter] = None,
-              source_dirs: Optional[Sequence[str]] = None
+              source_dirs: Optional[Sequence[str]] = None, *,
+              source_only: bool = False,
+              stats: Optional[MutableMapping[str, Any]] = None,
+              progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None
               ) -> Tuple[List[Tuple[Path, str]], List[ExcludedDir]]:
     """Enumerate every file under ``root`` (or ``source_dirs``), deterministically.
 
     Returns ``(files, excluded_dirs)`` where ``files`` is a sorted list of
-    ``(absolute_path, root_relative_posix_path)`` for *all* files, including
-    those that will later be classified as generated/vendor/test or dropped for
-    a non-source suffix.  Nothing is filtered here -- the inventory needs the
-    complete universe so it can attach a ``skip_reason`` to every entry.
+    ``(absolute_path, root_relative_posix_path)``. ``source_only`` avoids
+    retaining non-source paths in memory; their counts are returned through
+    ``stats``. Source-like test/vendor/generated files remain in the list so
+    each can keep its explicit skip reason.
 
     Excluded directories are not descended into; each contributes one
     :class:`ExcludedDir` record with its file count instead.
@@ -450,8 +761,71 @@ def scan_tree(root: Path, source_filter: Optional[SourceFilter] = None,
     root = root.resolve()
     flt = source_filter or SourceFilter()
     exclusions = flt.effective_excludes()
+    known_suffixes = flt.known_suffixes()
+    started = time.monotonic()
+    timeout = max(0.0, float(flt.scan_timeout_seconds or 0))
+    if flt.runtime_deadline_override_seconds is not None:
+        override = float(flt.runtime_deadline_override_seconds)
+        if not math.isfinite(override) or override <= 0:
+            raise ValueError("runtime source deadline must be a positive finite number")
+        timeout = min(timeout, override) if timeout else override
+    deadline = started + timeout if timeout else None
+    state: Dict[str, Any] = {
+        "files_seen": 0,
+        "source_files": 0,
+        "non_source_files": 0,
+        "directories_seen": 0,
+        "excluded_dirs_seen": 0,
+        "elapsed_seconds": 0.0,
+        "current_path": "",
+        "git_index_used": False,
+        "gitlink_gaps": [],
+    }
+    last_progress = started
+
+    def checkpoint(path: Optional[Path] = None, force: bool = False) -> None:
+        nonlocal last_progress
+        now = time.monotonic()
+        state["elapsed_seconds"] = round(now - started, 3)
+        progress_due = force or (progress_callback is not None
+                                 and now - last_progress >= 10)
+        deadline_due = deadline is not None and now >= deadline
+        if path is not None and (progress_due or deadline_due):
+            try:
+                state["current_path"] = path.relative_to(root).as_posix()
+            except ValueError:
+                state["current_path"] = str(path)
+        if deadline_due:
+            snapshot = dict(state)
+            if progress_callback is not None:
+                progress_callback(snapshot)
+            if stats is not None:
+                stats.update(snapshot)
+            raise SourceScanTimeout(snapshot)
+        if progress_callback is not None and progress_due:
+            progress_callback(dict(state))
+            last_progress = now
+
+    def add_file(path: Path, rel: str) -> None:
+        state["files_seen"] += 1
+        is_source = Path(rel).suffix.lower() in known_suffixes
+        if is_source:
+            state["source_files"] += 1
+        else:
+            state["non_source_files"] += 1
+        if not source_only or is_source:
+            if rel not in seen_files:
+                seen_files.add(rel)
+                files.append((path, rel))
 
     bases, _canonical, _invalid = resolve_source_dirs(root, source_dirs)
+
+    if not flt.follow_symlinks:
+        git_inventory = _git_index_files(
+            root, flt, source_dirs, source_only, state if stats is None else stats,
+            progress_callback, started, deadline)
+        if git_inventory is not None:
+            return git_inventory
 
     files: List[Tuple[Path, str]] = []
     excluded: List[ExcludedDir] = []
@@ -460,63 +834,82 @@ def scan_tree(root: Path, source_filter: Optional[SourceFilter] = None,
 
     def rel_of(path: Path) -> Optional[str]:
         try:
-            return path.resolve().relative_to(root).as_posix()
-        except ValueError:
+            # The common no-symlink path needs no realpath/stat call for every
+            # directory entry. When callers explicitly follow links, retain the
+            # resolved containment check.
+            candidate = path.resolve() if flt.follow_symlinks else path
+            return candidate.relative_to(root).as_posix()
+        except (OSError, ValueError):
             return None
 
     def walk(base: Path) -> None:
         if base.is_file():
             rel = rel_of(base)
-            if rel and rel not in seen_files:
-                seen_files.add(rel)
-                files.append((base, rel))
+            if rel:
+                add_file(base, rel)
             return
         stack: List[Path] = [base]
         while stack:
             current = stack.pop()
+            state["directories_seen"] += 1
+            checkpoint(current)
             try:
-                with os.scandir(current) as it:
-                    entries = sorted(it, key=lambda e: e.name)
+                entries = os.scandir(current)
             except OSError:
                 continue
-            for entry in entries:
-                entry_path = Path(entry.path)
-                is_symlink = entry.is_symlink()
-                if is_symlink and not flt.follow_symlinks:
-                    rel = rel_of(entry_path)
-                    if rel and rel not in seen_dirs:
-                        seen_dirs.add(rel)
-                        excluded.append(ExcludedDir(
-                            rel_path=rel, reason="symlink-not-followed",
-                            file_count=0))
-                    continue
-                try:
-                    is_dir = entry.is_dir(follow_symlinks=flt.follow_symlinks)
-                except OSError:
-                    continue
-                if is_dir:
-                    rel = rel_of(entry_path)
-                    if rel is None:
+            with entries:
+                for entry in entries:
+                    entry_path = Path(entry.path)
+                    checkpoint(entry_path)
+                    try:
+                        is_symlink = entry.is_symlink()
+                    except OSError:
                         continue
-                    if entry.name in exclusions:
-                        if rel not in seen_dirs:
+                    if is_symlink and not flt.follow_symlinks:
+                        rel = rel_of(entry_path)
+                        if rel and rel not in seen_dirs:
                             seen_dirs.add(rel)
-                            count, capped = _count_files(
-                                entry_path, follow_symlinks=flt.follow_symlinks)
+                            state["excluded_dirs_seen"] += 1
                             excluded.append(ExcludedDir(
-                                rel_path=rel, reason="excluded-dir:%s" % entry.name,
-                                file_count=count, count_capped=capped))
+                                rel_path=rel, reason="symlink-not-followed",
+                                file_count=0))
                         continue
-                    stack.append(entry_path)
-                else:
-                    rel = rel_of(entry_path)
-                    if rel and rel not in seen_files:
-                        seen_files.add(rel)
-                        files.append((entry_path, rel))
+                    try:
+                        is_dir = entry.is_dir(follow_symlinks=flt.follow_symlinks)
+                    except OSError:
+                        continue
+                    if is_dir:
+                        rel = rel_of(entry_path)
+                        if rel is None:
+                            continue
+                        if entry.name in exclusions:
+                            if rel not in seen_dirs:
+                                seen_dirs.add(rel)
+                                try:
+                                    count, capped = _count_files(
+                                        entry_path,
+                                        follow_symlinks=flt.follow_symlinks,
+                                        deadline=deadline)
+                                except TimeoutError:
+                                    checkpoint(entry_path, force=True)
+                                    raise
+                                state["excluded_dirs_seen"] += 1
+                                excluded.append(ExcludedDir(
+                                    rel_path=rel, reason="excluded-dir:%s" % entry.name,
+                                    file_count=count, count_capped=capped))
+                            continue
+                        stack.append(entry_path)
+                    else:
+                        rel = rel_of(entry_path)
+                        if rel:
+                            add_file(entry_path, rel)
 
     for base in sorted(bases, key=lambda p: str(p)):
         walk(base)
 
+    checkpoint(force=True)
+    if stats is not None:
+        stats.update(state)
     files.sort(key=lambda item: item[1])
     excluded.sort(key=lambda item: item.rel_path)
     return files, excluded
@@ -543,7 +936,7 @@ def iter_source_files(root: Path, source_dirs: Optional[Sequence[str]] = None,
     """
     flt = source_filter or SourceFilter()
     known = flt.known_suffixes()
-    files, _excluded = scan_tree(root, flt, source_dirs)
+    files, _excluded = scan_tree(root, flt, source_dirs, source_only=True)
     for path, rel in files:
         if Path(rel).suffix.lower() in known:
             yield path, rel

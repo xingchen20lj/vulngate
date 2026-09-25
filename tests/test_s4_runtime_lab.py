@@ -309,7 +309,6 @@ class S4RuntimeLabTests(unittest.TestCase):
                 "#!/bin/sh\nprintf 'PARSED=ok\\n'\n", encoding="utf-8")
             case = {"case_id": "cross-tenant", "principal": "u1",
                     "role": "user", "tenant_id": "a", "object_id": "o7",
-                    "expected_http_codes": [403], "expected_authz": "deny",
                     "token": "do-not-persist"}
             cfg = TargetConfig(
                 name="shell-lab", discovery_date="2026-09-21",

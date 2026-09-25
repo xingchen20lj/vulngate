@@ -28,11 +28,13 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
-from datetime import date
+import time
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -66,6 +68,7 @@ from ..analysis.research_strategy import (apply_strategy_observations,
                                            write_research_strategy)
 from ..analysis.research_agenda import (build_research_agenda,
                                         load_research_agenda,
+                                        selected_candidate_ids,
                                         write_research_agenda)
 from ..analysis.research_agenda_outcomes import (
     build_research_agenda_outcomes,
@@ -83,7 +86,8 @@ from ..orchestrator.gates import g3_novelty
 from ..sandbox.approval import ApprovalGate
 from ..tools.build import (JavaMatrixRunner, MatrixCell, POCSpec,
                            ShellMatrixRunner, ShellPOCSpec, summarize_candidate,
-                           converge_s4_cells)
+                           converge_s4_cells, S4ExecutionBudget,
+                           S4_EVIDENCE_POLICY_VERSION)
 from ..tools.authz import normalize_authz_case, normalize_authz_cases
 from ..tools.conclusion import (DENY_CLASS_HINTS, conclusion_status,
                                 derive_conclusion, is_confirmed_conclusion,
@@ -99,16 +103,17 @@ from ..tools.experiment import capability_contract_from_candidate
 from ..tools.research_strategies import composite_chain_candidates
 from ..tools.s4_runtime_lab import (merge_runtime_lab_artifacts,
                                     run_s4_runtime_lab)
-from ..tools.target_rules import collect_target_rule_hits, composite_chain_hints
+from ..tools.target_rules import composite_chain_hints, scan_s1_source_rules
 from ..tools.public_scan import scan_all
 from ..tools.seeds import load_seeds, seed_reference_block
 from ..tools import source_evidence as se
 from ..tools.source_evidence import (DANGER_PATTERNS, SOURCE_MAP_PRESETS,
                                      build_source_sink_graph, candidate_block,
-                                     grep_hits, match_source_sink_paths,
+                                     match_source_sink_paths,
                                      summarize_hits, surface_block)
 
 ROOT = Path(__file__).resolve().parents[2]
+TARGET_PREPARATION_MAX_SECONDS = 15 * 60
 
 SYSTEM_SECURITY = (
     "你是资深 Java 安全研究员，擅长反序列化/解析库的 0day 挖掘。"
@@ -121,16 +126,13 @@ SYSTEM_SECURITY = (
 SYSTEM_POC = (
     "你是资深 Java 安全 PoC 作者。直接输出最终 Java 源码，"
     "不要输出思考过程，不要解释，无 Markdown 围栏，不要 package 声明（单文件默认包）。"
-    "main 必须至少输出一行机器可读观测（ERROR=/GATE_BLOCKED=/INSTANTIATED=/LEAKED= 之一，"
-    "基于真实运行结果），禁止空输出。对于能力链，CAPABILITY/"
-    "CAPABILITY_EVIDENCE/TRANSITION/TRANSITION_EVIDENCE 也只能记录实际观察，"
-    "不能照抄声明或把对象实例化当成终点效果。"
-    "若存在 residual contract，只能在实际执行且无副作用时输出"
-    "RESIDUAL_ID/RESIDUAL_STATUS=falsified/RESIDUAL_FALSIFIER。"
+    "让 PoC 以最小输入真实调用目标 API，并由运行器收集退出状态及支持的独立观测。"
+    "不要为了满足输出格式打印机器可读 marker；stdout/stderr 都是 PoC 自报声明，"
+    "不能证明目标效果，输出诊断也不是必需的。"
     "若存在 surface variant fixture 上下文，读取 VULNGATE_VARIANT_SURFACE、"
     "VULNGATE_VARIANT_ID、VULNGATE_VARIANT_LANE、VULNGATE_VARIANT_STATE_STEPS；"
-    "positive/negative/environment-gap 只是实验车道，不能直接当成观测或结论，"
-    "只有真实完成的状态步骤和真实证据才能输出 STEP/STATE/typed effect。"
+    "按当前 fixture 状态执行对应输入；positive/negative/environment-gap 只是实验选择，"
+    "不能当成结果。"
 )
 
 SYSTEM_SECURITY_WEB = (
@@ -145,18 +147,12 @@ SYSTEM_SECURITY_WEB = (
 SYSTEM_POC_WEB = (
     "你是资深 Web 安全 PoC 作者。直接输出最终 bash 脚本（HTTP PoC），"
     "不要输出思考过程，不要解释，无 Markdown 围栏。"
-    "脚本必须打印机器可读观测行（基于真实运行结果，至少一行）：\n"
-    "HTTP_CODE=<状态码>\nRESP_MATCH=<响应体/头中的特征串>\n"
-    "EVIDENCE=<副作用证据，如写入成功的标记/会话接管邮箱>\n"
-    "GATE_BLOCKED=<原因>\nERROR=<异常>\n"
-    "CAPABILITY=<实际观察到的能力原语>\nCAPABILITY_EVIDENCE=<原语证据>\n"
-    "TRANSITION=<实际观察到的 from->to>\nTRANSITION_EVIDENCE=<transition 证据>\n"
-    "RESIDUAL_ID=<从 VULNGATE_RESIDUAL_IDS 中选择的实际 residual id>\n"
-    "RESIDUAL_STATUS=falsified\nRESIDUAL_FALSIFIER=<合同允许的安全反证代码>\n"
+    "用最小请求真实触发候选路径；不要为了满足输出格式打印机器可读 marker。"
+    "stdout/stderr 是 PoC 自报声明，不能证明服务端响应或副作用；响应元数据只以"
+    "运行器独立捕获的结果为准。不要输出响应中的凭据或其他敏感内容。"
     "若存在 surface variant fixture，读取 VULNGATE_VARIANT_SURFACE、"
     "VULNGATE_VARIANT_ID、VULNGATE_VARIANT_LANE、"
-    "VULNGATE_VARIANT_STATE_STEPS；车道与要求不是观测，只有真实完成的"
-    "步骤和真实响应/副作用才可输出 STEP/STATE/EVIDENCE。"
+    "VULNGATE_VARIANT_STATE_STEPS，并按当前 fixture 状态选择请求；这些字段不是结果。"
     "目标 base URL 必须从环境变量 VULNGATE_TARGET_URL 读取（脚本内使用该变量拼接路径，"
     "禁止硬编码其他主机；网络目标只允许 127.0.0.1/localhost）。"
     "允许使用 curl 与 python3，但只能访问明确的回环 URL；禁止 SSH/SCP/远程 rsync、云 CLI、"
@@ -164,7 +160,18 @@ SYSTEM_POC_WEB = (
 )
 
 
-def _is_web_target(target_dir: Path) -> bool:
+class TargetPreparationTimeout(RuntimeError):
+    """Raised when bounded new-target preparation exhausts its wall budget."""
+
+    def __init__(self, progress: Dict[str, Any]):
+        self.progress = dict(progress)
+        super().__init__(
+            "target preparation timed out in %s at %s" % (
+                str(progress.get("stage") or "unknown"),
+                str(progress.get("current_path") or "unknown")))
+
+
+def _is_web_target(target_dir: Path, timeout: float = 30) -> bool:
     """Heuristic target-type detection (observable facts only)."""
     markers = ("compojure", "ring/ring", "javax.servlet", "jakarta.servlet",
                "spring-boot", "SpringBootApplication", "flask", "django",
@@ -179,13 +186,19 @@ def _is_web_target(target_dir: Path) -> bool:
     try:
         hits = subprocess.run(
             ["rg", "-l", "-m", "1", "|".join(markers), str(target_dir)],
-            capture_output=True, text=True, timeout=30).stdout
+            capture_output=True, text=True, timeout=timeout).stdout
         return bool(hits.strip())
+    except subprocess.TimeoutExpired as exc:
+        raise TargetPreparationTimeout({
+            "stage": "target-type-detection", "current_path": str(target_dir),
+            "error": "target-type scan timed out", "claim_status": "not-a-finding",
+        }) from exc
     except Exception:
         return False
 
 
-def scan_all_http_entries(source_dirs: List[Path]) -> List[Dict[str, Any]]:
+def scan_all_http_entries(source_dirs: List[Path], timeout: float = 600
+                          ) -> List[Dict[str, Any]]:
     """Web-app entry inventory: **every** route/controller declaration found.
 
     Split from :func:`scan_http_entries` per spec §6.1 -- this half is uncapped
@@ -195,10 +208,33 @@ def scan_all_http_entries(source_dirs: List[Path]) -> List[Dict[str, Any]]:
     pat = SOURCE_MAP_PRESETS.get("http", r"defendpoint|defroutes|doGet|doPost")
     entries: List[Dict[str, Any]] = []
     seen = set()
+    deadline = time.monotonic() + max(0.0, float(timeout))
     for sd in source_dirs:
         if not sd.exists():
             continue
-        for hit in se.scan_all_hits(pat, [sd.as_posix()], sd.parent):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TargetPreparationTimeout({
+                "stage": "http-entry-scan", "current_path": str(sd),
+                "error": "shared HTTP entry scan deadline exhausted",
+                "claim_status": "not-a-finding",
+            })
+        try:
+            hits = se.scan_all_hits(pat, [sd.as_posix()], sd.parent,
+                                    timeout=remaining)
+        except se.SourceScanTimeout as exc:
+            raise TargetPreparationTimeout({
+                "stage": "http-entry-scan", "current_path": str(sd),
+                "error": str(exc), "scan_progress": exc.progress,
+                "claim_status": "not-a-finding",
+            }) from exc
+        for hit in hits:
+            if time.monotonic() >= deadline:
+                raise TargetPreparationTimeout({
+                    "stage": "http-entry-scan", "current_path": str(hit["file"]),
+                    "error": "HTTP entry classification exceeded its shared deadline",
+                    "claim_status": "not-a-finding",
+                })
             key = (hit["file"], hit["line"])
             if key in seen:
                 continue
@@ -213,6 +249,13 @@ def scan_all_http_entries(source_dirs: List[Path]) -> List[Dict[str, Any]]:
                 "module": str(hit["file"]).split("/")[0],
             })
     entries.sort(key=lambda e: str(e["file_line"]))
+    if time.monotonic() >= deadline:
+        raise TargetPreparationTimeout({
+            "stage": "http-entry-scan",
+            "current_path": str(source_dirs[-1] if source_dirs else Path(".")),
+            "error": "HTTP entry inventory sorting exceeded its shared deadline",
+            "claim_status": "not-a-finding",
+        })
     return entries
 
 
@@ -261,41 +304,86 @@ def _danger_hit_count(path: Path, cache: Dict[str, int]) -> int:
     return count
 
 
-def scan_all_entries(source_dirs: List[Path]) -> List[Dict[str, Any]]:
+def scan_all_entries(source_dirs: List[Path], timeout: float = 600
+                     ) -> List[Dict[str, Any]]:
     """**Full** entry inventory: every hit of every entry-API pattern.
 
     The previous implementation stopped at ``per_pattern=5`` and
     ``len(entries) >= 20``, so a target with 400 parse call sites reported 20
     entries and the remaining 380 never entered any audit state (spec §6.1).
-    The caps now live only in :func:`scan_entries`.
+    The caps now live only in :func:`scan_entries`. All API patterns are
+    classified from one combined ripgrep pass so preparation has one shared
+    scan deadline instead of rescanning the full tree once per API.
     """
     entries: List[Dict[str, Any]] = []
     seen = set()
     danger_cache: Dict[str, int] = {}
-    for src in source_dirs:
-        if not src.exists():
-            continue
-        for pattern, shape in ENTRY_API_PATTERNS:
-            api = pattern.strip("\\b().*")
-            for hit in se.scan_all_hits(pattern, [src.as_posix()], src.parent):
-                key = (api, hit["file"], hit["line"])
-                if key in seen:
-                    continue
-                seen.add(key)
-                rel = str(hit["file"])
-                abs_file = src.parent / rel
-                entries.append({
-                    "api": api,
-                    "input_shape": shape,
-                    "file_line": "%s:%d" % (rel, hit["line"]),
-                    "default_features": "[]",
-                    "untrusted": True,
-                    "danger_hits": _danger_hit_count(abs_file, danger_cache),
-                    "module": rel.split("/")[0],
-                    "entry_kind": "library-api",
-                    "text": hit["text"],
+    scan_roots = [(Path(os.path.abspath(src)), Path(os.path.abspath(src)).resolve())
+                  for src in source_dirs if src.exists()]
+    if not scan_roots:
+        return entries
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    scan_root = Path(os.path.commonpath([str(src) for src, _resolved in scan_roots]))
+    source_relpaths = [Path(os.path.relpath(src, scan_root)).as_posix()
+                       for src, _resolved in scan_roots]
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise se.SourceScanTimeout({
+            "elapsed_seconds": 0.0, "files_seen": 0, "source_files": 0,
+            "directories_seen": 0, "hits_seen": 0, "current_path": str(scan_root),
+            "scan": "entry-classification",
+        })
+    for hit in se.scan_all_labeled_hits(
+            ENTRY_API_PATTERNS, source_relpaths, scan_root,
+            max_per_pattern=None, timeout=remaining):
+        if time.monotonic() >= deadline:
+            raise se.SourceScanTimeout({
+                "elapsed_seconds": round(float(timeout), 3),
+                "files_seen": 0, "source_files": 0,
+                "directories_seen": len(scan_roots), "hits_seen": len(entries),
+                "current_path": str(hit.get("file") or scan_root),
+                "scan": "entry-classification",
+            })
+        pattern = str(hit["pattern"])
+        api = pattern.strip("\\b().*")
+        abs_file = scan_root.resolve() / str(hit["file"])
+        for src, resolved_src in scan_roots:
+            try:
+                abs_file.relative_to(resolved_src)
+                rel = abs_file.relative_to(src.parent.resolve()).as_posix()
+            except ValueError:
+                continue
+            key = (api, rel, hit["line"])
+            if key in seen:
+                continue
+            seen.add(key)
+            danger_hits = _danger_hit_count(abs_file, danger_cache)
+            if time.monotonic() >= deadline:
+                raise se.SourceScanTimeout({
+                    "elapsed_seconds": round(float(timeout), 3),
+                    "files_seen": 0, "source_files": 0,
+                    "directories_seen": len(scan_roots), "hits_seen": len(entries),
+                    "current_path": str(abs_file), "scan": "entry-classification",
                 })
+            entries.append({
+                "api": api,
+                "input_shape": hit["label"],
+                "file_line": "%s:%d" % (rel, hit["line"]),
+                "default_features": "[]",
+                "untrusted": True,
+                "danger_hits": danger_hits,
+                "module": rel.split("/")[0],
+                "entry_kind": "library-api",
+                "text": hit["text"],
+            })
     entries.sort(key=lambda e: (str(e.get("file_line")), str(e.get("api"))))
+    if time.monotonic() >= deadline:
+        raise se.SourceScanTimeout({
+            "elapsed_seconds": round(float(timeout), 3),
+            "files_seen": 0, "source_files": 0,
+            "directories_seen": len(scan_roots), "hits_seen": len(entries),
+            "current_path": str(scan_root), "scan": "entry-classification-sort",
+        })
     return entries
 
 
@@ -305,43 +393,144 @@ def scan_entries(source_dirs: List[Path],
     return summarize_hits(scan_all_entries(source_dirs), max_items)
 
 
-def prepare_target(root: Path, name: str, target_dir: Path) -> TargetConfig:
-    """Copy a new target into targets/<name>/ and build a config skeleton."""
+def prepare_target(root: Path, name: str, target_dir: Path,
+                   round_budget: Optional[Dict[str, Any]] = None) -> TargetConfig:
+    """Copy a new target and inventory it within the persisted round budget."""
+    from ..analysis.audit_budget import budget_path, round_budget_snapshot
+
     target_dir = target_dir.resolve()
     dest = root / "targets" / name
-    is_web = _is_web_target(target_dir)
+    prep_started = time.monotonic()
+    if round_budget:
+        budget_snapshot = round_budget_snapshot(round_budget)
+        remaining_round = float(budget_snapshot["remaining_seconds"])
+        # The S0 setup window is tied to the original round start, so retrying
+        # preparation cannot renew its 15-minute slice.
+        prep_window_remaining = max(
+            0.0, TARGET_PREPARATION_MAX_SECONDS -
+            float(budget_snapshot["elapsed_seconds"]))
+        remaining = min(remaining_round, prep_window_remaining)
+    else:
+        remaining = min(600.0, TARGET_PREPARATION_MAX_SECONDS)
+    deadline = prep_started + remaining
+
+    def check_budget(stage: str, current_path: Path) -> float:
+        left = deadline - time.monotonic()
+        if left < 1:
+            raise TargetPreparationTimeout({
+                "stage": stage, "current_path": str(current_path),
+                "elapsed_seconds": round(time.monotonic() - prep_started, 3),
+                "claim_status": "not-a-finding",
+            })
+        return left
+
+    def write_status(stage: str, current_path: Path,
+                     status: str = "in-progress") -> None:
+        if not round_budget:
+            return
+        status_path = budget_path(
+            root, name, int(round_budget["round"])).parent / \
+            "target-preparation-status.json"
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "status": status, "stage": stage,
+            "current_path": str(current_path),
+            "elapsed_seconds": round(time.monotonic() - prep_started, 3),
+            "remaining_seconds": round(max(0.0, deadline - time.monotonic()), 3),
+            "round_remaining_seconds": (
+                round(float(round_budget_snapshot(round_budget)["remaining_seconds"]), 3)
+                if round_budget else None),
+            "claim_status": "not-a-finding",
+        }
+        status_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8")
+        print("[S0 prepare] %s path=%s elapsed=%.1fs remaining=%.1fs" % (
+            stage, current_path, payload["elapsed_seconds"],
+            payload["remaining_seconds"]))
+
+    write_status("target-type-detection", target_dir)
+    is_web = _is_web_target(
+        target_dir, timeout=min(30.0, check_budget("target-type-detection", target_dir)))
     if not dest.exists():
         dest.mkdir(parents=True)
-        subprocess.run(
-            ["rsync", "-a", "--exclude", ".git", "--exclude", "target",
-             "--exclude", "build", "--exclude", ".gradle",
-             str(target_dir) + "/", str(dest) + "/"],
-            check=True, timeout=600)
+        try:
+            write_status("target-copy", target_dir)
+            subprocess.run(
+                ["rsync", "-a", "--exclude", ".git", "--exclude", "target",
+                 "--exclude", "build", "--exclude", ".gradle",
+                 str(target_dir) + "/", str(dest) + "/"],
+                check=True, timeout=min(600.0, check_budget("target-copy", target_dir)))
+        except subprocess.TimeoutExpired as exc:
+            shutil.rmtree(dest, ignore_errors=True)
+            raise TargetPreparationTimeout({
+                "stage": "target-copy", "current_path": str(target_dir),
+                "error": "rsync exceeded the remaining audit budget",
+                "claim_status": "not-a-finding",
+            }) from exc
+        except Exception:
+            shutil.rmtree(dest, ignore_errors=True)
+            raise
     # Auto-copy built jars from the source tree (rsync excludes target/, so a
     # freshly built jar would otherwise never be seen by the jar scan).
     jar_srcs: List[Path] = []
     for pat in ("target/*.jar", "*/target/*.jar", "lib/*.jar", "*.jar"):
+        check_budget("jar-import", target_dir)
         jar_srcs += [p for p in target_dir.glob(pat)
                      if "sources" not in p.name and "javadoc" not in p.name]
     if jar_srcs:
         lib = dest / "lib"
         lib.mkdir(parents=True, exist_ok=True)
-        for j in jar_srcs:
-            shutil.copy2(j, lib / j.name)
+        for jar_source in jar_srcs:
+            check_budget("jar-import", jar_source)
+            shutil.copy2(jar_source, lib / jar_source.name)
     if is_web:
         # Web-app layouts vary (Clojure src/, Maven src/main/java, ...):
         # prefer a top-level src/ dir, else the copy root.
         web_dirs = [d for d in dest.iterdir() if d.is_dir() and d.name == "src"]
         source_dirs = [d.relative_to(dest).as_posix() for d in web_dirs] or ["."]
-        entries = scan_all_http_entries([dest / d for d in source_dirs])
+        write_status("http-entry-scan", dest)
+        entries = scan_all_http_entries(
+            [dest / d for d in source_dirs],
+            timeout=min(600.0, check_budget("http-entry-scan", dest)))
     else:
         source_dirs = sorted(
             d.relative_to(dest).as_posix()
             for d in dest.iterdir() if (d / "src" / "main" / "java").exists())
-        entries = scan_all_entries([dest / d for d in source_dirs])
-    jars = sorted(
-        p.as_posix() for p in dest.rglob("*.jar")
-        if "sources" not in p.name and "javadoc" not in p.name)
+        write_status("library-entry-scan", dest)
+        try:
+            entries = scan_all_entries(
+                [dest / d for d in source_dirs],
+                timeout=min(600.0, check_budget("library-entry-scan", dest)))
+        except se.SourceScanTimeout as exc:
+            raise TargetPreparationTimeout({
+                "stage": "library-entry-scan", "current_path": str(dest),
+                "error": str(exc), "scan_progress": exc.progress,
+                "claim_status": "not-a-finding",
+            }) from exc
+    write_status("jar-discovery", dest)
+    jars: List[str] = []
+    jar_dirs = [dest]
+    while jar_dirs:
+        current = jar_dirs.pop()
+        check_budget("jar-discovery", current)
+        try:
+            with os.scandir(current) as children:
+                for child in children:
+                    check_budget("jar-discovery", Path(child.path))
+                    try:
+                        if child.is_dir(follow_symlinks=False):
+                            jar_dirs.append(Path(child.path))
+                        elif (child.name.endswith(".jar")
+                              and "sources" not in child.name
+                              and "javadoc" not in child.name
+                              and child.is_file(follow_symlinks=True)):
+                            jars.append(Path(child.path).as_posix())
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    jars.sort()
     if not jars and not is_web:
         raise SystemExit(
             "no jars found under %s: build first (mvn package / ./mvnw -DskipTests package),\n"
@@ -349,6 +538,7 @@ def prepare_target(root: Path, name: str, target_dir: Path) -> TargetConfig:
     target_urls: Dict[str, str] = {}
     env_md = target_dir / "env.md"
     if env_md.exists():
+        check_budget("target-metadata", env_md)
         for line in env_md.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()
             if line.lower().startswith("target_url:"):
@@ -361,6 +551,7 @@ def prepare_target(root: Path, name: str, target_dir: Path) -> TargetConfig:
     for scope_name in ("scope.md", "SECURITY-SCOPE.md", "SECURITY.md"):
         scope_file = target_dir / scope_name
         if scope_file.exists():
+            check_budget("scope-metadata", scope_file)
             scope_constraints = scope_file.read_text(
                 encoding="utf-8", errors="replace").strip()
             break
@@ -379,49 +570,24 @@ def prepare_target(root: Path, name: str, target_dir: Path) -> TargetConfig:
         "candidates": [],
         "notes": "auto-generated by autonomous driver",
     }
+    check_budget("config-write", dest)
     cfg_path = root / "agent" / "regression" / "configs" / (name + "-auto.json")
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
-    _persist_coverage_inventory(root, name, dest, source_dirs,
-                                "web-app" if is_web else "library")
+    write_status("complete", dest, status="complete")
     return TargetConfig.load(cfg_path)
 
 
-def _persist_coverage_inventory(root: Path, name: str, dest: Path,
-                                source_dirs: List[str], target_type: str) -> Dict[str, Any]:
-    """Persist the full coverage inventory for a freshly prepared target.
+def _ensure_capability_inventory(ctx: "AutoCtx", *, allow_rebuild: bool = True,
+                                rebuild_budget_seconds: Optional[int] = None
+                                ) -> Dict[str, Any]:
+    """Load valid path indices or build them after candidate-first work.
 
-    Gives the autonomous driver the same coverage ledger the config-driven
-    pipeline gets from S1: source universe + entries + sinks + security controls,
-    with an explicit state for every file (spec §18 Phase 1 / §21.3).
-    """
-    from ..analysis import coverage as cov
-    from ..analysis.inventory import (CoverageStore, build_inventory,
-                                      persist_inventory)
-    try:
-        result = build_inventory(dest, source_dirs, target=name, target_type=target_type)
-        store = CoverageStore(root, name)
-        written = persist_inventory(store, result, target_type=target_type)
-        # Derive from persisted records and ledger state, including the scope
-        # contract written by ``persist_inventory``.  A missing/invalid source
-        # root therefore remains visible as ``scope-invalid`` rather than
-        # becoming an empty-denominator success.
-        refresh = cov.refresh_candidate_coverage(store, root, name)
-        return {"written": written, "counts": result.counts(),
-                "coverage": refresh, "scope": result.scope}
-    except Exception as exc:  # pragma: no cover - inventory is best-effort here
-        # Never block target preparation on the coverage layer; the gap is
-        # recorded rather than silently swallowed.
-        return {"error": "%s: %s" % (type(exc).__name__, exc)}
-
-
-def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
-    """Refresh the derived path indices for older autonomous workspaces once.
-
-    New targets already pass through :func:`_persist_coverage_inventory`, but
-    an existing workspace may predate the capability index.  Rebuild only when
-    that index is absent, and keep the failure as an explicit best-effort note
-    so S2 can still run with the model/configured pool.
+    Candidate-first rounds call with ``allow_rebuild=False`` before S2, so a
+    missing or legacy inventory is reported as deferred without blocking
+    configured or model-proposed candidates. After the first candidate wave,
+    the caller may allow one bounded rebuild. A failed scope never falls back
+    to stale rows.
     """
     from ..analysis import capability_graph as capability
     from ..analysis import coverage as cov
@@ -436,15 +602,38 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
     from ..analysis import threat_model as threat_model_analysis
     from ..analysis.inventory import (CoverageStore, build_inventory,
                                       coverage_scope_status, persist_inventory)
+    from ..analysis.languages import SourceFilter, SourceScanTimeout
 
     store = CoverageStore(ctx.root, ctx.cfg.name)
     target_root, _effective_source_dirs = _target_source_scope(ctx)
     # Keep the configured (rather than normalized) spellings for the persisted
     # contract so a missing/outside path remains a visible scope gap.
     source_dirs = list(ctx.cfg.source_dirs or [])
+    scan_timeout = getattr(ctx.cfg, "coverage_scan_timeout_seconds", 600)
+    if (isinstance(scan_timeout, bool)
+            or not isinstance(scan_timeout, int) or scan_timeout < 0):
+        return {"rebuilt": False,
+                "error": "coverage_scan_timeout_seconds must be a nonnegative integer",
+                "scope": {"status": "invalid-config", "usable": False},
+                "graph": {}, "candidates": []}
+    source_filter = SourceFilter(scan_timeout_seconds=scan_timeout)
+    budget_reader = getattr(ctx, "round_budget_remaining", None)
+    round_remaining = budget_reader() if callable(budget_reader) else None
+    runtime_budget = round_remaining
+    if rebuild_budget_seconds is not None:
+        rebuild_budget = int(rebuild_budget_seconds)
+        if rebuild_budget < 1:
+            return {"rebuilt": False, "deferred": True,
+                    "status": "deferred", "error": "no round budget remains",
+                    "scope": {"status": "deferred", "usable": False},
+                    "graph": {}, "candidates": []}
+        runtime_budget = (min(runtime_budget, rebuild_budget)
+                          if runtime_budget is not None else rebuild_budget)
+    if runtime_budget is not None:
+        source_filter.runtime_deadline_override_seconds = runtime_budget
     scope_status = coverage_scope_status(
         store, target_root, source_dirs or None,
-        target_type=ctx.cfg.target_type)
+        source_filter=source_filter, target_type=ctx.cfg.target_type)
     required_ready = (store.path(capability.CAPABILITY_GRAPH_INDEX).exists()
             and store.path(threat_model_analysis.THREAT_MODEL_INDEX).exists()
             and store.path(semantic.SEMANTIC_PATH_INDEX).exists()
@@ -455,11 +644,49 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
             and store.path(semantic_transform.SEMANTIC_TRANSFORM_INDEX).exists()
             and store.path(semantic_binding.SEMANTIC_BINDING_INDEX).exists()
             and store.path(evidence_provenance_analysis.EVIDENCE_PROVENANCE_INDEX).exists())
-    # An invalid contract is already an explicit audit result.  Rebuilding it
-    # every autonomous round cannot repair a typo; missing/legacy/mismatched
-    # contracts must be rebuilt before static evidence is reused.
+    # An incomplete/failed scan must never make old derived artifacts look
+    # current. Permit a retry only after an explicit --force or a changed scope/
+    # timeout; an unchanged failed scan would otherwise repeat every round.
+    build_status = scope_status.get("build_status") or {}
+    expected_scope = scope_status.get("expected") or {}
+    actual_scope = scope_status.get("actual") or {}
+    scope_fields = ("root", "source_dirs", "requested_source_dirs",
+                    "invalid_source_dirs", "filter", "target_type")
+    # Compare against this attempt, never the last successful inventory. A
+    # failed rebuild after widening the scope leaves that old inventory intact.
+    # Comparing to it would automatically repeat the same failed work forever.
+    attempted_scope = build_status.get("attempt_scope")
+    if isinstance(attempted_scope, dict):
+        contract_changed = any(expected_scope.get(field) != attempted_scope.get(field)
+                               for field in scope_fields)
+    elif build_status.get("status") in {"running", "incomplete", "failed"}:
+        # Legacy failures did not retain their contract. An unknown attempt is
+        # not evidence of a changed scope; --force migrates it explicitly.
+        contract_changed = False
+    else:
+        contract_changed = any(expected_scope.get(field) != actual_scope.get(field)
+                               for field in scope_fields)
+    retry_scope_changed = (contract_changed
+        or ("source_dirs" in build_status and
+            build_status["source_dirs"] != source_dirs)
+        or ("timeout_seconds" in build_status and
+            build_status["timeout_seconds"] != scan_timeout))
+    attempt_key = (expected_scope.get("scope_id", ""), scan_timeout)
+    attempted = getattr(ctx, "_coverage_attempted_contracts", set())
+    retry_requested = bool(getattr(ctx, "force", False)) and attempt_key not in attempted
+    blocked_scope = scope_status["status"] in {
+        "running", "incomplete", "failed", "invalid",
+    }
+    if blocked_scope and not (retry_requested or retry_scope_changed):
+        return {"rebuilt": False,
+                "error": "coverage scope is %s; refusing stale derived indices" %
+                         scope_status["status"],
+                "coverage": {"state": "scope-incomplete",
+                             "claim_status": "not-a-finding"},
+                "scope": scope_status, "graph": {}, "candidates": []}
     scope_requires_rebuild = scope_status["status"] in {
-        "missing", "legacy", "mismatch",
+        "missing", "legacy", "mismatch", "running", "incomplete",
+        "failed", "invalid",
     }
     if required_ready and not scope_requires_rebuild:
         refresh = cov.refresh_candidate_coverage(store, ctx.root, ctx.cfg.name)
@@ -484,19 +711,73 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
                 "threat_model": threat_model_analysis.load_threat_model(
                     ctx.root, ctx.cfg.name)}
 
+    # Autonomous S2 must be able to validate an initial candidate before a
+    # potentially repository-wide rebuild. Reuse complete, matching indices
+    # above, but defer new/missing/stale inventory work until there is no
+    # candidate waiting for a falsifier.
+    if not allow_rebuild:
+        deferred_scope = dict(scope_status)
+        deferred_scope["status"] = "deferred"
+        deferred_scope["usable"] = False
+        deferred_scope["mismatches"] = list(
+            deferred_scope.get("mismatches") or []) + ["capability-index-not-ready"]
+        return {"rebuilt": False, "deferred": True, "status": "deferred",
+                "error": "capability inventory deferred until candidate-first work completes",
+                "scope": deferred_scope, "graph": {}, "candidates": [],
+                "semantic": {}, "semantic_guards": {},
+                "semantic_guard_candidates": [], "semantic_calls": {},
+                "semantic_call_candidates": [], "semantic_controlflow": {},
+                "semantic_controlflow_candidates": [], "semantic_ast": {},
+                "semantic_ast_candidates": [], "semantic_transforms": {},
+                "semantic_transform_candidates": [], "semantic_bindings": {},
+                "semantic_binding_candidates": [], "evidence_provenance": {},
+                "threat_model": {}}
+
     try:
+        attempted.add(attempt_key)
+        ctx._coverage_attempted_contracts = attempted
+        build_record = {
+            "status": "running",
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+            "timeout_seconds": source_filter.scan_timeout_seconds,
+            "runtime_budget_seconds": runtime_budget,
+            "source_dirs": source_dirs,
+            "attempt_scope": expected_scope,
+        }
+        store.write("coverage-build-status", build_record)
+
+        def report_progress(progress: Dict[str, Any]) -> None:
+            store.write("coverage-build-status", {
+                **build_record, **progress, "status": "running",
+            })
+
         result = build_inventory(target_root, source_dirs or None,
+                                 source_filter=source_filter,
                                  target=ctx.cfg.name,
-                                 target_type=ctx.cfg.target_type)
+                                 target_type=ctx.cfg.target_type,
+                                 progress_callback=report_progress)
         persist_inventory(store, result, target_type=ctx.cfg.target_type)
+        store.write("coverage-build-status", {
+            **build_record,
+            "status": "complete",
+            "completed_at": datetime.now().isoformat(timespec="seconds"),
+            "scope_id": result.scope.get("scope_id", ""),
+            "source_files": len(result.files),
+            "elapsed_ms": result.elapsed_ms,
+        })
+        refreshed_scope = coverage_scope_status(
+            store, target_root, source_dirs or None,
+            source_filter=source_filter, target_type=ctx.cfg.target_type)
+        if not refreshed_scope.get("usable"):
+            return {"rebuilt": True,
+                    "error": "rebuilt coverage scope is %s; refusing derived indices" %
+                             refreshed_scope.get("status", "unknown"),
+                    "coverage": {"state": "scope-incomplete",
+                                 "claim_status": "not-a-finding"},
+                    "scope": refreshed_scope, "graph": {}, "candidates": []}
         refresh = cov.refresh_candidate_coverage(store, ctx.root, ctx.cfg.name)
-        return {"rebuilt": True, "coverage": refresh, "scope": {
-                    "before": scope_status["status"],
-                    "after": coverage_scope_status(
-                        store, target_root, source_dirs or None,
-                        target_type=ctx.cfg.target_type)["status"],
-                    "claim_status": "not-a-finding",
-                },
+        return {"rebuilt": True, "coverage": refresh,
+                "scope": refreshed_scope,
                 "graph": capability.load_capability_graph(store),
                 "candidates": capability.load_capability_candidates(store),
                 "semantic": semantic.load_semantic_evidence(store),
@@ -516,9 +797,29 @@ def _ensure_capability_inventory(ctx: "AutoCtx") -> Dict[str, Any]:
                 "threat_model": threat_model_analysis.load_threat_model(
                     ctx.root, ctx.cfg.name),
                 "root": str(target_root)}
+    except SourceScanTimeout as exc:
+        store.write("coverage-build-status", {
+            **build_record,
+            "status": "incomplete",
+            "failed_at": datetime.now().isoformat(timespec="seconds"),
+            "error": str(exc), "progress": exc.progress,
+        })
+        return {"rebuilt": False, "error": str(exc),
+                "status": "incomplete", "progress": exc.progress,
+                "scope": {"status": "incomplete", "usable": False},
+                "graph": {}, "candidates": [],
+                "claim_status": "not-a-finding"}
     except Exception as exc:  # pragma: no cover - autonomous is best-effort
+        store.write("coverage-build-status", {
+            **build_record,
+            "status": "failed",
+            "failed_at": datetime.now().isoformat(timespec="seconds"),
+            "error": "%s: %s" % (type(exc).__name__, exc),
+        })
         return {"rebuilt": False,
                 "error": "%s: %s" % (type(exc).__name__, exc),
+                "status": "failed",
+                "scope": {"status": "failed", "usable": False},
                 "graph": {}, "candidates": [], "semantic": {},
                 "semantic_guards": {},
                 "semantic_guard_candidates": [],
@@ -540,7 +841,8 @@ class AutoCtx:
     def __init__(self, root: Path, cfg: TargetConfig, llm: LLMClient,
                  offline: bool, max_candidates: int, max_rounds: int,
                  fuzz_budget: int = 0, fuzz_seed: Optional[int] = None,
-                 fuzz_force: bool = False, fuzz_skip_minimize: bool = False):
+                 fuzz_force: bool = False, fuzz_skip_minimize: bool = False,
+                 force: bool = False):
         self.root = root
         self.cfg = cfg
         self.llm = llm
@@ -558,6 +860,7 @@ class AutoCtx:
         self.fuzz_seed = fuzz_seed
         self.fuzz_force = fuzz_force
         self.fuzz_skip_minimize = fuzz_skip_minimize
+        self.force = bool(force)
         # Baseline #9: candidates carried from the previous round, passed into
         # the next S2 so the research loop is continuous, not from-zero.
         self.carryover: List[Dict[str, Any]] = []
@@ -565,6 +868,37 @@ class AutoCtx:
         self._public_scan_cache: Optional[Dict[str, Any]] = None
         self._benchmark_feedback_cache: Optional[Dict[str, Any]] = None
         self._replay_cohort_cache: Optional[Dict[str, Any]] = None
+        self.s4_execution_budget: Optional[S4ExecutionBudget] = None
+        self._coverage_inventory_round: Optional[int] = None
+        self._coverage_inventory_state: Optional[Dict[str, Any]] = None
+        self._candidate_source_hit_cache: Dict[Any, Any] = {}
+        self._candidate_source_snippet_cache = se.CandidateSourceSnippetCache(
+            root / "state" / cfg.name / "cache" /
+            "candidate-source-snippets-v1.json")
+        self._api_hint_attempted = False
+        self._round_budget_record: Optional[Dict[str, Any]] = None
+
+    def round_budget_remaining(self) -> Optional[float]:
+        """Read the current round's persistent deadline, if one is active."""
+        if not isinstance(self._round_budget_record, dict):
+            return None
+        from ..analysis.audit_budget import round_budget_snapshot
+
+        return float(round_budget_snapshot(self._round_budget_record)
+                     ["remaining_seconds"])
+
+    def source_scan_timeout(self) -> int:
+        """Clamp prompt-source scans to both config and active round budget."""
+        configured = getattr(self.cfg, "coverage_scan_timeout_seconds", 600)
+        if (isinstance(configured, bool) or not isinstance(configured, int)
+                or configured < 0):
+            raise ValueError(
+                "coverage_scan_timeout_seconds must be a nonnegative integer")
+        remaining = self.round_budget_remaining()
+        if remaining is None:
+            return configured
+        available = max(1, int(remaining))
+        return min(configured, available) if configured > 0 else available
 
     def public_disclosures(self) -> Dict[str, Any]:
         """Memoized internet disclosure scan (plan 2.7); [] when offline."""
@@ -660,16 +994,21 @@ def _scope_block(ctx: "AutoCtx", limit: int = 4000) -> str:
             "必须作为候选筛选与审计的硬约束]\n%s" % text[:limit])
 
 
-def learn_api_hint(ctx: AutoCtx) -> str:
+def learn_api_hint(ctx: AutoCtx, round_no: int = 1) -> str:
     """S1.5: LLM reads the target's entry classes and writes an API hint
     (package names, entry signatures, default security switches) so later
     PoC generation does not mix up library versions (e.g. Jackson 2 vs 3)."""
     if ctx.cfg.api_hint:
         return ctx.cfg.api_hint
+    if ctx._api_hint_attempted:
+        return ""
+    ctx._api_hint_attempted = True
     source_root, source_dirs = _target_source_scope(ctx)
     srcs = ", ".join(source_dirs)
     src_block = surface_block(ctx.cfg.entry_points, source_dirs,
-                              source_root, max_chars=5000)
+                              source_root, max_chars=5000,
+                              snippet_cache=ctx._candidate_source_snippet_cache,
+                              timeout=ctx.source_scan_timeout())
     if ctx.cfg.target_type == "web-app":
         user = (
             "目标应用：%s\n源码目录：%s\nHTTP 入口清单：\n%s\n\n"
@@ -699,7 +1038,7 @@ def learn_api_hint(ctx: AutoCtx) -> str:
         return ""
     if hint:
         ctx.cfg.api_hint = hint
-        ctx.write_artifact(1, "S1", "api-hint.json", {"api_hint": hint})
+        ctx.write_artifact(round_no, "S1", "api-hint.json", {"api_hint": hint})
     return hint
 
 
@@ -716,6 +1055,9 @@ def _coverage_prompt_block(ctx: AutoCtx, round_no: int) -> str:
         from ..analysis.inventory import CoverageStore
         from ..memory.research import load_research_memory
         store = CoverageStore(ctx.root, ctx.cfg.name)
+        scope = _current_coverage_scope(ctx)
+        if not scope.get("usable"):
+            return ""
         memory = load_research_memory(ctx.root, ctx.cfg.name)
         benchmark_feedback = ctx.benchmark_feedback()
         sctx = sched.ScheduleContext.from_store(
@@ -730,6 +1072,22 @@ def _coverage_prompt_block(ctx: AutoCtx, round_no: int) -> str:
         return ""
 
 
+def _current_coverage_scope(ctx: AutoCtx) -> Dict[str, Any]:
+    """Return whether persisted coverage belongs to the configured source scope."""
+    from ..analysis.inventory import CoverageStore, coverage_scope_status
+    from ..analysis.languages import SourceFilter
+
+    timeout = getattr(ctx.cfg, "coverage_scan_timeout_seconds", 600)
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 0:
+        return {"status": "invalid-config", "usable": False}
+    target_root, _effective_source_dirs = _target_source_scope(ctx)
+    return coverage_scope_status(
+        CoverageStore(ctx.root, ctx.cfg.name), target_root,
+        list(ctx.cfg.source_dirs or []) or None,
+        source_filter=SourceFilter(scan_timeout_seconds=timeout),
+        target_type=ctx.cfg.target_type)
+
+
 def schedule_candidates(ctx: AutoCtx, round_no: int,
                         candidates: List[Dict[str, Any]],
                         pinned: Optional[List[str]] = None
@@ -741,13 +1099,37 @@ def schedule_candidates(ctx: AutoCtx, round_no: int,
     instead of looking scheduled.
     """
     from ..analysis import scheduler as sched
+    from ..analysis.research_agenda import normalize_candidate_ids
+    agenda_priority_ids = selected_candidate_ids(
+        load_research_agenda(ctx.root, ctx.cfg.name),
+        current_round=round_no)
+    configured_priority_ids = normalize_candidate_ids(
+        getattr(ctx.cfg, "priority_candidate_ids", []))
+    priority_ids = normalize_candidate_ids(
+        configured_priority_ids + agenda_priority_ids)
     active_candidates, candidate_intake = sched.bounded_candidate_intake(
         candidates, slots=ctx.max_candidates, round_no=round_no,
-        pinned=pinned or ())
+        pinned=pinned or (), priority_ids=priority_ids)
     ctx.write_artifact(round_no, "S2", "candidate-intake.json", candidate_intake)
+    inventory_state = (
+        ctx._coverage_inventory_state
+        if (getattr(ctx, "_coverage_inventory_round", None) == round_no
+            and isinstance(getattr(ctx, "_coverage_inventory_state", None), dict))
+        else {})
+    if inventory_state.get("deferred"):
+        selected = active_candidates[:ctx.max_candidates]
+        return selected, ("coverage-aware scheduling deferred until after the first "
+                          "candidate wave; using bounded candidates")
+    scope = _current_coverage_scope(ctx)
+    if not scope.get("usable"):
+        selected = active_candidates[:ctx.max_candidates]
+        return selected, ("coverage-aware scheduling withheld: scope %s; "
+                          "using bounded configured candidates only" %
+                          scope.get("status", "unknown"))
     selected, plan, note = sched.round_selection(
         ctx.root, ctx.cfg.name, active_candidates, ctx.max_candidates,
         round_no=round_no, pinned=pinned or (),
+        priority_ids=configured_priority_ids,
         benchmark_feedback=ctx.benchmark_feedback())
     if candidate_intake["deferred_intake_candidates"]:
         intake_note = ("candidate intake %d/%d active; %d queued for rotation"
@@ -825,9 +1207,22 @@ def static_candidates(ctx: AutoCtx, round_no: Optional[int] = None
     try:
         from ..analysis import controls as ctl
         from ..analysis.inventory import CoverageStore
-        _ensure_capability_inventory(ctx)
-        store = CoverageStore(ctx.root, ctx.cfg.name)
-        candidates = ctl.static_candidates(store)
+        inventory_state = (
+            ctx._coverage_inventory_state
+            if (round_no is not None
+                and getattr(ctx, "_coverage_inventory_round", None) == round_no
+                and isinstance(ctx._coverage_inventory_state, dict))
+            else _ensure_capability_inventory(ctx))
+        scope = inventory_state.get("scope") or {}
+        if (inventory_state.get("error")
+                or (isinstance(scope, dict)
+                    and scope.get("usable") is False)):
+            print("[S2] static candidates withheld: %s" %
+                  inventory_state.get("error", "coverage scope unusable"))
+            candidates = []
+        else:
+            store = CoverageStore(ctx.root, ctx.cfg.name)
+            candidates = ctl.static_candidates(store)
     except Exception as exc:  # pragma: no cover - defensive
         print("[S2] static candidates unavailable: %s: %s" % (type(exc).__name__, exc))
         candidates = []
@@ -871,7 +1266,9 @@ def propose_candidates(ctx: AutoCtx, round_no: int,
     versions = ", ".join(sorted({j.get("version") for j in ctx.cfg.jars}))
     source_root, source_dirs = _target_source_scope(ctx)
     src_block = surface_block(ctx.cfg.entry_points, source_dirs,
-                              source_root, max_chars=8000)
+                              source_root, max_chars=8000,
+                              snippet_cache=ctx._candidate_source_snippet_cache,
+                              timeout=ctx.source_scan_timeout())
     coverage_block = _coverage_prompt_block(ctx, round_no)
     carry_text = ""
     if carryover:
@@ -977,7 +1374,10 @@ def audit_candidate(ctx: AutoCtx, cand: Dict[str, Any]) -> Dict[str, Any]:
     source_root, source_dirs = _target_source_scope(ctx)
     srcs = ", ".join(source_dirs)
     src_block = candidate_block(cand, ctx.cfg.entry_points, source_dirs,
-                                source_root, max_chars=8000)
+                                source_root, max_chars=8000,
+                                timeout=ctx.source_scan_timeout(),
+                                hit_cache=ctx._candidate_source_hit_cache,
+                                snippet_cache=ctx._candidate_source_snippet_cache)
     flow_hints = match_source_sink_paths(
         getattr(ctx, "_source_sink_graph", []), cand)
     experiment_plan = json.dumps(
@@ -1018,7 +1418,10 @@ def generate_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
     pre = "; ".join(cand.get("preconditions") or ["无"])
     source_root, source_dirs = _target_source_scope(ctx)
     src_block = candidate_block(cand, ctx.cfg.entry_points, source_dirs,
-                                source_root, max_chars=6000)
+                                source_root, max_chars=6000,
+                                timeout=ctx.source_scan_timeout(),
+                                hit_cache=ctx._candidate_source_hit_cache,
+                                snippet_cache=ctx._candidate_source_snippet_cache)
     experiment_plan = json.dumps(
         cand.get("experiment_plan") or {}, ensure_ascii=False, indent=2)[:6000]
     user = (
@@ -1030,49 +1433,23 @@ def generate_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
         "请输出单个 Java 文件（类名 %s，public static void main），最小可编译，"
         "只使用目标库 %s 的公共 API（入口参考：%s）与 JDK 类，"
         "确保 `javac -cp <jar> 文件.java` 可直接编译通过（import 只写用到的，无 IDE 依赖）。"
-        "main 中按需输出机器可读行（每行 key=value）：\n"
-        "CELL_START=...\nPRE_POLLUTION_GATE=...\nCACHE_POLLUTED=...\n"
-        "GATE_BLOCKED=<实际实例化的类全限定名或异常消息>\n"
-        "INSTANTIATED=<目标类全限定名>（只有确认运行时对象 class 与目标类一致时才输出，"
-        "禁止把“解析返回非空对象”当成 INSTANTIATED；否则不输出该行）\n"
-        "ERROR=...\n"
-        "ENV_ERROR=<环境类异常名，如 NoClassDefFoundError/NoSuchMethodError/"
-        "UnsupportedClassVersionError>（仅当 PoC 因环境原因无法运行且与目标库行为无关时输出；"
-        "框架会把 ENV_ERROR 记为该 cell 环境错误，不据此确认也不据此排除候选）\n"
-        "NETWORK=<带 :// 的真实外联地址，如 ldap://127.0.0.1:1389>\n"
-        "LEAKED=<实际泄露/回显的内容片段或文件路径，如 /etc/passwd 首行或 SSRF 响应特征>"
-        "（只有真实把敏感内容带出到 stdout 时才输出；解析成功不算泄露，禁止输出该行）\n"
-        "EFFECT_KIND=<真实副作用类型：command-executed/process-started/command-marker/file-marker>\n"
-        "EFFECT=<只有实际调用副作用后才输出的具体证据；Canary.mark 或对象实例化不得填写>\n"
-        "CANARY=<仅内存 canary/能力链验证时填写，不能与 RCE 确认等同>\n"
-        "STEP=<已完成的声明步骤标识；按 sequence 顺序逐步输出>\n"
-        "STEP_EVIDENCE=<该步骤的实际证据摘要，不要输出 token/cookie/password>\n"
-        "STATE=<已观察到的本地状态检查点>\n"
-        "CAPABILITY=<从 VULNGATE_CAPABILITIES 中选择且实际观察到的能力原语>\n"
-        "CAPABILITY_EVIDENCE=<capability_id:该原语的安全本地证据，不要输出 token/cookie/password>\n"
-        "TRANSITION=<实际观察到的 from->to，不能只复制 VULNGATE_TRANSITIONS>\n"
-        "TRANSITION_EVIDENCE=<from->to:该 transition 的安全本地证据>\n"
-        "RESIDUAL_ID=<仅从 VULNGATE_RESIDUAL_IDS 中选择且实际探测的 residual id>\n"
-        "RESIDUAL_STATUS=falsified（只有显式 falsifier 已在执行 cell 中成立时输出）\n"
-        "RESIDUAL_FALSIFIER=<从对应 VULNGATE_RESIDUAL_CONTRACT 的 allowed_falsifiers 中选择>\n"
-        "PARSED=...\n"
+        "不要为 PoC 增加 stdout/stderr marker 或伪造证据；这些输出不会被当作目标观测。"
+        "运行器会独立记录退出状态和受支持的 harness 观测；没有对应观测能力时应保留缺口，"
+        "不能靠打印字段填补。\n"
         "禁止真实外联网络（只能尝试 127.0.0.1）。只输出 Java 源码，无 Markdown 围栏。"
         "输出不超过 200 行，只允许 ASCII 字符（禁止全角中文标点），禁止解释性文本。"
         "若候选是 DoS/资源耗尽类（OOM/栈溢出/CPU），矩阵会自动用小堆（-Xmx256m），"
-        "请在 PoC 中捕获 Throwable 并输出 ERROR=<异常类名>: <消息首行> 行，"
-        "例如 ERROR=OutOfMemoryError: Java heap space 或 ERROR=StackOverflowError。"
+        "按候选逻辑触发边界行为；不要吞掉目标异常或用 stdout marker 代替运行器状态。"
         "若候选声明 sequence/concurrency，请读取 VULNGATE_SEQUENCE、"
-        "VULNGATE_CONCURRENCY、VULNGATE_AVAILABILITY_PROBE；只有真实执行的步骤"
-        "才输出 STEP/STEP_EVIDENCE/STATE，只有实际 worker 饱和与服务不可用才输出"
-        "CONCURRENCY/ SERVICE_UNAVAILABLE。"
+        "VULNGATE_CONCURRENCY、VULNGATE_AVAILABILITY_PROBE 并按有界计划执行；"
+        "这些声明字段不是执行结果。"
         "若环境提供 VULNGATE_VARIANT_SURFACE、VULNGATE_VARIANT_ID、"
         "VULNGATE_VARIANT_LANE、VULNGATE_VARIANT_STATE_STEPS，必须把它们当作"
         "当前 fixture 的实验选择器；positive/negative/environment-gap 不等于结果，"
-        "只有真实完成的 state step 和证据才能输出 STEP/STATE/EFFECT。"
+        "按选定 lane 执行真实状态步骤，不需要打印 STEP/STATE/EFFECT marker。"
         "若候选包含 capability_contract，请读取 VULNGATE_CAPABILITY_CONTRACT、"
-        "VULNGATE_CAPABILITIES、VULNGATE_TRANSITIONS；只有实际观察到对应原语、"
-        "transition 或 typed effect 才输出 CAPABILITY/CAPABILITY_EVIDENCE/"
-        "TRANSITION/TRANSITION_EVIDENCE/EFFECT，不能把声明值当作观测值。"
+        "VULNGATE_CAPABILITIES、VULNGATE_TRANSITIONS 并按契约执行探测；不能把声明值"
+        "当作观测结果，也不需要打印 CAPABILITY/TRANSITION/EFFECT marker。"
         % (cand["candidate_id"], cand.get("surface"), cand.get("entry"),
            cand.get("logic"), pre, versions,
            experiment_plan or "（无实验计划）",
@@ -1102,7 +1479,7 @@ def repair_poc(ctx: AutoCtx, cand: Dict[str, Any], src_text: str, compile_error:
     """S4b: one LLM repair pass with the actual javac error."""
     class_name = cand.get("poc_class") or cand["candidate_id"]
     user = (
-        "你上次为候选 %s 生成的 PoC 未通过验证（编译失败或运行时无有效观测），"
+        "你上次为候选 %s 生成的 PoC 遇到具体编译/API/运行错误，"
         "反馈如下：\n\n%s\n\n"
         "候选攻击面（必须针对这个攻击面重写 PoC，不要另起炉灶）：\n%s\n"
         "攻击逻辑：%s\n"
@@ -1110,12 +1487,10 @@ def repair_poc(ctx: AutoCtx, cand: Dict[str, Any], src_text: str, compile_error:
         "若反馈是'程序包不存在/找不到符号'，说明你使用了错误的外部库"
         "（如 javax.json / org.json），必须改用目标库 %s 的公共 API；"
         "入口参考：%s。\n"
-        "请只输出修正后的完整 Java 文件（类名 %s），保持机器可读输出行约定，"
-        "如候选声明了 sequence/concurrency，保留逐步 STEP/STEP_EVIDENCE/STATE 观测；"
-        "如候选包含 capability_contract，保留实际的 CAPABILITY/CAPABILITY_EVIDENCE/"
-        "TRANSITION/TRANSITION_EVIDENCE 观测，不能照抄声明，"
-        "如候选包含 residual_contracts，只能在实际执行且明确安全反证成立时输出"
-        "RESIDUAL_ID/RESIDUAL_STATUS=falsified/RESIDUAL_FALSIFIER，不能凭声明输出，"
+        "请只输出修正后的完整 Java 文件（类名 %s），只修复反馈明确指出的编译、API "
+        "或调用错误，不要为缺少 stdout marker 或独立观测而重写 PoC；"
+        "stdout/stderr marker 都是未验证声明，不能补成证据。按候选的 sequence、"
+        "capability_contract、residual_contracts 执行实际探测，不必打印对应 marker。"
         "只使用公共 API 与 JDK 类，确保可编译。输出不超过 200 行，"
         "只允许 ASCII 字符（禁止全角中文标点），无 Markdown 围栏。"
         % (cand["candidate_id"], compile_error[-3000:],
@@ -1163,47 +1538,32 @@ def extract_shell_code(text: str) -> str:
 
 
 def generate_shell_poc(ctx: AutoCtx, cand: Dict[str, Any]) -> str:
-    """S4a-web: LLM writes a bash HTTP PoC (observation contract in prompt)."""
+    """S4a-web: LLM writes a minimal bash HTTP PoC for harness observation."""
     versions = ", ".join(sorted({v for v in ctx.cfg.target_urls}))
     pre = "; ".join(cand.get("preconditions") or ["无"])
     source_root, source_dirs = _target_source_scope(ctx)
     src_block = candidate_block(cand, ctx.cfg.entry_points, source_dirs,
-                                source_root, max_chars=6000)
+                                source_root, max_chars=6000,
+                                timeout=ctx.source_scan_timeout(),
+                                hit_cache=ctx._candidate_source_hit_cache,
+                                snippet_cache=ctx._candidate_source_snippet_cache)
     user = (
         "候选：%s\n攻击面：%s\n入口：%s\n逻辑：%s\n前置条件：%s\n"
         "可用目标版本(base URL 来自 env.md)：%s\n\n"
         "候选相关源码片段（真实源码证据，按真实端点与参数写 PoC，禁止凭记忆猜 API）：\n%s\n\n"
         "请输出单个 bash 脚本（HTTP PoC），最小可运行：\n"
         "- base URL 从环境变量 VULNGATE_TARGET_URL 读取（脚本内拼接路径）；\n"
-        "- 按候选逻辑构造请求（curl 或 python3 urllib），真实发送并检查响应；\n"
-        "- 必须打印机器可读观测行（基于真实运行结果）：\n"
-        "  HTTP_CODE=<状态码>\n  RESP_MATCH=<响应中的特征串>\n"
-        "  EVIDENCE=<副作用证据，如会话接管后 /api/user/current 返回的管理员身份>\n"
-        "  EFFECT_KIND=<真实副作用类型，如 session-marker/file-marker>\n"
-        "  EFFECT=<真实副作用证据；响应状态码或猜测不能代替副作用>\n"
-        "  OBJECT_MUTATED=<true|false；仅在本地 fixture/响应可验证对象确实改变时输出>\n"
-        "  AUTHZ_RESULT=<allow|deny；根据真实服务端授权结果输出>\n"
-        "  STEP=<已完成的声明步骤标识>\n  STEP_EVIDENCE=<该步骤的实际证据摘要>\n"
-        "  STATE=<已观察到的本地状态检查点>\n"
-        "  CAPABILITY=<实际观察到的声明能力原语>\n"
-        "  CAPABILITY_EVIDENCE=<capability_id:该原语的安全本地证据>\n"
-        "  TRANSITION=<实际观察到的声明 from->to>\n"
-        "  TRANSITION_EVIDENCE=<from->to:该 transition 的安全本地证据>\n"
-        "  RESIDUAL_ID=<从 VULNGATE_RESIDUAL_IDS 中选择且实际探测的 residual id>\n"
-        "  RESIDUAL_STATUS=falsified（只有显式 falsifier 已在执行 cell 中成立时输出）\n"
-        "  RESIDUAL_FALSIFIER=<从对应 VULNGATE_RESIDUAL_CONTRACT 的 allowed_falsifiers 中选择>\n"
-        "  GATE_BLOCKED=<未触发的原因>\n  ERROR=<异常>\n"
-        "- 权限矩阵上下文由 VULNGATE_AUTHZ_* 环境变量提供；不要在脚本中写入或输出 token/cookie/password；\n"
+        "- 按候选逻辑构造最小请求（curl 或 python3 urllib），真实发送并在脚本内按需检查响应；\n"
+        "- HTTP 状态由 harness 独立记录；stdout/stderr marker 是未验证声明，不要为满足格式打印；\n"
+        "- 只输出脚本本身，不回显响应正文、token/cookie/password 或其他敏感数据；\n"
+        "- 权限矩阵上下文由 VULNGATE_AUTHZ_* 环境变量提供；\n"
         "- 有状态/竞态候选可读取 VULNGATE_SEQUENCE、VULNGATE_CONCURRENCY、"
-        "VULNGATE_AVAILABILITY_PROBE；只有真实执行的步骤才输出 STEP/STEP_EVIDENCE/STATE，"
-        "不能把声明值直接当作观测值；\n"
+        "VULNGATE_AVAILABILITY_PROBE 并按有界计划执行，不能把声明值当作结果；\n"
         "- 若存在 VULNGATE_VARIANT_SURFACE/VULNGATE_VARIANT_ID/"
         "VULNGATE_VARIANT_LANE/VULNGATE_VARIANT_STATE_STEPS，按当前 lane 选择"
-        "fixture 状态机；lane、required observation 和 falsifier 都不是观测，"
-        "只能用真实执行证据输出对应的 STEP/STATE/EFFECT；\n"
+        "fixture 状态机；lane、required observation 和 falsifier 都不是结果；\n"
         "- 能力链可读取 VULNGATE_CAPABILITY_CONTRACT、VULNGATE_CAPABILITIES、"
-        "VULNGATE_TRANSITIONS；只有真实观察到原语和 transition 才输出对应的"
-        "CAPABILITY/CAPABILITY_EVIDENCE/TRANSITION/TRANSITION_EVIDENCE，不能照抄声明；\n"
+        "VULNGATE_TRANSITIONS 并按契约执行探测，不能把声明值当成观测；\n"
         "- 只允许访问 VULNGATE_TARGET_URL 指向的主机（回环 127.0.0.1）；禁止外联；\n"
         "- 禁止解释性输出，只输出脚本本身。"
         % (cand["candidate_id"], cand.get("surface"), cand.get("entry"),
@@ -1218,15 +1578,14 @@ def repair_shell_poc(ctx: AutoCtx, cand: Dict[str, Any], script_text: str,
                      feedback: str) -> str:
     """S4b-web: one LLM repair pass with the actual shell cell output."""
     user = (
-        "你上次为候选 %s 生成的 Web PoC 未产生有效观测，反馈如下：\n\n%s\n\n"
+        "你上次为候选 %s 生成的 Web PoC 遇到具体脚本或请求错误，反馈如下：\n\n%s\n\n"
         "候选攻击面（必须针对这个攻击面重写，不要另起炉灶）：\n%s\n"
         "攻击逻辑：%s\n"
         "请只输出修正后的完整 bash 脚本：base URL 从 VULNGATE_TARGET_URL 读取，"
-        "按候选逻辑真实发送请求并检查响应，保持机器可读观测行 "
-        "（HTTP_CODE= / RESP_MATCH= / EVIDENCE= / OBJECT_MUTATED= / AUTHZ_RESULT= / STEP= / STEP_EVIDENCE= / STATE= / CAPABILITY= / CAPABILITY_EVIDENCE= / TRANSITION= / TRANSITION_EVIDENCE= / RESIDUAL_ID= / RESIDUAL_STATUS= / RESIDUAL_FALSIFIER= / GATE_BLOCKED= / ERROR=），"
-        "权限上下文从 VULNGATE_AUTHZ_* 环境变量读取，禁止写入或输出 token/cookie/password；"
-        "能力原语和 transition 只能输出真实观察，不得照抄 VULNGATE_CAPABILITIES/"
-        "VULNGATE_TRANSITIONS；"
+        "只修复反馈明确指出的 shell 语法、API 用法或请求构造错误；"
+        "不要为了缺少 stdout marker 或响应观测而改写脚本。HTTP 观测由 harness 采集，"
+        "PoC marker 不能作为证据。权限上下文从 VULNGATE_AUTHZ_* 环境变量读取，"
+        "禁止写入或输出 token/cookie/password；"
         "只允许访问 127.0.0.1/localhost，无解释性文本。"
         % (cand["candidate_id"], feedback[-3000:],
            cand.get("surface", ""), cand.get("logic", ""))
@@ -1275,7 +1634,9 @@ def _verify_web_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
     approval = ApprovalGate(
         log_path=ctx.root / "state" / ctx.cfg.name
         / ("round-%02d" % round_no) / "approval-log.jsonl")
-    runner = ShellMatrixRunner(ctx.root, ctx.cfg.name, round_no, approval=approval)
+    budget = ctx.s4_execution_budget
+    runner = ShellMatrixRunner(ctx.root, ctx.cfg.name, round_no,
+                               approval=approval, execution_budget=budget)
     results: Dict[str, List[Dict[str, Any]]] = {}
     try:
         results = runner.run_manifest([spec])
@@ -1283,8 +1644,45 @@ def _verify_web_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
             ctx.root, ctx.cfg.name, round_no, cid, results.get(cid, []))
         summary = summarize_candidate(cells)
         summary["s4_result_sources"] = convergence["sources"]
-        for _repair_round in range(2):
-            needs_repair = (not summary.get("http_evidence")
+        for _repair_round in range(1):
+            if budget.exhausted(cid):
+                break
+            if summary.get("evidence_gap") == "needs-harness-observer":
+                # Rewriting a PoC cannot provide an unsupported observer.
+                print("  %s: needs-harness-observer; keeping PoC claims and skipping repair" % cid)
+                break
+            # A missing response can mean the harness refused to launch the
+            # cell (unsupported observer, isolation failure, unavailable
+            # precondition, or stop-loss), not that the PoC needs rewriting.
+            # Repair only after at least one actual, non-blocked execution.
+            repairable_statuses = {
+                "needs-harness-observer", "needs-network-isolation", "blocked",
+                "precondition-unavailable", "stop-loss", "resource-limit-exceeded",
+                "aborted",
+            }
+            executed_cell = any(
+                c.get("returncode") is not None
+                and not c.get("harness_error")
+                and not c.get("timed_out")
+                and c.get("policy_status") not in repairable_statuses
+                for c in cells
+            )
+            if not executed_cell:
+                print("  %s: no runnable S4 cell; skipping PoC repair" % cid)
+                break
+            concrete_script_failure = any(
+                c.get("returncode") not in (None, 0)
+                and not c.get("harness_error")
+                and not c.get("timed_out")
+                and c.get("policy_status") not in repairable_statuses
+                for c in cells
+            )
+            if (summary.get("evidence_gap") == "no-independent-http-response"
+                    and not concrete_script_failure):
+                print("  %s: no independent HTTP response; keeping candidate pending" % cid)
+                break
+            needs_repair = (concrete_script_failure
+                            and not summary.get("http_evidence")
                             and not summary.get("gate_blocked")
                             and not summary.get("errors"))
             if not needs_repair:
@@ -1292,7 +1690,9 @@ def _verify_web_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
             print("  %s: no evidence, asking LLM to repair (round %d)..." % (
                 cid, _repair_round + 1))
             feedback = "\n".join(
-                "cell %s: %s" % (c.get("version"), (c.get("stdout") or "")[-800:])
+                "cell %s exit=%s stderr=%s" % (
+                    c.get("version"), c.get("returncode"),
+                    (c.get("stderr") or "")[-800:])
                 for c in cells[:2]) or "no output"
             fixed = repair_shell_poc(ctx, cand, script_text, feedback)
             if not fixed.strip():
@@ -1315,7 +1715,8 @@ def _verify_web_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
             baseline_results=results, approval=approval,
             version_universe=sorted(ctx.cfg.target_urls),
             source_revision_artifacts=ctx.cfg.resolve_source_revision_artifacts(
-                ctx.root))
+                ctx.root),
+            execution_budget=budget)
     except Exception as exc:
         runtime_lab = {
             "schema_version": "runtime-lab-v1", "scope": "ordinary-s4",
@@ -1393,6 +1794,13 @@ def verify_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
                      audit: Dict[str, Any]) -> Dict[str, Any]:
     """S4: write PoC, run the matrix, derive conclusion from observations."""
     cid = cand["candidate_id"]
+    budget = getattr(ctx, "s4_execution_budget", None)
+    if budget is None:
+        budget = S4ExecutionBudget(
+            getattr(ctx.cfg, "s4_timeout_seconds", 5400),
+            getattr(ctx.cfg, "s4_candidate_timeout_seconds", 900))
+        ctx.s4_execution_budget = budget
+    budget.deadline_for(cid)
     fz = cand.get("fuzz_spec")
     if fz:
         return _verify_fuzz_candidate(ctx, round_no, cand, audit, fz)
@@ -1457,7 +1865,9 @@ def verify_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
     approval = ApprovalGate(
         log_path=ctx.root / "state" / ctx.cfg.name
         / ("round-%02d" % round_no) / "approval-log.jsonl")
-    runner = JavaMatrixRunner(ctx.root, ctx.cfg.name, round_no, approval=approval)
+    budget = ctx.s4_execution_budget
+    runner = JavaMatrixRunner(ctx.root, ctx.cfg.name, round_no,
+                              approval=approval, execution_budget=budget)
     cells: List[Dict[str, Any]] = []
     results: Dict[str, List[Dict[str, Any]]] = {}
     try:
@@ -1467,6 +1877,8 @@ def verify_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
         summary = summarize_candidate(cells)
         summary["s4_result_sources"] = convergence["sources"]
         for _repair_round in range(2):
+            if budget.exhausted(cid):
+                break
             inst_fqcn = ""
             if summary.get("instantiated"):
                 inst_fqcn = str(summary["instantiated"][0])
@@ -1507,6 +1919,8 @@ def verify_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
                 ctx.root, ctx.cfg.name, round_no, cid, results.get(cid, []))
             summary = summarize_candidate(cells)
             summary["s4_result_sources"] = convergence["sources"]
+    except BudgetExceeded:
+        raise
     except Exception as exc:  # compile failure / harness error -> honest 待验证
         cells, convergence = converge_s4_cells(
             ctx.root, ctx.cfg.name, round_no, cid, cells)
@@ -1519,7 +1933,8 @@ def verify_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
             ctx.jars_by_version(), baseline_results=results, approval=approval,
             version_universe=sorted(ctx.jars_by_version()),
             source_revision_artifacts=ctx.cfg.resolve_source_revision_artifacts(
-                ctx.root))
+                ctx.root),
+            execution_budget=budget)
     except Exception as exc:
         runtime_lab = {
             "schema_version": "runtime-lab-v1", "scope": "ordinary-s4",
@@ -1573,7 +1988,8 @@ def _verify_fuzz_candidate(ctx: AutoCtx, round_no: int, cand: Dict[str, Any],
     runner = JavaMatrixRunner(
         ctx.root, ctx.cfg.name, round_no,
         approval=ApprovalGate(log_path=ctx.root / "state" / ctx.cfg.name
-                              / ("round-%02d" % round_no) / "approval-log.jsonl"))
+                              / ("round-%02d" % round_no) / "approval-log.jsonl"),
+        execution_budget=ctx.s4_execution_budget)
     try:
         results = runner.run_manifest([spec], ctx.jars_by_version())
         cells, convergence = converge_s4_cells(
@@ -1718,19 +2134,205 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
     CVSS-precondition consistency gate (previously missing in this driver)."""
     from ..memory.state import CheckpointStore
     from ..tools.cvss import check_precondition_consistency
+    from ..analysis.audit_budget import (
+        DEFAULT_BUDGET_SECONDS, round_budget_snapshot, start_round_budget,
+    )
+    from ..analysis.audit_guard import register_active_audit
 
     store = CheckpointStore(ctx.root, ctx.cfg.name, round_no)
+    budget_seconds = getattr(
+        ctx.cfg, "audit_round_timeout_seconds", DEFAULT_BUDGET_SECONDS)
+    if budget_seconds is None:
+        budget_seconds = DEFAULT_BUDGET_SECONDS
+    try:
+        ctx._round_budget_record = start_round_budget(
+            ctx.root, ctx.cfg.name, round_no, budget_seconds)
+    except (OSError, TypeError, ValueError) as exc:
+        error = {"status": "invalid-round-budget", "error": str(exc),
+                 "claim_status": "not-a-finding"}
+        ctx.write_artifact(round_no, "S0", "execution-budget-status.json", error)
+        print("[round-%02d] refusing invalid round budget: %s" % (round_no, exc))
+        return {"next_candidates": [], **error}
+    try:
+        source_root, _source_dirs = _target_source_scope(ctx)
+        register_active_audit(
+            source_root, ctx.root, ctx.cfg.name, round_no,
+            str(round_budget_snapshot(ctx._round_budget_record)["deadline_at"]))
+    except (OSError, TypeError, ValueError) as exc:
+        error = {"status": "invalid-round-guard", "error": str(exc),
+                 "claim_status": "not-a-finding"}
+        ctx.write_artifact(round_no, "S0", "execution-budget-status.json", error)
+        print("[round-%02d] refusing round without active-audit guard: %s" % (
+            round_no, exc))
+        return {"next_candidates": [], **error}
+    ctx._active_audit_guard_registered = True
+    bind_deadline = getattr(ctx.llm, "set_timeout_provider", None)
+    if callable(bind_deadline):
+        bind_deadline(ctx.round_budget_remaining)
+
+    ctx._candidate_source_hit_cache = {}
+    ctx._candidate_source_snippet_cache.reset_round(
+        round_no, ctx.root / "state" / ctx.cfg.name /
+        ("round-%02d" % round_no) / "S0" / "source-cache-metrics.json")
+
+    def timebox_report(last_completed: Optional[str], next_stage: str
+                       ) -> Optional[Dict[str, Any]]:
+        snapshot = round_budget_snapshot(ctx._round_budget_record)
+        if not snapshot["expired"]:
+            return None
+        report = {
+            "status": "stopped-at-round-deadline",
+            "last_completed_stage": last_completed,
+            "next_stage": next_stage,
+            "completed_stages": store.completed_stages(),
+            "audit_budget": snapshot,
+            "claim_status": "not-a-finding",
+        }
+        ctx.write_artifact(round_no, "S0", "execution-budget-status.json", snapshot)
+        ctx.write_artifact(round_no, "S0", "round-timebox-report.json", report)
+        store.save_stage("S0", report)
+        print("[round-%02d] round deadline expired; preserving progress and stopping" %
+              round_no)
+        return report
+
+    def bounded_scan_timeout(configured: int) -> int:
+        remaining = int(round_budget_snapshot(
+            ctx._round_budget_record)["remaining_seconds"])
+        if remaining < 1:
+            return 1
+        return min(configured, remaining) if configured > 0 else remaining
+
+    def record_capability_state(state: Dict[str, Any]) -> None:
+        ctx._coverage_inventory_round = round_no
+        ctx._coverage_inventory_state = state
+        scope = state.get("scope")
+        ctx.write_artifact(round_no, "S1", "capability-inventory-status.json", {
+            "status": state.get("status") or (
+                "complete" if isinstance(scope, dict) and scope.get("usable")
+                else "incomplete"),
+            "rebuilt": bool(state.get("rebuilt")),
+            "deferred": bool(state.get("deferred")),
+            "error": state.get("error"),
+            "scope": state.get("scope") or {},
+            "claim_status": "not-a-finding",
+        })
+        ctx.write_artifact(round_no, "S1", "capability-graph.json",
+                           state.get("graph") or {})
+        ctx.write_artifact(round_no, "S1", "capability-candidates.json",
+                           state.get("candidates") or [])
+        ctx.write_artifact(round_no, "S1", "threat-model.json",
+                           state.get("threat_model") or {})
+        ctx.write_artifact(round_no, "S1", "semantic-guard-evidence.json",
+                           state.get("semantic_guards") or {})
+        ctx.write_artifact(round_no, "S1", "semantic-guard-candidates.json",
+                           state.get("semantic_guard_candidates") or [])
+        ctx.write_artifact(round_no, "S1", "semantic-call-evidence.json",
+                           state.get("semantic_calls") or {})
+        ctx.write_artifact(round_no, "S1", "semantic-call-candidates.json",
+                           state.get("semantic_call_candidates") or [])
+        ctx.write_artifact(round_no, "S1", "semantic-controlflow-evidence.json",
+                           state.get("semantic_controlflow") or {})
+        ctx.write_artifact(round_no, "S1", "semantic-controlflow-candidates.json",
+                           state.get("semantic_controlflow_candidates") or [])
+        ctx.write_artifact(round_no, "S1", "semantic-ast-evidence.json",
+                           state.get("semantic_ast") or {})
+        ctx.write_artifact(round_no, "S1", "semantic-ast-candidates.json",
+                           state.get("semantic_ast_candidates") or [])
+        ctx.write_artifact(round_no, "S1", "semantic-transform-evidence.json",
+                           state.get("semantic_transforms") or {})
+        ctx.write_artifact(round_no, "S1", "semantic-transform-candidates.json",
+                           state.get("semantic_transform_candidates") or [])
+        ctx.write_artifact(round_no, "S1", "semantic-python-binding-evidence.json",
+                           state.get("semantic_bindings") or {})
+        ctx.write_artifact(round_no, "S1", "semantic-python-binding-candidates.json",
+                           state.get("semantic_binding_candidates") or [])
+        ctx.write_artifact(round_no, "S1", "evidence-provenance.json",
+                           state.get("evidence_provenance") or {})
+        if state.get("error"):
+            ctx.write_artifact(round_no, "S1", "capability-graph-error.json", {
+                "error": state["error"]})
+
+    def try_deferred_inventory(stage: str) -> List[Dict[str, Any]]:
+        state = getattr(ctx, "_coverage_inventory_state", None)
+        if not isinstance(state, dict) or not state.get("deferred"):
+            return []
+        remaining = int(round_budget_snapshot(
+            ctx._round_budget_record)["remaining_seconds"])
+        # Reserve at least 15 minutes for S3/S4 (or S5-S8 after S4). A single
+        # optional inventory attempt is capped at five minutes and can never
+        # hold a scheduled candidate waiting for its next falsifier.
+        reserve_seconds = 900
+        if remaining <= reserve_seconds:
+            ctx.write_artifact(round_no, stage, "capability-inventory-followup.json", {
+                "status": "deferred", "reason": "insufficient-round-budget",
+                "remaining_seconds": remaining, "claim_status": "not-a-finding",
+            })
+            return []
+        rebuild_budget = min(300, remaining - reserve_seconds)
+        rebuilt = _ensure_capability_inventory(
+            ctx, allow_rebuild=True, rebuild_budget_seconds=rebuild_budget)
+        ctx._coverage_inventory_round = round_no
+        ctx._coverage_inventory_state = rebuilt
+        scope = rebuilt.get("scope")
+        ctx.write_artifact(round_no, stage, "capability-inventory-followup.json", {
+            "status": rebuilt.get("status") or (
+                "complete" if isinstance(scope, dict) and scope.get("usable")
+                else "incomplete"),
+            "rebuilt": bool(rebuilt.get("rebuilt")),
+            "error": rebuilt.get("error"), "scope": rebuilt.get("scope") or {},
+            "remaining_seconds": int(round_budget_snapshot(
+                ctx._round_budget_record)["remaining_seconds"]),
+            "claim_status": "not-a-finding",
+        })
+        leads, _ids = static_candidates(ctx, round_no)
+        if leads:
+            ctx.write_artifact(round_no, stage,
+                               "deferred-capability-candidates.json", leads)
+        return leads
+
+    report = timebox_report(None, "S1")
+    if report:
+        return {**report, "next_candidates": []}
+
+    if not ctx.cfg.api_hint:
+        learn_api_hint(ctx, round_no)
+        report = timebox_report("S1.5", "S1")
+        if report:
+            return {**report, "next_candidates": []}
+
+    # Candidate prompt anchors are reused in-memory for this round. Extracted
+    # snippets use a separate bounded content-digest cache: file bytes are
+    # hashed on first access each round, so source edits invalidate old text.
+    deferred_index_candidates: List[Dict[str, Any]] = []
     force = getattr(ctx, "force", False)
     source_root, source_dirs = _target_source_scope(ctx)
+    inventory_timeout = getattr(ctx.cfg, "coverage_scan_timeout_seconds", 600)
+    if (isinstance(inventory_timeout, bool)
+            or not isinstance(inventory_timeout, int) or inventory_timeout < 0):
+        raise ValueError("coverage_scan_timeout_seconds must be a nonnegative integer")
+    from ..analysis.languages import SourceScanTimeout
+    inventory_timeout = bounded_scan_timeout(inventory_timeout)
 
     # ---- S1 artifacts: attack surface (deterministic, refreshed cheaply) --
     # Baseline #1/#2: danger call-site map + entry danger-hit counts feed the
     # LLM prompts (via source_evidence) and the G0/G1 reachability notes.
-    _danger = []
-    for _pat, _label in DANGER_PATTERNS:
-        for _h in grep_hits(_pat, source_dirs, source_root, max_lines=6):
-            _danger.append({"label": _label, "file": _h["file"],
-                            "line": _h["line"], "text": _h["text"]})
+    try:
+        _danger_hits, target_rule_hits = scan_s1_source_rules(
+            ctx.cfg.target_type, source_dirs, source_root,
+            danger_limit=6, target_limit=8, timeout=inventory_timeout)
+        source_rule_status = {"status": "complete",
+                              "timeout_seconds": inventory_timeout,
+                              "claim_status": "not-a-finding"}
+    except SourceScanTimeout as exc:
+        _danger_hits, target_rule_hits = [], []
+        source_rule_status = {
+            "status": "incomplete", "timeout_seconds": inventory_timeout,
+            "error": str(exc), "progress": exc.progress,
+            "claim_status": "not-a-finding",
+        }
+    _danger = [{"label": _h["label"], "file": _h["file"],
+                "line": _h["line"], "text": _h["text"]}
+               for _h in _danger_hits]
     ctx.write_artifact(round_no, "S1", "attack-surface.json", {
         "entries": ctx.cfg.entry_points,
         "danger_sites": _danger,
@@ -1739,15 +2341,42 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         "source_dirs": source_dirs,
         "claim_status": "not-a-finding",
     })
+    ctx.write_artifact(round_no, "S1", "source-rule-scan-status.json",
+                       source_rule_status)
     patch_history = analyze_patch_history(ctx.root, max_count=30)
-    ctx._source_sink_graph = build_source_sink_graph(source_dirs, source_root)
+    report = timebox_report("S1-source-rules", "S1-source-sink-graph")
+    if report:
+        return {**report, "next_candidates": []}
+    from ..analysis.languages import SourceFilter
+    graph_timeout = bounded_scan_timeout(
+        min(inventory_timeout, 120) if inventory_timeout else 0)
+    graph_filter = SourceFilter(
+        scan_timeout_seconds=min(inventory_timeout, 120) if inventory_timeout else 0,
+        runtime_deadline_override_seconds=round_budget_snapshot(
+            ctx._round_budget_record)["remaining_seconds"])
+    try:
+        ctx._source_sink_graph = build_source_sink_graph(
+            source_dirs, source_root, source_filter=graph_filter)
+        source_sink_status = {
+            "status": "complete", "path_count": len(ctx._source_sink_graph),
+            "timeout_seconds": graph_timeout,
+            "claim_status": "not-a-finding",
+        }
+    except SourceScanTimeout as exc:
+        ctx._source_sink_graph = []
+        source_sink_status = {
+            "status": "incomplete", "error": str(exc),
+            "progress": exc.progress,
+            "timeout_seconds": graph_timeout,
+            "claim_status": "not-a-finding",
+        }
+    ctx.write_artifact(round_no, "S1", "source-sink-graph-status.json",
+                       source_sink_status)
     profile_cfg = dataclasses.replace(ctx.cfg, source_dirs=source_dirs)
     ctx._project_profile = build_project_profile(
         profile_cfg, source_root, danger_site_count=len(_danger),
         source_sink_path_count=len(ctx._source_sink_graph),
         security_fix_count=len(patch_history))
-    target_rule_hits = collect_target_rule_hits(
-        ctx.cfg.target_type, source_dirs, source_root)
     chain_hints = composite_chain_hints(ctx._source_sink_graph)
     chain_candidates = composite_chain_candidates(chain_hints)
     ctx.write_artifact(round_no, "S1", "security-fix-history.json", patch_history)
@@ -1764,42 +2393,14 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
     ctx.write_artifact(round_no, "S1", "composite-chain-hints.json", chain_hints)
     ctx.write_artifact(round_no, "S1", "composite-chain-candidates.json",
                        chain_candidates)
-    capability_state = _ensure_capability_inventory(ctx)
-    ctx.write_artifact(round_no, "S1", "capability-graph.json",
-                       capability_state.get("graph") or {})
-    ctx.write_artifact(round_no, "S1", "capability-candidates.json",
-                       capability_state.get("candidates") or [])
-    ctx.write_artifact(round_no, "S1", "threat-model.json",
-                       capability_state.get("threat_model") or {})
-    ctx.write_artifact(round_no, "S1", "semantic-guard-evidence.json",
-                       capability_state.get("semantic_guards") or {})
-    ctx.write_artifact(round_no, "S1", "semantic-guard-candidates.json",
-                       capability_state.get("semantic_guard_candidates") or [])
-    ctx.write_artifact(round_no, "S1", "semantic-call-evidence.json",
-                       capability_state.get("semantic_calls") or {})
-    ctx.write_artifact(round_no, "S1", "semantic-call-candidates.json",
-                       capability_state.get("semantic_call_candidates") or [])
-    ctx.write_artifact(round_no, "S1", "semantic-controlflow-evidence.json",
-                       capability_state.get("semantic_controlflow") or {})
-    ctx.write_artifact(round_no, "S1", "semantic-controlflow-candidates.json",
-                       capability_state.get("semantic_controlflow_candidates") or [])
-    ctx.write_artifact(round_no, "S1", "semantic-ast-evidence.json",
-                       capability_state.get("semantic_ast") or {})
-    ctx.write_artifact(round_no, "S1", "semantic-ast-candidates.json",
-                       capability_state.get("semantic_ast_candidates") or [])
-    ctx.write_artifact(round_no, "S1", "semantic-transform-evidence.json",
-                       capability_state.get("semantic_transforms") or {})
-    ctx.write_artifact(round_no, "S1", "semantic-transform-candidates.json",
-                       capability_state.get("semantic_transform_candidates") or [])
-    ctx.write_artifact(round_no, "S1", "semantic-python-binding-evidence.json",
-                       capability_state.get("semantic_bindings") or {})
-    ctx.write_artifact(round_no, "S1", "semantic-python-binding-candidates.json",
-                       capability_state.get("semantic_binding_candidates") or [])
-    ctx.write_artifact(round_no, "S1", "evidence-provenance.json",
-                       capability_state.get("evidence_provenance") or {})
-    if capability_state.get("error"):
-        ctx.write_artifact(round_no, "S1", "capability-graph-error.json", {
-            "error": capability_state["error"]})
+    report = timebox_report("S1-source-sink-graph", "S1-capability-inventory")
+    if report:
+        return {**report, "next_candidates": []}
+    capability_state = _ensure_capability_inventory(ctx, allow_rebuild=False)
+    record_capability_state(capability_state)
+    report = timebox_report("S1-capability-inventory", "S2")
+    if report:
+        return {**report, "next_candidates": []}
 
     # ---- S2: candidates (resumable) -----------------------------------
     s2 = store.load_stage("S2")
@@ -1851,6 +2452,14 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         candidates, schedule_note = schedule_candidates(ctx, round_no, merged,
                                                         pinned=pinned)
         if not candidates:
+            late_candidates = try_deferred_inventory("S2")
+            if late_candidates:
+                merged.extend(late_candidates)
+                candidates, late_note = schedule_candidates(
+                    ctx, round_no, merged, pinned=pinned)
+                schedule_note = "; ".join(
+                    item for item in (schedule_note, late_note) if item)
+        if not candidates:
             print("[round-%02d] no candidates; stopping" % round_no)
             return {"next_candidates": []}
         experiment_plans = _attach_experiment_plans(ctx, round_no, candidates)
@@ -1884,6 +2493,10 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                             ]})
         store.save_stage("S2", {"candidates": candidates})
 
+    report = timebox_report("S2", "S3")
+    if report:
+        return {**report, "next_candidates": []}
+
     # ---- S3: static audit (resumable) ---------------------------------
     s3 = store.load_stage("S3")
     if s3 and not force:
@@ -1891,8 +2504,16 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         print("[round-%02d] S3 resume: %d audit notes loaded" % (round_no, len(audits)))
     else:
         print("[round-%02d] S3: auditing %d candidates (LLM)..." % (round_no, len(candidates)))
-        audits = {c["candidate_id"]: (_fuzz_audit(c) if c.get("fuzz_spec")
-                                      else audit_candidate(ctx, c)) for c in candidates}
+        audits = {}
+        for candidate in candidates:
+            report = timebox_report("S3", "S3-candidate:%s" %
+                                    candidate.get("candidate_id", "unknown"))
+            if report:
+                ctx.write_artifact(round_no, "S3", "audit-notes.partial.json", audits)
+                return {**report, "next_candidates": []}
+            audits[candidate["candidate_id"]] = (
+                _fuzz_audit(candidate) if candidate.get("fuzz_spec")
+                else audit_candidate(ctx, candidate))
         ctx.write_artifact(round_no, "S3", "audit-notes.json", audits)
         store.save_stage("S3", {"audits": audits})
     for candidate in candidates:
@@ -1905,10 +2526,22 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         for candidate in candidates for residual in (candidate.get("residuals") or [])
         if isinstance(residual, dict)
     ])
+    report = timebox_report("S3", "S4")
+    if report:
+        return {**report, "next_candidates": []}
 
     # ---- S4: PoC + matrix (resumable, rows serialized w/o spec) -------
     s4 = store.load_stage("S4")
-    if s4 and not force:
+    s4_fresh = bool(
+        s4 and s4.get("evidence_policy_version") == S4_EVIDENCE_POLICY_VERSION)
+    invalidate_after_s4 = force or not s4_fresh
+    if s4 and not s4_fresh:
+        print("[round-%02d] S4 checkpoint predates %s; recomputing S4-S8" % (
+            round_no, S4_EVIDENCE_POLICY_VERSION))
+    report = timebox_report("S3", "S4")
+    if report:
+        return {**report, "next_candidates": []}
+    if s4 and s4_fresh and not force:
         rows = s4["rows"]
         excluded = s4["excluded"]
         print("[round-%02d] S4 resume: %d confirmed / %d excluded"
@@ -1921,46 +2554,110 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         print("[round-%02d] S4: generating PoCs and running matrix "
               "(parallel workers)..." % round_no)
+        round_remaining = max(1, int(round_budget_snapshot(
+            ctx._round_budget_record)["remaining_seconds"]))
+        ctx.s4_execution_budget = S4ExecutionBudget(
+            min(getattr(ctx.cfg, "s4_timeout_seconds", 5400), round_remaining),
+            min(getattr(ctx.cfg, "s4_candidate_timeout_seconds", 900),
+                round_remaining))
         rows = []
         excluded = []
         max_workers = min(4, max(1, len(candidates)))
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {
-                pool.submit(verify_candidate, ctx, round_no, cand,
-                            audits[cand["candidate_id"]]): cand
-                for cand in candidates
-            }
-            for fut in as_completed(futures):
-                cand = futures[fut]
+        futures = {}
+        processed_ids = set()
+
+        def record_candidate_row(cand: Dict[str, Any], row: Dict[str, Any]) -> None:
+            processed_ids.add(str(cand["candidate_id"]))
+            if is_confirmed_conclusion(row.get("conclusion")):
+                rows.append(row)
+            else:
+                excluded.append({
+                    "candidate_id": cand["candidate_id"],
+                    "surface": cand.get("surface"),
+                    "conclusion": row.get("conclusion", "待验证"),
+                    "evidence": row.get("summary", {}),
+                    "runtime_lab": row.get("runtime_lab"),
+                })
+            print("  %s -> %s" % (
+                cand["candidate_id"], row.get("conclusion", "待验证")))
+
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {
+                    pool.submit(verify_candidate, ctx, round_no, cand,
+                                audits[cand["candidate_id"]]): cand
+                    for cand in candidates
+                }
+                for fut in as_completed(futures):
+                    cand = futures[fut]
+                    try:
+                        row = fut.result()
+                    except BudgetExceeded:
+                        for pending in futures:
+                            if pending is not fut:
+                                pending.cancel()
+                        stop_requests = getattr(ctx.llm, "set_timeout_provider", None)
+                        if callable(stop_requests):
+                            stop_requests(lambda: 0.0)
+                        raise
+                    except Exception as exc:
+                        persisted_cells, convergence = converge_s4_cells(
+                            ctx.root, ctx.cfg.name, round_no,
+                            cand["candidate_id"], [])
+                        failed_summary = summarize_candidate(persisted_cells)
+                        failed_summary["harness_error"] = "%s: %s" % (
+                            type(exc).__name__, exc)
+                        failed_summary["s4_result_sources"] = convergence["sources"]
+                        row = {"candidate": cand,
+                               "audit": audits[cand["candidate_id"]],
+                               "summary": failed_summary,
+                               "conclusion": "候选（待验证）"}
+                    record_candidate_row(cand, row)
+        except BudgetExceeded as exc:
+            # The executor has now joined already-running workers. Preserve
+            # their finished results before the outer loop records the stop.
+            for fut, cand in futures.items():
+                cid = str(cand.get("candidate_id", ""))
+                if cid in processed_ids or fut.cancelled() or not fut.done():
+                    continue
                 try:
-                    row = fut.result()
-                except Exception as exc:
-                    persisted_cells, convergence = converge_s4_cells(
-                        ctx.root, ctx.cfg.name, round_no,
-                        cand["candidate_id"], [])
-                    failed_summary = summarize_candidate(persisted_cells)
-                    failed_summary["harness_error"] = "%s: %s" % (type(exc).__name__, exc)
-                    failed_summary["s4_result_sources"] = convergence["sources"]
-                    row = {"candidate": cand, "audit": audits[cand["candidate_id"]],
-                           "summary": failed_summary,
-                           "conclusion": "候选（待验证）"}
-                if is_confirmed_conclusion(row.get("conclusion")):
-                    rows.append(row)
-                else:
-                    excluded.append({
-                        "candidate_id": cand["candidate_id"],
-                        "surface": cand.get("surface"),
-                        "conclusion": row["conclusion"],
-                        "evidence": row.get("summary", {}),
-                        "runtime_lab": row.get("runtime_lab"),
-                    })
-                print("  %s -> %s" % (cand["candidate_id"], row["conclusion"]))
+                    record_candidate_row(cand, fut.result())
+                except Exception:
+                    continue
+            partial_rows = []
+            for row in rows:
+                saved = dict(row)
+                saved.pop("spec", None)
+                partial_rows.append(saved)
+            partial = {
+                "status": "partial-llm-budget-exhausted",
+                "reason": str(exc),
+                "completed_candidate_ids": sorted(processed_ids),
+                "pending_candidate_ids": sorted(
+                    str(c.get("candidate_id")) for c in candidates
+                    if str(c.get("candidate_id")) not in processed_ids),
+                "rows": partial_rows, "excluded": excluded,
+                "execution_budget": ctx.s4_execution_budget.snapshot(),
+                "claim_status": "not-a-finding",
+            }
+            ctx.write_artifact(round_no, "S4", "partial-results.json", partial)
+            ctx.write_artifact(round_no, "S4", "execution-budget.json",
+                               partial["execution_budget"])
+            raise
         serializable = []
         for r in rows:
             rr = dict(r)
             rr.pop("spec", None)   # POCSpec is not JSON-serializable
             serializable.append(rr)
-        store.save_stage("S4", {"rows": serializable, "excluded": excluded})
+        execution_budget = ctx.s4_execution_budget.snapshot()
+        store.save_stage("S4", {
+            "rows": serializable,
+            "excluded": excluded,
+            "evidence_policy_version": S4_EVIDENCE_POLICY_VERSION,
+            "execution_budget": execution_budget,
+        })
+        ctx.write_artifact(round_no, "S4", "execution-budget.json",
+                           execution_budget)
         ctx.write_artifact(round_no, "S4", "authz-matrix.json", [
             {
                 "candidate_id": r["candidate"]["candidate_id"],
@@ -1988,9 +2685,53 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         round_no, "S4", "residual-closure.json",
         build_residual_closure_report(candidates, s4_summaries, round_no))
 
+    budget_snapshot = (
+        ctx.s4_execution_budget.snapshot()
+        if getattr(ctx, "s4_execution_budget", None)
+        else (s4.get("execution_budget", {}) if isinstance(s4, dict) else {}))
+    if budget_snapshot:
+        ctx.write_artifact(round_no, "S4", "execution-budget.json",
+                           budget_snapshot)
+    if budget_snapshot.get("round_exhausted"):
+        progress = {
+            "status": "stopped-at-s4-timebox",
+            "execution_budget": budget_snapshot,
+            "completed_candidates": [
+                {"candidate_id": row.get("candidate", {}).get("candidate_id"),
+                 "conclusion": row.get("conclusion"),
+                 "execution_state": (row.get("summary") or {}).get(
+                     "execution_state"),
+                 "cells_ran": (row.get("summary") or {}).get("cells_ran", 0)}
+                for row in rows
+            ],
+            "pending_candidates": [
+                {"candidate_id": row.get("candidate_id"),
+                 "conclusion": row.get("conclusion"),
+                 "execution_state": (row.get("evidence") or {}).get(
+                     "execution_state"),
+                 "cells_ran": (row.get("evidence") or {}).get("cells_ran", 0)}
+                for row in excluded
+            ],
+            "claim_status": "not-a-finding",
+        }
+        ctx.write_artifact(round_no, "S4", "round-timebox-report.json", progress)
+        print("[round-%02d] S4 wall-clock limit reached; preserving artifacts and ending round" % round_no)
+        return {"next_candidates": [], "status": "s4-timebox-exhausted",
+                "execution_budget": budget_snapshot}
+
+    report = timebox_report("S4", "S5")
+    if report:
+        return {**report, "next_candidates": []}
+    deferred_index_candidates = try_deferred_inventory("S4")
+    current_candidate_ids = {str(candidate.get("candidate_id"))
+                             for candidate in candidates}
+    deferred_index_candidates = [candidate for candidate in deferred_index_candidates
+                                 if str(candidate.get("candidate_id"))
+                                 not in current_candidate_ids]
+
     # ---- S5: Novelty (resumable) --------------------------------------
     s5 = store.load_stage("S5")
-    if s5 and not force:
+    if s5 and not force and not invalidate_after_s4:
         novelties = s5["novelty"]
         print("[round-%02d] S5 resume: %d novelty records loaded" % (round_no, len(novelties)))
     else:
@@ -2000,10 +2741,13 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         novelties = {r["candidate"]["candidate_id"]: r["novelty_check"] for r in rows}
         store.save_stage("S5", {"novelty": novelties})
     ctx.write_artifact(round_no, "S5", "novelty.json", novelties)
+    report = timebox_report("S5", "S6")
+    if report:
+        return {**report, "next_candidates": []}
 
     # ---- S6: CVSS + G5 consistency gate (resumable) -------------------
     s6 = store.load_stage("S6")
-    if s6 and not force:
+    if s6 and not force and not invalidate_after_s4:
         print("[round-%02d] S6 resume: severity records loaded" % round_no)
     else:
         print("[round-%02d] S6: CVSS + severity..." % round_no)
@@ -2039,15 +2783,21 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             r["candidate"]["candidate_id"]: r["cvss"] for r in rows}})
     ctx.write_artifact(round_no, "S6", "severity.json",
                        {r["candidate"]["candidate_id"]: r["cvss"] for r in rows})
+    report = timebox_report("S6", "S7")
+    if report:
+        return {**report, "next_candidates": []}
 
     # ---- S7: finding docs (resumable) ---------------------------------
     s7 = store.load_stage("S7")
-    if s7 and not force:
+    if s7 and not force and not invalidate_after_s4:
         print("[round-%02d] S7 resume: finding docs already written" % round_no)
     else:
         print("[round-%02d] S7: finding documents (local only)..." % round_no)
         reports_dir = ctx.root / "reports" / ctx.cfg.name / ("round-%02d" % round_no)
         reports_dir.mkdir(parents=True, exist_ok=True)
+        prior_s7 = s7 if isinstance(s7, dict) else {}
+        prior_docs = {str(name) for name in prior_s7.get("finding_docs", [])
+                      if isinstance(name, str) and Path(name).name == name}
         written = []
         idx = 0
         for row in rows:
@@ -2090,7 +2840,30 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             (reports_dir / fname).write_text(
                 render_finding_md(finding, lang=ctx.cfg.output_lang), encoding="utf-8")
             written.append(fname)
-        store.save_stage("S7", {"finding_docs": written})
+        stale_docs = sorted(prior_docs - set(written))
+        stale_marker = ("> 状态更新：该报告来自旧版 S4 证据策略，本轮未能重新确认。"
+                        "请以本轮 S8 Ledger 为准。\n\n")
+        for name in stale_docs:
+            path = reports_dir / name
+            if path.is_file():
+                old = path.read_text(encoding="utf-8", errors="replace")
+                if stale_marker not in old:
+                    path.write_text(stale_marker + old, encoding="utf-8")
+        if stale_docs:
+            ctx.write_artifact(round_no, "S7", "superseded-finding-docs.json", {
+                "evidence_policy_version": S4_EVIDENCE_POLICY_VERSION,
+                "files": stale_docs,
+                "reason": "S4-S8 checkpoints were recomputed after the evidence-policy change",
+            })
+        store.save_stage("S7", {
+            "finding_docs": written,
+            "superseded_docs": stale_docs,
+            "evidence_policy_version": S4_EVIDENCE_POLICY_VERSION,
+        })
+
+    report = timebox_report("S7", "S8")
+    if report:
+        return {**report, "next_candidates": []}
 
     # ---- S8: ledger (resumable) ---------------------------------------
     # Build the research-memory delta before the resumable ledger branch.  On
@@ -2421,7 +3194,7 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
             "claim_status": "not-a-finding",
         }
     s8 = store.load_stage("S8")
-    if s8 and not force:
+    if s8 and not force and not invalidate_after_s4:
         print("[round-%02d] S8 resume: ledger already written" % round_no)
     else:
         print("[round-%02d] S8: ledger..." % round_no)
@@ -2497,7 +3270,26 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
                                 research_replay_cohort_info,
                                 "research_strategy": research_strategy_info})
     print("[round-%02d] done: 确认=%d 排除=%d" % (round_no, len(rows), len(excluded)))
-    return {"next_candidates": _propose_next(ctx, candidates, rows),
+    report = timebox_report("S8", "next-round-candidate-generation")
+    if report:
+        return {**report, "next_candidates": []}
+    final_budget = round_budget_snapshot(ctx._round_budget_record)
+    ctx.write_artifact(round_no, "S0", "execution-budget-status.json", final_budget)
+    next_candidates = (
+        _propose_next(ctx, candidates, rows)
+        if final_budget["remaining_seconds"] >= 120 else [])
+    next_ids = {str(candidate.get("candidate_id")) for candidate in next_candidates}
+    for candidate in deferred_index_candidates:
+        candidate_id = str(candidate.get("candidate_id", ""))
+        if candidate_id and candidate_id not in next_ids:
+            next_candidates.append(candidate)
+            next_ids.add(candidate_id)
+    if deferred_index_candidates:
+        ctx.write_artifact(round_no, "S4", "deferred-candidates-for-next-round.json",
+                           deferred_index_candidates)
+    return {"next_candidates": next_candidates,
+            "audit_budget": final_budget,
+            "deferred_index_candidate_count": len(deferred_index_candidates),
             "research_memory": research_memory_info,
             "research_consistency": research_consistency_info,
             "research_consistency_actions": research_consistency_actions_info,
@@ -2616,16 +3408,127 @@ def _propose_next(ctx: AutoCtx, candidates: List[Dict[str, Any]],
 
 
 def run_loop(ctx: AutoCtx, start_round: int) -> List[Dict[str, Any]]:
+    from ..analysis.languages import SourceScanTimeout
+
     rounds_done = []
     for r in range(start_round, start_round + ctx.max_rounds):
+        ctx._active_audit_guard_registered = False
         if ctx.stop_file.exists():
             print("STOP flag found; stopping")
             break
+        round_status = "failed"
         try:
             result = run_round(ctx, r)
+            round_status = str(result.get("status") or "completed")
         except BudgetExceeded as exc:
-            print("budget exhausted: %s" % exc)
+            round_status = "budget-exhausted"
+            record = getattr(ctx, "_round_budget_record", None)
+            budget_status: Dict[str, Any] = {}
+            if isinstance(record, dict):
+                try:
+                    from ..analysis.audit_budget import round_budget_snapshot
+                    budget_status = round_budget_snapshot(record)
+                    ctx.write_artifact(
+                        r, "S0", "execution-budget-status.json", budget_status)
+                except (OSError, TypeError, ValueError) as status_exc:
+                    budget_status = {"status": "unavailable",
+                                     "error": str(status_exc)}
+            try:
+                from ..memory.state import CheckpointStore
+                completed_stages = CheckpointStore(
+                    ctx.root, ctx.cfg.name, r).completed_stages()
+            except (OSError, TypeError, ValueError):
+                completed_stages = []
+            usage = ctx.llm.usage.to_dict()
+            status = ("stopped-at-round-deadline"
+                      if budget_status.get("expired")
+                      else "stopped-llm-budget-exhausted")
+            progress = {
+                "status": status, "error": str(exc),
+                "completed_stages": completed_stages,
+                "audit_budget": budget_status,
+                "llm_usage": usage,
+                "claim_status": "not-a-finding",
+            }
+            ctx.write_artifact(r, "S0", "round-stop-report.json", progress)
+            ctx.write_artifact(r, "S0", "llm-usage.json", usage)
+            print("budget exhausted; saved S0 progress for round %02d (%s)" % (
+                r, status))
+            rounds_done.append({"round": r, **progress})
             break
+        except SourceScanTimeout as exc:
+            round_status = "source-scan-incomplete"
+            progress = {
+                "status": "stopped-source-scan-incomplete",
+                "error": str(exc), "progress": exc.progress,
+                "claim_status": "not-a-finding",
+            }
+            ctx.write_artifact(r, "S0", "source-scan-timeout.json", progress)
+            print("source scan timed out; saved progress and stopped this round")
+            rounds_done.append({"round": r, **progress})
+            break
+        except Exception as exc:
+            round_status = "failed"
+            record = getattr(ctx, "_round_budget_record", None)
+            budget_status: Dict[str, Any] = {}
+            if isinstance(record, dict):
+                try:
+                    from ..analysis.audit_budget import round_budget_snapshot
+                    budget_status = round_budget_snapshot(record)
+                    ctx.write_artifact(
+                        r, "S0", "execution-budget-status.json", budget_status)
+                except Exception as status_exc:
+                    budget_status = {"status": "unavailable",
+                                     "error": str(status_exc)[:1000]}
+            try:
+                from ..memory.state import CheckpointStore
+                completed_stages = CheckpointStore(
+                    ctx.root, ctx.cfg.name, r).completed_stages()
+            except Exception:
+                completed_stages = []
+            try:
+                usage = ctx.llm.usage.to_dict()
+            except Exception:
+                usage = {}
+            progress = {
+                "status": "failed-unhandled-error",
+                "error_type": type(exc).__name__, "error": str(exc)[:2000],
+                "completed_stages": completed_stages,
+                "last_completed_stage": (completed_stages[-1]
+                                          if completed_stages else None),
+                "audit_budget": budget_status,
+                "llm_usage": usage,
+                "claim_status": "not-a-finding",
+            }
+            try:
+                ctx.write_artifact(r, "S0", "round-error-report.json", progress)
+                if usage:
+                    ctx.write_artifact(r, "S0", "llm-usage.json", usage)
+            except Exception as write_exc:
+                print("could not persist round failure report: %s" % write_exc)
+            print("round %02d failed with %s: %s" % (
+                r, type(exc).__name__, str(exc)[:1000]))
+            rounds_done.append({"round": r, **progress})
+            break
+        finally:
+            ctx._candidate_source_snippet_cache.finish_round(round_status, r)
+            if getattr(ctx, "_active_audit_guard_registered", False):
+                try:
+                    from ..analysis.audit_budget import round_budget_snapshot
+                    from ..analysis.audit_guard import release_active_audit
+                    record = getattr(ctx, "_round_budget_record", None)
+                    if record is None:
+                        raise ValueError("round budget record is unavailable")
+                    if round_budget_snapshot(record)["expired"]:
+                        print("[round-%02d] expired source root remains guarded; "
+                              "release it after writing the progress report" % r)
+                    else:
+                        source_root, _source_dirs = _target_source_scope(ctx)
+                        release_active_audit(
+                            ctx.root, ctx.cfg.name, r, root=source_root)
+                except (OSError, TypeError, ValueError) as exc:
+                    print("[round-%02d] could not release active-audit guard: %s" % (
+                        r, exc))
         rounds_done.append(result)
         if not result.get("next_candidates"):
             print("no new candidates; loop stops")
@@ -2651,6 +3554,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--lang", default=None, choices=["zh", "en"],
                     help="ledger/finding output language (default: config output_lang)")
     ap.add_argument("--offline", action="store_true", help="disable live GitHub API")
+    ap.add_argument("--force", action="store_true",
+                    help="rebuild stage checkpoints and retry a failed coverage scope once")
     ap.add_argument("--fuzz-budget", type=int, default=0,
                     help="directed fuzz inputs per round, merged into S2 candidates (plan 2.1)")
     ap.add_argument("--fuzz-seed", type=int, default=None)
@@ -2662,7 +3567,32 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.config:
         cfg = TargetConfig.load(ROOT / args.config)
     elif args.target_dir:
-        cfg = prepare_target(ROOT, args.name, Path(args.target_dir))
+        from ..analysis.audit_budget import (
+            DEFAULT_BUDGET_SECONDS, budget_path, start_round_budget,
+        )
+        try:
+            prep_budget = start_round_budget(
+                ROOT, args.name, args.round, DEFAULT_BUDGET_SECONDS)
+        except (OSError, TypeError, ValueError) as exc:
+            print("refusing target preparation without a valid round budget: %s" % exc)
+            return 2
+        try:
+            cfg = prepare_target(
+                ROOT, args.name, Path(args.target_dir), prep_budget)
+        except TargetPreparationTimeout as exc:
+            status = {
+                "status": "target-preparation-incomplete",
+                "error": str(exc), "progress": exc.progress,
+                "claim_status": "not-a-finding",
+            }
+            status_path = (budget_path(ROOT, args.name, args.round).parent /
+                           "target-preparation-status.json")
+            status_path.parent.mkdir(parents=True, exist_ok=True)
+            status_path.write_text(
+                json.dumps(status, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8")
+            print("target preparation timed out; saved progress to %s" % status_path)
+            return 2
     else:
         ap.error("need --config or --target-dir")
 
@@ -2671,24 +3601,38 @@ def main(argv: Optional[List[str]] = None) -> int:
                     reasoning_effort=args.reasoning_effort)
     if args.lang:
         cfg.output_lang = args.lang
+    needs_api_hint = not cfg.api_hint
     ctx = AutoCtx(ROOT, cfg, llm, offline=args.offline,
                   max_candidates=args.max_candidates, max_rounds=args.max_rounds,
                   fuzz_budget=args.fuzz_budget, fuzz_seed=args.fuzz_seed,
                   fuzz_force=args.fuzz_force,
-                  fuzz_skip_minimize=args.fuzz_skip_minimize)
-    if not cfg.api_hint:
-        hint = learn_api_hint(ctx)
-        if hint and args.config:
-            cfg_path = ROOT / args.config
-            if cfg_path.exists():
+                  fuzz_skip_minimize=args.fuzz_skip_minimize,
+                  force=args.force)
+    rounds_done = run_loop(ctx, args.round)
+    if needs_api_hint and cfg.api_hint and args.config:
+        cfg_path = ROOT / args.config
+        if cfg_path.exists():
+            try:
                 d = json.loads(cfg_path.read_text(encoding="utf-8"))
-                d["api_hint"] = hint
+                d["api_hint"] = cfg.api_hint
                 cfg_path.write_text(json.dumps(d, indent=2, ensure_ascii=False),
                                     encoding="utf-8")
-    rounds_done = run_loop(ctx, args.round)
+            except (OSError, UnicodeError, ValueError, TypeError) as exc:
+                print("[S1.5] could not persist learned api_hint: %s" % exc)
     print("\n==== autonomous round summary ====")
     print("rounds done: %d" % len(rounds_done))
     print("llm usage: %s" % json.dumps(llm.usage.to_dict(), ensure_ascii=False))
+    incomplete_statuses = {
+        "invalid-round-budget", "invalid-round-guard",
+        "stopped-at-round-deadline", "stopped-llm-budget-exhausted",
+        "stopped-source-scan-incomplete", "s4-timebox-exhausted",
+        "failed-unhandled-error",
+    }
+    incomplete = any(str(result.get("status") or "") in incomplete_statuses
+                     for result in rounds_done)
+    if incomplete:
+        print("audit ended incomplete; see the round S0/S4 stop report")
+        return 2
     return 0
 
 

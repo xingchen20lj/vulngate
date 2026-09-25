@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from ..tools.build import S4_EVIDENCE_POLICY_VERSION
+
 from ..tools.conclusion import _has_real_effect, _is_runtime_evidence, _requires_real_effect
 
 
@@ -74,10 +76,23 @@ def g4_runtime(summary: Dict[str, Any], intended: str = "确认",
     gate_blocked = summary.get("gate_blocked", [])
     leaked = summary.get("leaked", [])
     if intended == "排除":
-        if gate_blocked or errors:
-            return GateResult("G4", True, "exclusion backed by runtime", ["gate_blocked=%d errors=%d" % (len(gate_blocked), len(errors))])
-        return GateResult("G4", False, "exclusion without runtime evidence", [])
+        basis = summary.get("exclusion_basis") or {}
+        if (isinstance(basis, dict)
+                and basis.get("kind") == "g1-unreachable"
+                and basis.get("source_refs")):
+            return GateResult("G4", True, "source-backed unreachable path",
+                              [str(ref) for ref in basis["source_refs"][:8]])
+        return GateResult(
+            "G4", False, "execution failure or gate block cannot exclude a candidate",
+            ["gate_blocked=%d errors=%d" % (len(gate_blocked), len(errors))],
+        )
     if intended == "确认":
+        if (summary.get("evidence_policy_version") != S4_EVIDENCE_POLICY_VERSION
+                or summary.get("execution_state") != "executed-with-effect"):
+            return GateResult(
+                "G4", False, "no complete harness-observed runtime effect",
+                ["execution_state=%s" % summary.get("execution_state", "unknown")],
+            )
         if _requires_real_effect(candidate or {}) and not _has_real_effect(summary, candidate):
             return GateResult(
                 "G4", False,
@@ -104,3 +119,38 @@ def g5_cvss(tier: str, vector: str, implicit_default_on: bool = False) -> GateRe
     score, severity = base_score(vector)
     ok, reason = check_precondition_consistency(tier, vector, implicit_default_on)
     return GateResult("G5", ok, reason, ["vector=%s score=%.1f %s" % (vector, score, severity)])
+
+
+def g5_record_valid(record: Any) -> bool:
+    """Validate a persisted S6 record before report/ledger promotion."""
+    if not isinstance(record, dict) or record.get("blocked"):
+        return False
+    vector = record.get("vector")
+    score = record.get("score")
+    g5 = record.get("g5")
+    implicit_default_on = record.get("implicit_default_on", False)
+    if not isinstance(vector, str) or not vector.strip() or not isinstance(g5, dict):
+        return False
+    if not isinstance(implicit_default_on, bool):
+        return False
+    if g5.get("passed") is not True or isinstance(score, bool):
+        return False
+    try:
+        from ..tools.cvss import (base_score, check_impact_consistency,
+                                  check_precondition_consistency)
+        computed, severity = base_score(vector)
+        if not isinstance(score, (int, float)) or not 0.0 <= float(score) <= 10.0:
+            return False
+        if abs(float(score) - computed) >= 0.11 or record.get("severity") != severity:
+            return False
+        ac_ok, _ac_reason = check_precondition_consistency(
+            str(record.get("tier") or ""), vector,
+            implicit_default_on)
+        impact_ok, _impact_reason = check_impact_consistency(
+            {key: record.get(key, "") for key in
+             ("attack_class", "surface", "logic", "hypothesis", "impact")},
+            {"availability_proof": record.get("availability_proof", [])},
+            vector)
+        return ac_ok and impact_ok
+    except (OverflowError, TypeError, ValueError):
+        return False
