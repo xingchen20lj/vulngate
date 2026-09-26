@@ -659,8 +659,13 @@ def _trusted_observations(cell: Dict[str, Any]) -> Dict[str, Any]:
         and type(resource_limits.get("cpu_seconds_per_process")) is int
         and 1 <= resource_limits["cpu_seconds_per_process"] <= 3600
         and type(resource_limits.get("max_address_space_bytes")) is int
+        and type(resource_limits.get("address_space_baseline_bytes")) is int
+        and 0 <= resource_limits["address_space_baseline_bytes"] <=
+        1024 * 1024 * 1024 * 1024
         and POC_MIN_ADDRESS_SPACE_BYTES <=
-        resource_limits["max_address_space_bytes"] <= POC_MAX_ADDRESS_SPACE_BYTES
+        (resource_limits["max_address_space_bytes"] -
+         resource_limits["address_space_baseline_bytes"])
+        <= POC_MAX_ADDRESS_SPACE_BYTES
         and type(resource_limits.get("max_file_bytes")) is int
         and resource_limits.get("max_file_bytes") == POC_MAX_FILE_BYTES
         and type(resource_limits.get("max_open_files")) is int

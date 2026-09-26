@@ -102,10 +102,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   evidence alone no longer triggers speculative rewrites. The S4 evidence
   policy version changes so older checkpoints are reevaluated under this rule.
 - POSIX PoC resource limits are applied by a minimal Bash launcher before the
-  PoC executable starts. The 64 MiB file cap is converted using Bash's
-  1024-byte file-size blocks and independently checked by preflight; stricter
-  existing host hard limits are retained and recorded as applied values. The
-  resource-policy version changes so older evidence is not reused.
+  PoC executable starts. Darwin's existing shared-cache mappings are measured
+  and recorded as the address-space baseline, with up to 4 GiB of per-process
+  headroom; other POSIX hosts retain a 4 GiB absolute cap. The 64 MiB file cap
+  is converted using Bash's 1024-byte file-size blocks and independently
+  checked by preflight; stricter existing host hard limits are retained and
+  recorded as applied values. The resource-policy version changes so older
+  evidence is not reused.
 - The command runner keeps enforcing its wall-clock deadline when a child
   closes stdout/stderr and makes a final process-group cleanup attempt after
   the leader exits. Runner policy versions change so older S4 checkpoints are
@@ -211,7 +214,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   unrestricted; POSIX runners now enforce per-process CPU,
   per-file size, open-file and core-dump limits, and cap the real-UID process
   count at startup baseline +128, and RLIMIT_AS caps each process's virtual
-  address space at 4 GiB or a lower inherited hard limit. Java subprocesses get
+  address space at 4 GiB or a lower inherited hard limit (Darwin's cap is 4 GiB
+  above the measured VulnGate VM-map baseline to account for shared-cache
+  mappings). Java subprocesses get
   a 1 GiB default heap cap. A separate PoC watchdog samples process-tree RSS
   every 100 ms and stops a run above a 2 GiB summed-per-process threshold; this
   is best-effort, may overshoot, and can double-count shared pages. It uses PID

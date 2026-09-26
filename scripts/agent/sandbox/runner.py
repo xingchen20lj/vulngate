@@ -45,7 +45,7 @@ class RunResult:
     process_tree_cleanup: Dict[str, Any] = field(default_factory=dict)
 
 
-POC_RESOURCE_POLICY_VERSION = "posix-rlimit-as4g-cpu-fsize64m-nofile512-nproc128-core0-v5"
+POC_RESOURCE_POLICY_VERSION = "posix-rlimit-as4g-headroom-cpu-fsize64m-nofile512-nproc128-core0-v6"
 POC_MAX_FILE_BYTES = 64 * 1024 * 1024
 POC_MAX_OPEN_FILES = 512
 POC_MAX_PROCESS_SPAWN_DELTA = 128
@@ -113,25 +113,46 @@ def _user_process_limit() -> Tuple[int, int]:
     return baseline, limit
 
 
-def _address_space_limit_bytes() -> int:
-    """Choose a hard per-process address-space cap no higher than 4 GiB."""
+def _address_space_baseline_bytes() -> int:
+    """Measure the controller VM map that Darwin executables inherit."""
+    if sys.platform != "darwin":
+        return 0
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-o", "vsz=", "-p", str(os.getpid())],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, timeout=3, check=True)
+        value = int(result.stdout.strip()) * 1024
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise PermissionError(
+            "cannot determine Darwin address-space baseline: %s" %
+            type(exc).__name__) from exc
+    if value < 1 or value > 1024 * 1024 * 1024 * 1024:
+        raise PermissionError("Darwin address-space baseline is out of range")
+    return value
+
+
+def _address_space_limit_bytes(baseline_bytes: int) -> int:
+    """Set a 4 GiB cap, measured from the inherited Darwin VM-map baseline."""
     import resource
 
     if not hasattr(resource, "RLIMIT_AS"):
         raise PermissionError("RLIMIT_AS is unavailable")
     _soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-    limit = POC_MAX_ADDRESS_SPACE_BYTES
+    baseline = max(0, int(baseline_bytes))
+    limit = baseline + POC_MAX_ADDRESS_SPACE_BYTES
     if hard != resource.RLIM_INFINITY:
         limit = min(limit, int(hard))
     limit = (limit // 1024) * 1024
-    if limit < POC_MIN_ADDRESS_SPACE_BYTES:
+    if limit - baseline < POC_MIN_ADDRESS_SPACE_BYTES:
         raise PermissionError("RLIMIT_AS hard limit is below the 256 MiB minimum")
     return limit
 
 
 def _resource_limit_contract(cpu_seconds_per_process: int, process_baseline: int,
                              process_limit: int,
-                             address_space_limit: int) -> Dict[str, Any]:
+                             address_space_limit: int,
+                             address_space_baseline: int) -> Dict[str, Any]:
     import resource
 
     def clamp_to_hard(which: int, requested: int) -> int:
@@ -146,15 +167,19 @@ def _resource_limit_contract(cpu_seconds_per_process: int, process_baseline: int
     user_processes = clamp_to_hard(resource.RLIMIT_NPROC, process_limit)
     address_space_bytes = clamp_to_hard(
         resource.RLIMIT_AS, max(1, int(address_space_limit)))
+    address_space_headroom = address_space_bytes - max(
+        0, int(address_space_baseline))
     if cpu_seconds < 1 or file_bytes < 1 or open_files < 16:
         raise PermissionError("host hard limits are too low for the PoC resource profile")
     if user_processes <= process_baseline:
         raise PermissionError("RLIMIT_NPROC is below the current user process count")
-    if address_space_bytes < POC_MIN_ADDRESS_SPACE_BYTES:
+    if not (POC_MIN_ADDRESS_SPACE_BYTES <= address_space_headroom <=
+            POC_MAX_ADDRESS_SPACE_BYTES):
         raise PermissionError("RLIMIT_AS hard limit is below the 256 MiB minimum")
     return {
         "policy": POC_RESOURCE_POLICY_VERSION,
         "cpu_seconds_per_process": cpu_seconds,
+        "address_space_baseline_bytes": max(0, int(address_space_baseline)),
         "max_address_space_bytes": address_space_bytes,
         "max_file_bytes": file_bytes,
         "max_open_files": open_files,
@@ -191,9 +216,11 @@ def prepare_posix_resource_limited_command(
         process_baseline, process_limit = _user_process_limit()
     except PermissionError:
         raise
+    address_space_baseline = _address_space_baseline_bytes()
     resource_limits = _resource_limit_contract(
         cpu_seconds_per_process, process_baseline, process_limit,
-        _address_space_limit_bytes())
+        _address_space_limit_bytes(address_space_baseline),
+        address_space_baseline)
     limit_check = (
         "import resource,sys; e=sys.argv; "
         "pairs=((resource.RLIMIT_CPU,int(e[1])),"
