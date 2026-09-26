@@ -376,6 +376,7 @@ class S4RuntimeLabTests(unittest.TestCase):
 
         cfg = TargetConfig(
             name="pipeline-lab", discovery_date="2026-09-21",
+            runtime_lab={"enabled": True},
             jars=[{"version": "1.0", "path": "missing.jar"}],
             candidates=[{
                 "candidate_id": "C1", "surface": "parser",

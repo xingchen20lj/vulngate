@@ -306,6 +306,7 @@ class AutonomousScopeRegressionTests(unittest.TestCase):
             }
             expired = {"expired": True, "remaining_seconds": 0,
                        "elapsed_seconds": 1, "budget_seconds": 1,
+                       "deadline_at": budget["deadline_at"],
                        "claim_status": "not-a-finding"}
             with patch("agent.analysis.audit_budget.start_round_budget",
                        return_value=budget), \

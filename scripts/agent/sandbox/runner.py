@@ -152,7 +152,7 @@ def _resource_limited_argv(command: List[str], cpu_seconds_per_process: int,
     cpu_seconds = max(1, min(int(cpu_seconds_per_process), 3600))
     file_blocks = POC_MAX_FILE_BYTES // POC_FILE_LIMIT_BLOCK_BYTES
     address_space_kib = max(1, int(address_space_limit) // 1024)
-    return ["/bin/sh", "-c", _POSIX_LIMIT_WRAPPER,
+    return ["/bin/bash", "-c", _POSIX_LIMIT_WRAPPER,
             "vulngate-resource-limits",
             str(cpu_seconds), str(file_blocks),
             str(POC_MAX_OPEN_FILES), str(process_limit),
