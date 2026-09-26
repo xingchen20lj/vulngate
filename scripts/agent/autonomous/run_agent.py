@@ -2153,6 +2153,31 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
         ctx.write_artifact(round_no, "S0", "execution-budget-status.json", error)
         print("[round-%02d] refusing invalid round budget: %s" % (round_no, exc))
         return {"next_candidates": [], **error}
+
+    def timebox_report(last_completed: Optional[str], next_stage: str
+                       ) -> Optional[Dict[str, Any]]:
+        snapshot = round_budget_snapshot(ctx._round_budget_record)
+        if not snapshot["expired"]:
+            return None
+        report = {
+            "status": "stopped-at-round-deadline",
+            "last_completed_stage": last_completed,
+            "next_stage": next_stage,
+            "completed_stages": store.completed_stages(),
+            "audit_budget": snapshot,
+            "claim_status": "not-a-finding",
+        }
+        ctx.write_artifact(round_no, "S0", "execution-budget-status.json", snapshot)
+        ctx.write_artifact(round_no, "S0", "round-timebox-report.json", report)
+        store.save_stage("S0", report)
+        print("[round-%02d] round deadline expired; preserving progress and stopping" %
+              round_no)
+        return report
+
+    report = timebox_report(None, "S1")
+    if report:
+        return {"next_candidates": [], **report}
+
     try:
         source_root, _source_dirs = _target_source_scope(ctx)
         register_active_audit(
@@ -2174,26 +2199,6 @@ def run_round(ctx: AutoCtx, round_no: int) -> Dict[str, Any]:
     ctx._candidate_source_snippet_cache.reset_round(
         round_no, ctx.root / "state" / ctx.cfg.name /
         ("round-%02d" % round_no) / "S0" / "source-cache-metrics.json")
-
-    def timebox_report(last_completed: Optional[str], next_stage: str
-                       ) -> Optional[Dict[str, Any]]:
-        snapshot = round_budget_snapshot(ctx._round_budget_record)
-        if not snapshot["expired"]:
-            return None
-        report = {
-            "status": "stopped-at-round-deadline",
-            "last_completed_stage": last_completed,
-            "next_stage": next_stage,
-            "completed_stages": store.completed_stages(),
-            "audit_budget": snapshot,
-            "claim_status": "not-a-finding",
-        }
-        ctx.write_artifact(round_no, "S0", "execution-budget-status.json", snapshot)
-        ctx.write_artifact(round_no, "S0", "round-timebox-report.json", report)
-        store.save_stage("S0", report)
-        print("[round-%02d] round deadline expired; preserving progress and stopping" %
-              round_no)
-        return report
 
     def bounded_scan_timeout(configured: int) -> int:
         remaining = int(round_budget_snapshot(

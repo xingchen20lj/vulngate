@@ -45,11 +45,10 @@ class RunResult:
     process_tree_cleanup: Dict[str, Any] = field(default_factory=dict)
 
 
-POC_RESOURCE_POLICY_VERSION = "posix-rlimit-as4g-cpu-fsize64m-nofile512-nproc128-core0-v4"
+POC_RESOURCE_POLICY_VERSION = "posix-rlimit-as4g-cpu-fsize64m-nofile512-nproc128-core0-v5"
 POC_MAX_FILE_BYTES = 64 * 1024 * 1024
 POC_MAX_OPEN_FILES = 512
 POC_MAX_PROCESS_SPAWN_DELTA = 128
-POC_FILE_LIMIT_BLOCK_BYTES = 512
 POC_MAX_ADDRESS_SPACE_BYTES = 4 * 1024 * 1024 * 1024
 POC_MIN_ADDRESS_SPACE_BYTES = 256 * 1024 * 1024
 POC_DEFAULT_JAVA_HEAP_BYTES = 1024 * 1024 * 1024
@@ -64,26 +63,27 @@ POC_PROCESS_TABLE_TIMEOUT_SECONDS = 1
 MAX_COMMAND_WALL_TIMEOUT_SECONDS = 15 * 60
 PROCESS_TREE_CLEANUP_POLICY_VERSION = "verified-pid-starttime-cleanup-v2"
 
-_POSIX_LIMIT_WRAPPER = r'''set -eu
-cpu_limit="$1"
-file_blocks="$2"
-open_files="$3"
-user_process_limit="$4"
-address_space_kib="$5"
-shift 5
-ulimit -S -c 0
-ulimit -H -c 0
-ulimit -S -n "$open_files"
-ulimit -H -n "$open_files"
-ulimit -S -f "$file_blocks"
-ulimit -H -f "$file_blocks"
-ulimit -S -t "$cpu_limit"
-ulimit -H -t "$cpu_limit"
-ulimit -S -u "$user_process_limit"
-ulimit -H -u "$user_process_limit"
-ulimit -S -v "$address_space_kib"
-ulimit -H -v "$address_space_kib"
-exec "$@"
+_POSIX_RESOURCE_LAUNCHER = r'''import os
+import resource
+import sys
+
+args = sys.argv[1:]
+cpu, file_bytes, open_files, user_processes, address_space = map(int, args[:5])
+separator = args[5]
+command = args[6:]
+if separator != "--" or not command:
+    raise SystemExit("invalid VulnGate resource-limit launcher arguments")
+limits = (
+    (resource.RLIMIT_CPU, cpu),
+    (resource.RLIMIT_FSIZE, file_bytes),
+    (resource.RLIMIT_NOFILE, open_files),
+    (resource.RLIMIT_NPROC, user_processes),
+    (resource.RLIMIT_CORE, 0),
+    (resource.RLIMIT_AS, address_space),
+)
+for limit, value in limits:
+    resource.setrlimit(limit, (value, value))
+os.execvpe(command[0], command, os.environ)
 '''
 
 
@@ -150,13 +150,12 @@ def _resource_limited_argv(command: List[str], cpu_seconds_per_process: int,
                            address_space_limit: int) -> List[str]:
     """Set non-raiseable POSIX resource limits before exec, without preexec_fn."""
     cpu_seconds = max(1, min(int(cpu_seconds_per_process), 3600))
-    file_blocks = POC_MAX_FILE_BYTES // POC_FILE_LIMIT_BLOCK_BYTES
-    address_space_kib = max(1, int(address_space_limit) // 1024)
-    return ["/bin/bash", "-c", _POSIX_LIMIT_WRAPPER,
+    address_space_bytes = max(1, int(address_space_limit))
+    return [sys.executable, "-c", _POSIX_RESOURCE_LAUNCHER,
             "vulngate-resource-limits",
-            str(cpu_seconds), str(file_blocks),
+            str(cpu_seconds), str(POC_MAX_FILE_BYTES),
             str(POC_MAX_OPEN_FILES), str(process_limit),
-            str(address_space_kib)] + list(command)
+            str(address_space_bytes), "--"] + list(command)
 
 
 def prepare_posix_resource_limited_command(

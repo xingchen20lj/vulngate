@@ -101,9 +101,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   one attempt after a concrete nonzero script/request failure, so absent
   evidence alone no longer triggers speculative rewrites. The S4 evidence
   policy version changes so older checkpoints are reevaluated under this rule.
-- POSIX file-size limits now convert the 64 MiB contract using the portable
-  512-byte `ulimit -f` block unit on macOS as well as other supported systems;
-  the resource-policy version changes so older evidence is not reused.
+- POSIX PoC resource limits are applied directly through Python's `resource`
+  API in a minimal launcher, avoiding shell-specific `ulimit` syntax and unit
+  differences. The 64 MiB file cap is set in bytes; the resource-policy version
+  changes so older evidence is not reused.
 - The command runner keeps enforcing its wall-clock deadline when a child
   closes stdout/stderr and makes a final process-group cleanup attempt after
   the leader exits. Runner policy versions change so older S4 checkpoints are
