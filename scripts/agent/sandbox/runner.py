@@ -152,7 +152,6 @@ def _resource_limited_argv(command: List[str], cpu_seconds_per_process: int,
     cpu_seconds = max(1, min(int(cpu_seconds_per_process), 3600))
     address_space_bytes = max(1, int(address_space_limit))
     return [sys.executable, "-c", _POSIX_RESOURCE_LAUNCHER,
-            "vulngate-resource-limits",
             str(cpu_seconds), str(POC_MAX_FILE_BYTES),
             str(POC_MAX_OPEN_FILES), str(process_limit),
             str(address_space_bytes), "--"] + list(command)
