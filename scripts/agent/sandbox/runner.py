@@ -74,15 +74,18 @@ command = args[6:]
 if separator != "--" or not command:
     raise SystemExit("invalid VulnGate resource-limit launcher arguments")
 limits = (
-    (resource.RLIMIT_CPU, cpu),
-    (resource.RLIMIT_FSIZE, file_bytes),
-    (resource.RLIMIT_NOFILE, open_files),
-    (resource.RLIMIT_NPROC, user_processes),
-    (resource.RLIMIT_CORE, 0),
-    (resource.RLIMIT_AS, address_space),
+    ("RLIMIT_CPU", resource.RLIMIT_CPU, cpu),
+    ("RLIMIT_FSIZE", resource.RLIMIT_FSIZE, file_bytes),
+    ("RLIMIT_NOFILE", resource.RLIMIT_NOFILE, open_files),
+    ("RLIMIT_NPROC", resource.RLIMIT_NPROC, user_processes),
+    ("RLIMIT_CORE", resource.RLIMIT_CORE, 0),
+    ("RLIMIT_AS", resource.RLIMIT_AS, address_space),
 )
-for limit, value in limits:
-    resource.setrlimit(limit, (value, value))
+for name, limit, value in limits:
+    try:
+        resource.setrlimit(limit, (value, value))
+    except (OSError, ValueError) as exc:
+        raise SystemExit("cannot apply %s=%s: %s" % (name, value, exc))
 os.execvpe(command[0], command, os.environ)
 '''
 
@@ -133,28 +136,47 @@ def _address_space_limit_bytes() -> int:
 def _resource_limit_contract(cpu_seconds_per_process: int, process_baseline: int,
                              process_limit: int,
                              address_space_limit: int) -> Dict[str, Any]:
+    import resource
+
+    def clamp_to_hard(which: int, requested: int) -> int:
+        _soft, hard = resource.getrlimit(which)
+        return (requested if hard == resource.RLIM_INFINITY else
+                min(requested, int(hard)))
+
+    cpu_seconds = clamp_to_hard(
+        resource.RLIMIT_CPU, max(1, min(int(cpu_seconds_per_process), 3600)))
+    file_bytes = clamp_to_hard(resource.RLIMIT_FSIZE, POC_MAX_FILE_BYTES)
+    open_files = clamp_to_hard(resource.RLIMIT_NOFILE, POC_MAX_OPEN_FILES)
+    user_processes = clamp_to_hard(resource.RLIMIT_NPROC, process_limit)
+    address_space_bytes = clamp_to_hard(
+        resource.RLIMIT_AS, max(1, int(address_space_limit)))
+    if cpu_seconds < 1 or file_bytes < 1 or open_files < 16:
+        raise PermissionError("host hard limits are too low for the PoC resource profile")
+    if user_processes <= process_baseline:
+        raise PermissionError("RLIMIT_NPROC is below the current user process count")
+    if address_space_bytes < POC_MIN_ADDRESS_SPACE_BYTES:
+        raise PermissionError("RLIMIT_AS hard limit is below the 256 MiB minimum")
     return {
         "policy": POC_RESOURCE_POLICY_VERSION,
-        "cpu_seconds_per_process": max(1, min(int(cpu_seconds_per_process), 3600)),
-        "max_address_space_bytes": address_space_limit,
-        "max_file_bytes": POC_MAX_FILE_BYTES,
-        "max_open_files": POC_MAX_OPEN_FILES,
+        "cpu_seconds_per_process": cpu_seconds,
+        "max_address_space_bytes": address_space_bytes,
+        "max_file_bytes": file_bytes,
+        "max_open_files": open_files,
         "user_process_baseline": process_baseline,
-        "max_user_processes": process_limit,
+        "max_user_processes": user_processes,
         "core_bytes": 0,
     }
 
 
-def _resource_limited_argv(command: List[str], cpu_seconds_per_process: int,
-                           process_limit: int,
-                           address_space_limit: int) -> List[str]:
+def _resource_limited_argv(command: List[str],
+                           resource_limits: Dict[str, Any]) -> List[str]:
     """Set non-raiseable POSIX resource limits before exec, without preexec_fn."""
-    cpu_seconds = max(1, min(int(cpu_seconds_per_process), 3600))
-    address_space_bytes = max(1, int(address_space_limit))
     return [sys.executable, "-c", _POSIX_RESOURCE_LAUNCHER,
-            str(cpu_seconds), str(POC_MAX_FILE_BYTES),
-            str(POC_MAX_OPEN_FILES), str(process_limit),
-            str(address_space_bytes), "--"] + list(command)
+            str(resource_limits["cpu_seconds_per_process"]),
+            str(resource_limits["max_file_bytes"]),
+            str(resource_limits["max_open_files"]),
+            str(resource_limits["max_user_processes"]),
+            str(resource_limits["max_address_space_bytes"]), "--"] + list(command)
 
 
 def prepare_posix_resource_limited_command(
@@ -192,8 +214,7 @@ def prepare_posix_resource_limited_command(
                 str(resource_limits["max_open_files"]),
                 str(resource_limits["max_user_processes"]),
                 str(resource_limits["max_address_space_bytes"]),
-            ], resource_limits["cpu_seconds_per_process"], process_limit,
-                resource_limits["max_address_space_bytes"]),
+            ], resource_limits),
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE, text=True,
             timeout=max(1, min(int(preflight_timeout), 5)), check=False,
@@ -206,10 +227,8 @@ def prepare_posix_resource_limited_command(
         detail = (preflight.stderr or "preflight exited %d" % preflight.returncode)
         raise PermissionError("required POSIX resource-limit profile failed: %s" %
                               detail[-240:])
-    return (_resource_limited_argv(
-        list(command), resource_limits["cpu_seconds_per_process"], process_limit,
-        resource_limits["max_address_space_bytes"]),
-        resource_limits)
+    return (_resource_limited_argv(list(command), resource_limits),
+            resource_limits)
 
 
 def _measure_scratch_tree(root: Path) -> Tuple[Optional[Dict[str, int]], str]:

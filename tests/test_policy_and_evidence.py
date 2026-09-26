@@ -129,9 +129,20 @@ class PolicyTests(unittest.TestCase):
                                 timeout=17, minimal_env=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             limits = json.loads(result.stdout)
-            self.assertEqual(limits["RLIMIT_CPU"], [18, 18])
-            self.assertEqual(limits["RLIMIT_FSIZE"], [64 * 1024 * 1024] * 2)
-            self.assertEqual(limits["RLIMIT_NOFILE"], [512, 512])
+            self.assertEqual(
+                limits["RLIMIT_CPU"],
+                [result.resource_limits["cpu_seconds_per_process"]] * 2)
+            self.assertLessEqual(
+                result.resource_limits["cpu_seconds_per_process"], 18)
+            self.assertEqual(
+                limits["RLIMIT_FSIZE"],
+                [result.resource_limits["max_file_bytes"]] * 2)
+            self.assertLessEqual(
+                result.resource_limits["max_file_bytes"], 64 * 1024 * 1024)
+            self.assertEqual(
+                limits["RLIMIT_NOFILE"],
+                [result.resource_limits["max_open_files"]] * 2)
+            self.assertLessEqual(result.resource_limits["max_open_files"], 512)
             self.assertEqual(limits["RLIMIT_NPROC"][1],
                              result.resource_limits["max_user_processes"])
             self.assertLessEqual(
