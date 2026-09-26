@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zer0gate.github.io/vulngate/schema/branch-governance-v1.json",
+  "title": "VulnGate branch governance policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "branch", "require_pull_request", "required_approvals", "required_checks", "allow_force_pushes", "allow_deletions", "remote_enforcement_required"],
+  "properties": {
+    "schema_version": {"const": "branch-governance-v1"},
+    "branch": {"const": "main"},
+    "require_pull_request": {"const": true},
+    "required_approvals": {"type": "integer", "minimum": 1},
+    "dismiss_stale_reviews": {"const": true},
+    "require_code_owner_review": {"const": true},
+    "required_checks": {"type": "array", "minItems": 2, "uniqueItems": true, "items": {"enum": ["test", "security"]}},
+    "allow_force_pushes": {"const": false},
+    "allow_deletions": {"const": false},
+    "enforce_admins": {"const": true},
+    "remote_enforcement_required": {"const": true}
+  }
+}

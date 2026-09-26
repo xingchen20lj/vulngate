@@ -28,32 +28,99 @@ if [ ! -f "$ROOT/.codex-plugin/plugin.json" ]; then
 fi
 
 echo "[1/4] Copying plugin -> $DEST"
-mkdir -p "$DEST"
+DEST_PARENT="$(dirname "$DEST")"
+mkdir -p "$DEST_PARENT"
+CACHEBUSTER="$(date -u +%Y%m%d-%H%M%S)-$$"
+STAGING="$(mktemp -d "$DEST_PARENT/.vulngate-staging.XXXXXX")"
+BACKUP="${DEST}.previous.${CACHEBUSTER}"
+FAILED="${DEST}.failed.${CACHEBUSTER}"
+OLD_DEST_PRESENT=0
+[ -e "$DEST" ] && OLD_DEST_PRESENT=1
+SWAPPED=0
+
+rollback_install() {
+  status=$?
+  trap - EXIT ERR INT TERM
+  if [ "$SWAPPED" = "1" ] && [ -e "$DEST" ]; then
+    mv "$DEST" "$FAILED" 2>/dev/null || true
+  fi
+  if [ "$OLD_DEST_PRESENT" = "1" ] && [ -e "$BACKUP" ]; then
+    mv "$BACKUP" "$DEST" 2>/dev/null || true
+    echo "!! installation failed; previous plugin restored at $DEST" >&2
+  fi
+  if [ -d "$STAGING" ]; then
+    rm -rf -- "$STAGING"
+  fi
+  exit "$status"
+}
+trap rollback_install EXIT ERR INT TERM
+
+sync_directory() {
+  python3 - "$1" <<'PYEOF'
+import os
+import sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PYEOF
+}
 tar -C "$ROOT" -cf - \
   --exclude '__pycache__' \
   --exclude '*.pyc' \
   --exclude '.DS_Store' \
   --exclude 'docs/DEVELOPMENT-REVIEW.zh-CN.md' \
-  .codex-plugin hooks skills scripts macos assets docs benchmarks \
+  .codex-plugin hooks skills scripts macos assets docs benchmarks schemas pyproject.toml \
   README.md README.zh-CN.md LICENSE CHANGELOG.md PROVENANCE.md RELATED_WORK.md \
   SECURITY.md SECURITY.zh-CN.md CONTRIBUTING.md CONTRIBUTING.zh-CN.md \
-  | tar -C "$DEST" -xf -
-# Publish only runtime files and documentation. In particular, never copy
-# state/, ledger/, reports/, poc/, credentials or .vulngate-macos-backup/.
-
+  | tar -C "$STAGING" -xf -
 echo "[2/4] Updating local cachebuster (iteration-aware reinstall)"
-CACHEBUSTER="$(date -u +%Y%m%d-%H%M%S)"
-python3 - "$DEST" "local-$CACHEBUSTER" <<'PYEOF'
+python3 - "$STAGING" "local-$CACHEBUSTER" <<'PYEOF'
 import json, sys
 from pathlib import Path
+import os
 dest = Path(sys.argv[1])
 manifest = dest / ".codex-plugin" / "plugin.json"
 data = json.loads(manifest.read_text(encoding="utf-8"))
 base = data.get("version", "0.1.0").split("+")[0]
 data["version"] = "%s+codex.%s" % (base, sys.argv[2])
-manifest.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+tmp = manifest.with_name(manifest.name + ".tmp")
+with tmp.open("w", encoding="utf-8") as handle:
+    handle.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+tmp.replace(manifest)
 print("    version ->", data["version"])
 PYEOF
+
+# Validate the complete staged tree before changing the active installation.
+python3 - "$STAGING" <<'PYEOF'
+import json, re, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+manifest = root / ".codex-plugin" / "plugin.json"
+data = json.loads(manifest.read_text(encoding="utf-8"))
+required = ("name", "version", "description", "skills", "interface")
+missing = [key for key in required if key not in data]
+if missing or data.get("name") != "vulngate" or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+.*", data.get("version", "")):
+    raise SystemExit("staged plugin manifest validation failed: %s" % missing)
+for icon in ("composerIcon", "logo"):
+    path = data.get("interface", {}).get(icon)
+    if path and not (root / path).exists():
+        raise SystemExit("staged plugin asset missing: %s" % path)
+print("    staged plugin validation OK")
+PYEOF
+
+# Publish only runtime files and documentation. In particular, never copy
+# state/, ledger/, reports/, poc/, credentials or .vulngate-macos-backup/.
+# The rename is the only point at which the active directory changes.
+if [ "$OLD_DEST_PRESENT" = "1" ]; then
+  mv "$DEST" "$BACKUP"
+fi
+mv "$STAGING" "$DEST"
+SWAPPED=1
+sync_directory "$DEST_PARENT"
 
 echo "[3/4] Registering personal marketplace entry"
 python3 - "$MARKETPLACE" <<'PYEOF'
@@ -80,7 +147,25 @@ for i, p in enumerate(plugins):
 else:
     plugins.append(entry)
 path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+import os, tempfile
+fd, temp_name = tempfile.mkstemp(prefix=path.name + ".tmp.", dir=str(path.parent))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    Path(temp_name).replace(path)
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+except Exception:
+    try:
+        Path(temp_name).unlink()
+    except OSError:
+        pass
+    raise
 print("    entry ready at", path)
 PYEOF
 
@@ -215,3 +300,8 @@ fi
 
 echo
 echo "完成。请新建一个 Codex 线程后开始使用（技能在线程启动时加载）。"
+
+# A successful install keeps the previous version for rollback.  Stop the
+# failure trap only after all validation and optional enablement completed.
+cleanup_cache_versions
+trap - EXIT ERR INT TERM

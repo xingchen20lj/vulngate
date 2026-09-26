@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .approval import ApprovalGate
+from ..orchestrator.work_budget import WorkBudgetExceeded
 
 
 @dataclass
@@ -797,6 +798,20 @@ class CommandRunner:
                 timeout_seconds=effective_timeout, timeout_capped=timeout_capped,
                 scratch_limits=scratch_limits, abort_reason=prelaunch_abort_reason,
                 process_tree_cleanup=process_tree_cleanup)
+        work_budget = getattr(self.execution_budget, "work_budget", None)
+        if work_budget is not None:
+            try:
+                work_budget.acquire_process()
+            except WorkBudgetExceeded as exc:
+                reason = "shared process budget exhausted: %s" % str(exc)[:160]
+                scratch_limits["status"] = "aborted"
+                scratch_limits["abort_reason"] = reason
+                return RunResult(
+                    normalized_cmd, -1, "", reason, int((time.monotonic() - t0) * 1000),
+                    resource_limits=resource_limits,
+                    timeout_seconds=effective_timeout, timeout_capped=timeout_capped,
+                    scratch_limits=scratch_limits, abort_reason=reason,
+                    process_tree_cleanup=process_tree_cleanup)
         try:
             proc = subprocess.Popen(
                 popen_cmd, cwd=str(cwd), env=env,

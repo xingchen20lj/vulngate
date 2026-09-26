@@ -145,8 +145,11 @@ def _render_md(stats: List[Dict[str, Any]]) -> str:
             s["target"], s["rounds"], s["candidates"], s["confirmed"], s["excluded"],
             s["llm_calls"], s["tokens"], s["estimated_usd"], s["real_usd_flash"],
             s["elapsed_s"]))
-        tc += s["candidates"]; tx += s["excluded"]; tk += s["tokens"]
-        te += s["estimated_usd"]; tr += s["real_usd_flash"]
+        tc += s["candidates"]
+        tx += s["excluded"]
+        tk += s["tokens"]
+        te += s["estimated_usd"]
+        tr += s["real_usd_flash"]
     lines.append("| **合计** | **%d** | **%d** | **%d** | **%d** | **%d** | **%d** | **%.4f** | **%.4f** | — |" % (
         sum(s["rounds"] for s in stats), tc,
         sum(s["confirmed"] for s in stats), tx,

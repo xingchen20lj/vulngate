@@ -131,7 +131,12 @@ class RunPipelineContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.lines = SKILL_MD.read_text(encoding="utf-8").splitlines()
-        src = RUN_AGENT.read_text(encoding="utf-8")
+        # Parser construction moved with the reporting phase; the facade still
+        # owns the module CLI entrypoint, so inspect both compatibility files.
+        src = "\n".join([
+            RUN_AGENT.read_text(encoding="utf-8"),
+            (RUN_AGENT.parent / "reporting.py").read_text(encoding="utf-8"),
+        ])
         cls.known = set(re.findall(r'add_argument\(\s*"(--[a-z][a-z0-9-]*)"', src))
 
     def _invocations(self):

@@ -198,7 +198,7 @@ See [native-target usage](macos/README.md) and
 ### Prerequisites
 
 - Codex (CLI or desktop app), version with plugin support
-- Python 3.8+
+- Python 3.10+
 - JDK 8+ for JVM targets (17/21 recommended); native targets require macOS Command Line Tools
 - `rg` (ripgrep) for source mapping
 

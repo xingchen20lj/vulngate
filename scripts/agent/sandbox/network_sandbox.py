@@ -116,7 +116,8 @@ def _filesystem_rules(workspace_root: Path, readable_paths: List[Path],
         if path == workspace or not path.is_relative_to(workspace):
             return [], "filesystem write root escapes the audit workspace"
 
-    quote = lambda path: json.dumps(str(path), ensure_ascii=True)
+    def quote(path: Path) -> str:
+        return json.dumps(str(path), ensure_ascii=True)
     rules = []
     system_roots = [Path(root) for root in POC_SYSTEM_READ_ROOTS]
     system_roots.extend(Path(root) for root in POC_SYSTEM_RUNTIME_EXEC_ROOTS)

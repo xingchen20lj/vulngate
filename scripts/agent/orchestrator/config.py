@@ -90,6 +90,8 @@ class TargetConfig:
     @classmethod
     def load(cls, path: Path) -> "TargetConfig":
         data = json.loads(path.read_text(encoding="utf-8"))
+        from .schema_registry import validate_target_config_document
+        validate_target_config_document(data)
         kwargs = {}
         for name, f in cls.__dataclass_fields__.items():
             if name in data:

@@ -573,6 +573,7 @@ def enumerate_source_universe(root: Path, source_dirs: Optional[Sequence[str]] =
                           enumeration={key: scan_stats.get(key) for key in (
                               "git_index_used", "tracked_files", "untracked_files",
                               "files_seen", "source_files", "non_source_files",
+                              "bytes_seen",
                               "directories_seen", "elapsed_seconds")
                               if key in scan_stats})
 
@@ -1048,7 +1049,7 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
                     target: str = "", target_type: Optional[str] = None,
                     with_flows: bool = True,
                     fix_history: Optional[Sequence[Dict[str, Any]]] = None,
-                    progress_callback=None
+                    progress_callback=None, work_budget: Optional[Any] = None
                     ) -> InventoryResult:
     """Full inventory: universe + entries + sinks + controls + symbols + flows.
 
@@ -1067,6 +1068,10 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
     flt = source_filter or SourceFilter()
     universe = enumerate_source_universe(root, source_dirs, flt,
                                          progress_callback=progress_callback)
+    if work_budget is not None:
+        work_budget.record_scan(
+            files=int(universe.scanned_files),
+            bytes_read=int((universe.enumeration or {}).get("bytes_seen", 0) or 0))
     files = universe.records
     production_rels = [r.file for r in files if r.production]
 

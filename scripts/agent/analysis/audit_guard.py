@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+from ..cli.audit import AUDIT_EXEC_VALUE_OPTIONS
+
 
 REGISTRY_SCHEMA = "vulngate-active-audits-v1"
 MAX_ACTIVE_AUDITS = 32
@@ -44,8 +46,6 @@ _PATH_VALUE_FLAGS = {
     "-C", "--directory", "--file", "--git-dir", "--output",
     "--root", "--work-tree", "-f",
 }
-
-
 class _TooManyShellTokens(ValueError):
     """Internal signal that a command exceeded the hook parser's work bound."""
 
@@ -154,6 +154,21 @@ def _write_records(path: Path, records: List[Dict[str, Any]]) -> None:
             pass
 
 
+def _retain_reachable_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep scopes that still have a guardable workspace or source root."""
+    retained = []
+    for record in records:
+        try:
+            reachable = any(Path(record[key]).exists()
+                            for key in ("workspace", "source_root"))
+        except (KeyError, OSError):
+            reachable = True
+        if not reachable:
+            continue
+        retained.append(record)
+    return retained
+
+
 def _same_path(left: str, right: str) -> bool:
     a = Path(left).expanduser().resolve(strict=False)
     b = Path(right).expanduser().resolve(strict=False)
@@ -205,7 +220,7 @@ def register_active_audit(root: Path, workspace: Path, target: str,
         # Keep expired roots registered: expiration must stop further target
         # work, not silently remove the shell guard. The user/driver releases
         # a completed or expired round explicitly.
-        records = _read_records(path)
+        records = _retain_reachable_records(_read_records(path))
         for existing in records:
             existing_identity = (str(existing.get("workspace")),
                                  str(existing.get("target")),
@@ -266,8 +281,15 @@ def _active_records() -> List[Dict[str, Any]]:
         return []
     with _locked(path):
         # Expired records still enforce the stop condition until a matching
-        # audit-budget release removes them.
-        return _read_records(path)
+        # audit-budget release removes them. A record whose workspace *and*
+        # source root were both deleted cannot guard anything anymore, so it
+        # is safe to retire that unreachable test/temp scope. Existing roots
+        # remain fail-closed until an explicit release.
+        records = _read_records(path)
+        retained = _retain_reachable_records(records)
+        if len(retained) != len(records):
+            _write_records(path, retained)
+        return retained
 
 
 def _shell_tokens(command: str) -> Optional[List[str]]:
@@ -375,42 +397,46 @@ def _command_touches_root(command: str, cwd: Path, root: Path) -> bool:
     return False
 
 
-def _trusted_cli_operation(command: str, cwd: Path, plugin_root: Path
-                           ) -> Optional[str]:
-    tokens = _shell_tokens(command)
+def _trusted_cli_script_index(tokens: List[str], plugin_root: Path,
+                              cwd: Path) -> Optional[int]:
+    """Return the trusted CLI script index after safe env prefixes.
+
+    The shell hook sees the complete command string, while normal usage often
+    prefixes the interpreter with ``PYTHONPATH=scripts`` or ``env``.  Accept
+    only a PYTHONPATH that resolves to this installation's scripts directory;
+    arbitrary environment prefixes must never turn an untrusted import tree
+    into an allowed audit command.
+    """
     if not tokens:
         return None
-    executable = Path(tokens[0]).name.lower()
+    index = 0
+    saw_env = False
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "env" and index == 0:
+            saw_env = True
+            index += 1
+            continue
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", token):
+            break
+        key, value = token.split("=", 1)
+        if key != "PYTHONPATH":
+            return None
+        paths = value.split(os.pathsep)
+        expected = plugin_root.resolve(strict=True) / "scripts"
+        if (not paths or any(_normalize_argument(path, cwd) != str(expected)
+                             for path in paths)):
+            return None
+        saw_env = True
+        index += 1
+    if saw_env and index < len(tokens) and tokens[index] == "--":
+        index += 1
+    if index >= len(tokens):
+        return None
+    executable = Path(tokens[index]).name.lower()
     if not (executable.startswith("python") or executable == "py"):
         return None
-    script_index = 1
-    if executable == "py" and script_index < len(tokens) and tokens[script_index] in {
-            "-2", "-3"}:
-        script_index += 1
-    if script_index + 1 >= len(tokens):
-        return None
-    script_path_text = os.path.expandvars(tokens[script_index])
-    script_path = Path(script_path_text).expanduser()
-    if not script_path.is_absolute():
-        script_path = cwd / script_path
-    script_path = script_path.resolve(strict=False)
-    try:
-        script_path.relative_to(plugin_root.resolve(strict=True))
-    except (OSError, ValueError):
-        return None
-    if script_path.name != "agent_cli.py":
-        return None
-    return tokens[script_index + 1]
-
-
-def _matching_cli_scope(tokens: List[str], plugin_root: Path, cwd: Path
-                        ) -> Optional[Tuple[str, str, int, str, str, str]]:
-    if not tokens:
-        return None
-    executable = Path(tokens[0]).name.lower()
-    if not (executable.startswith("python") or executable == "py"):
-        return None
-    script_index = 1
+    script_index = index + 1
     if executable == "py" and script_index < len(tokens) and tokens[script_index] in {
             "-2", "-3"}:
         script_index += 1
@@ -425,40 +451,78 @@ def _matching_cli_scope(tokens: List[str], plugin_root: Path, cwd: Path
         script_path.relative_to(plugin_root.resolve(strict=True))
     except (OSError, ValueError):
         return None
-    if script_path.name != "agent_cli.py" or script_index + 1 >= len(tokens):
+    if script_path.name != "agent_cli.py":
         return None
+    return script_index
 
+
+def _trusted_cli_operation(command: str, cwd: Path, plugin_root: Path
+                           ) -> Optional[str]:
+    tokens = _shell_tokens(command)
+    if not tokens:
+        return None
+    script_index = _trusted_cli_script_index(tokens, plugin_root, cwd)
+    if script_index is None or script_index + 1 >= len(tokens):
+        return None
+    return tokens[script_index + 1]
+
+
+def _matching_cli_scope(tokens: List[str], plugin_root: Path, cwd: Path
+                        ) -> Optional[Tuple[str, str, int, str, str, str]]:
+    script_index = _trusted_cli_script_index(tokens, plugin_root, cwd)
+    if script_index is None or script_index + 1 >= len(tokens):
+        return None
+    script_path = Path(tokens[script_index]).expanduser()
+    if not script_path.is_absolute():
+        script_path = cwd / script_path
+    script_path = script_path.resolve(strict=False)
     command_name = tokens[script_index + 1]
     if command_name == "audit-exec":
-        target_index = script_index + 2
+        argument_start = script_index + 2
     elif command_name == "audit-budget":
         if (script_index + 3 >= len(tokens)
                 or tokens[script_index + 2] not in {"start", "status", "release"}):
             return None
         command_name = "audit-budget:" + tokens[script_index + 2]
-        target_index = script_index + 3
+        argument_start = script_index + 3
     else:
         return None
-    if target_index >= len(tokens):
+    separator = len(tokens)
+    if "--" in tokens[argument_start:]:
+        separator = tokens.index("--", argument_start)
+    header = tokens[argument_start:separator]
+    if not header:
         return None
-    target = tokens[target_index]
+    target: Optional[str] = None
     values: Dict[str, str] = {}
-    index = target_index + 1
-    while index < len(tokens):
-        token = tokens[index]
-        if token == "--":
-            break
-        if token in {"--workspace", "--root", "--round"}:
-            if index + 1 >= len(tokens):
+    index = 0
+    while index < len(header):
+        token = header[index]
+        if token in AUDIT_EXEC_VALUE_OPTIONS:
+            if index + 1 >= len(header):
                 return None
-            values[token[2:]] = tokens[index + 1]
+            if token in {"--workspace", "--root", "--round"}:
+                values[token[2:]] = header[index + 1]
             index += 2
             continue
-        if token.startswith(("--workspace=", "--root=", "--round=")):
+        if any(token.startswith(option + "=")
+               for option in AUDIT_EXEC_VALUE_OPTIONS):
             key, value = token[2:].split("=", 1)
-            values[key] = value
+            if key in {"workspace", "root", "round"}:
+                values[key] = value
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        if target is not None:
+            return None
+        target = token
         index += 1
-    if command_name == "audit-exec" and (index >= len(tokens) or index + 1 >= len(tokens)):
+    if target is None:
+        return None
+    if command_name == "audit-exec" and (
+            separator >= len(tokens) or separator + 1 >= len(tokens)):
         return None
     if not all(key in values for key in ("workspace", "root", "round")):
         return None

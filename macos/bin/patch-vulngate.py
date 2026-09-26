@@ -171,7 +171,7 @@ PATCHES: List[Dict[str, str]] = [
     # ---------------------------------------------------------------- #5
     {
         "id": "5-gate-scan",
-        "file": "scripts/agent/orchestrator/stages.py",
+        "file": "scripts/agent/orchestrator/stages/common.py",
         "desc": "S1 _gate_scan 去掉硬编码 globs=[\"*.java\"]",
         "old": '            lines = srch.rg(kw, d, globs=["*.java"], max_count=6)',
         "new": ('            # [vulngate-macos-universal] 去掉 *.java 硬编码：\n'
@@ -183,7 +183,7 @@ PATCHES: List[Dict[str, str]] = [
     # ---------------------------------------------------------------- #6
     {
         "id": "6-s2-entry-match",
-        "file": "scripts/agent/orchestrator/stages.py",
+        "file": "scripts/agent/orchestrator/stages/s1.py",
         "desc": 'S2 entry 匹配去掉 t.endswith(".java") 硬编码',
         "old": ('        fname_tokens = [t for t in re.split(r"[^\\w./]+", str(fl)) '
                 'if t.endswith(".java")]'),
@@ -195,7 +195,7 @@ PATCHES: List[Dict[str, str]] = [
                 '                     ".hpp", ".mjs", ".cjs")\n'
                 '        fname_tokens = [t for t in re.split(r"[^\\w./]+", str(fl))\n'
                 '                        if t.endswith(_src_exts)]'),
-        "marker": "_src_exts = (",
+        "marker": "_src_exts = tuple(ALL_SUFFIXES)",
         "markers": ["_src_exts = (", "_src_exts = tuple(ALL_SUFFIXES)"],
     },
     # ---------------------------------------------------------------- #7
@@ -216,7 +216,7 @@ PATCHES: List[Dict[str, str]] = [
     # ---------------------------------------------------------------- #8
     {
         "id": "8-jar-path-outside-ws",
-        "file": "scripts/agent/orchestrator/stages.py",
+        "file": "scripts/agent/orchestrator/stages/s1.py",
         "desc": "S1 jar 报告行容忍 workspace 之外的 jar 路径",
         "old": '            "path": str(p.relative_to(ctx.workspace)),',
         "new": ('            # [vulngate-macos-universal] TargetConfig.resolve_jars 允许\n'

@@ -67,6 +67,11 @@ class LLMClient:
         self.reasoning_effort = reasoning_effort or os.environ.get("LLM_REASONING_EFFORT")
         self.usage = LLMUsage()
         self._timeout_provider: Optional[Callable[[], Optional[float]]] = None
+        self._work_budget: Optional[Any] = None
+
+    def set_work_budget(self, budget: Optional[Any]) -> None:
+        """Attach the caller-owned shared budget; never creates one here."""
+        self._work_budget = budget
 
     def set_timeout_provider(
             self, provider: Optional[Callable[[], Optional[float]]]) -> None:
@@ -106,6 +111,8 @@ class LLMClient:
         last: Optional[Exception] = None
         for attempt in range(3):
             try:
+                if self._work_budget is not None:
+                    self._work_budget.record_llm_call()
                 with urllib.request.urlopen(req, timeout=self._request_timeout()) as resp:
                     response_body = resp.read()
                 remaining = self._remaining_timeout_budget()

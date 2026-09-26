@@ -1,0 +1,7 @@
+# Security boundary and release files require maintainer review.
+/.github/ @Zer0Gate
+/hooks/ @Zer0Gate
+/scripts/agent/sandbox/ @Zer0Gate
+/install.sh @Zer0Gate
+/SECURITY.md @Zer0Gate
+/SECURITY.zh-CN.md @Zer0Gate

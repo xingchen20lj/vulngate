@@ -15,7 +15,11 @@ class CheckpointStore:
         self.target = target
         self.round_no = round_no
         self.base = workspace / "state" / target / ("round-%02d" % round_no)
-        self.base.mkdir(parents=True, exist_ok=True)
+        self.base.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(self.base, 0o700)
+        except OSError:
+            pass
 
     def stage_file(self, stage: str) -> Path:
         return self.base / ("stage-%s.json" % stage)
@@ -41,7 +45,11 @@ class CheckpointStore:
 
     def artifact_path(self, stage: str, name: str) -> Path:
         d = self.base / stage
-        d.mkdir(parents=True, exist_ok=True)
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(d, 0o700)
+        except OSError:
+            pass
         return d / name
 
     def write_artifact(self, stage: str, name: str, data: Any) -> Path:
@@ -57,15 +65,36 @@ class CheckpointStore:
         """Stream compact JSON to avoid a second full-size in-memory copy."""
         tmp = path.with_name(".%s.tmp.%d" % (path.name, os.getpid()))
         with tmp.open("w", encoding="utf-8") as stream:
+            try:
+                os.chmod(tmp, 0o600)
+            except OSError:
+                pass
             json.dump(data, stream, ensure_ascii=False, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
         tmp.replace(path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
 
     @staticmethod
     def _atomic_write(path: Path, content: str) -> None:
         """Prevent a killed/concurrent stage from leaving truncated evidence."""
         tmp = path.with_name(".%s.tmp.%d" % (path.name, os.getpid()))
-        tmp.write_text(content, encoding="utf-8")
+        with tmp.open("w", encoding="utf-8") as stream:
+            try:
+                os.chmod(tmp, 0o600)
+            except OSError:
+                pass
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
         tmp.replace(path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
 
     def read_artifact(self, stage: str, name: str) -> Any:
         f = self.artifact_path(stage, name)

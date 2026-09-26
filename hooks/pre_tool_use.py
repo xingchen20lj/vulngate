@@ -52,13 +52,36 @@ def _deny_unverifiable_event() -> dict:
     }
 
 
+def _trusted_plugin_root() -> Path:
+    """Resolve the hook's own plugin root; reject arbitrary import roots."""
+    actual = Path(__file__).resolve().parent.parent
+    requested = os.environ.get("PLUGIN_ROOT")
+    root = Path(requested).expanduser().resolve() if requested else actual
+    if root != actual:
+        raise PermissionError("PLUGIN_ROOT does not match the hook installation root")
+    manifest = root / ".codex-plugin" / "plugin.json"
+    scripts = root / "scripts"
+    if not manifest.is_file() or not scripts.is_dir():
+        raise PermissionError("hook plugin root is incomplete")
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise PermissionError("hook plugin manifest is unreadable") from exc
+    version = str(data.get("version", ""))
+    if data.get("name") != "vulngate" or not version:
+        raise PermissionError("hook plugin manifest identity is invalid")
+    return root
+
+
 def main() -> int:
     try:
-        plugin_root = Path(os.environ.get("PLUGIN_ROOT") or __file__).resolve()
-        if plugin_root.is_file():
-            plugin_root = plugin_root.parent.parent
+        plugin_root = _trusted_plugin_root()
         scripts = plugin_root / "scripts"
-        sys.path.insert(0, str(scripts))
+        # The path is derived from the hook itself and has a validated
+        # manifest identity; an environment variable can only repeat that
+        # exact path, never replace it with attacker-controlled code.
+        if str(scripts) not in sys.path:
+            sys.path.insert(0, str(scripts))
         from agent.analysis.audit_guard import evaluate_pre_tool_use
 
         raw = sys.stdin.buffer.read(MAX_HOOK_EVENT_BYTES + 1)

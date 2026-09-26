@@ -1,0 +1,13 @@
+{
+  "schema_version": "branch-governance-v1",
+  "branch": "main",
+  "require_pull_request": true,
+  "required_approvals": 1,
+  "dismiss_stale_reviews": true,
+  "require_code_owner_review": true,
+  "required_checks": ["test", "security"],
+  "allow_force_pushes": false,
+  "allow_deletions": false,
+  "enforce_admins": true,
+  "remote_enforcement_required": true
+}

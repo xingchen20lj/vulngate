@@ -2,6 +2,7 @@ import socket
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -15,6 +16,8 @@ from agent.tools.service_lifecycle import (  # noqa: E402
     ServiceLifecycle,
     _loopback_connect_host,
 )
+from agent.sandbox.approval import ApprovalGate  # noqa: E402
+from agent.sandbox.isolation import IsolationDescriptor  # noqa: E402
 
 
 def _free_port():
@@ -50,6 +53,29 @@ def _nc_http_start_command(root, port):
     return ["sh", str(fixture), str(port)]
 
 
+class _TestIsolationBackend:
+    """Explicitly injected unit-test backend; production never uses this."""
+
+    descriptor = IsolationDescriptor(
+        backend="test-injected", version="unit", available=True,
+        network="test-only", filesystem="test-only",
+        capabilities=("injected",),
+    )
+
+    def wrap_command(self, command, workspace, working_dir, env):
+        return list(command)
+
+    def health_command(self, command, pid):
+        return list(command)
+
+
+def _authorize(lifecycle):
+    lifecycle.approval.record_authorized(
+        "service_lifecycle", "unit-test target service", run_id=lifecycle.run_id,
+        config_digest=lifecycle.snapshot()["config_digest"],
+        expires_at=time.time() + 60)
+
+
 class ServiceLifecycleTests(unittest.TestCase):
     def test_healthcheck_hosts_never_require_external_name_resolution(self):
         self.assertEqual(_loopback_connect_host("localhost"), "127.0.0.1")
@@ -74,7 +100,13 @@ class ServiceLifecycleTests(unittest.TestCase):
                     "poll_interval": 0.05,
                 }},
             )
-            lifecycle = ServiceLifecycle(root, "service-lab", 1, cfg)
+            approval = ApprovalGate()
+            with patch("agent.tools.service_lifecycle.detect_isolation_backend",
+                       return_value=(_TestIsolationBackend(),
+                                     _TestIsolationBackend.descriptor)):
+                lifecycle = ServiceLifecycle(root, "service-lab", 1, cfg,
+                                             approval=approval)
+            _authorize(lifecycle)
             ready = lifecycle.ensure_ready()
             self.assertTrue(ready["ready"], ready)
             self.assertEqual(ready["status"], "started-ready")
@@ -101,7 +133,13 @@ class ServiceLifecycleTests(unittest.TestCase):
                     "poll_interval": 0.05,
                 }},
             )
-            lifecycle = ServiceLifecycle(root, "proxied-service", 1, cfg)
+            approval = ApprovalGate()
+            with patch("agent.tools.service_lifecycle.detect_isolation_backend",
+                       return_value=(_TestIsolationBackend(),
+                                     _TestIsolationBackend.descriptor)):
+                lifecycle = ServiceLifecycle(root, "proxied-service", 1, cfg,
+                                             approval=approval)
+            _authorize(lifecycle)
             proxy_env = {
                 "HTTP_PROXY": "http://127.0.0.1:1",
                 "HTTPS_PROXY": "http://127.0.0.1:1",
@@ -163,7 +201,7 @@ class ServiceLifecycleTests(unittest.TestCase):
             result = lifecycle.ensure_ready()
             self.assertFalse(result["ready"])
             self.assertEqual(result["status"], "policy-denied")
-            self.assertIn("allow_unconfined_start=true", result["reason"])
+            self.assertIn("available isolation backend", result["reason"])
             self.assertFalse(result["allow_unconfined_start"])
             self.assertIsNone(lifecycle.process)
             self.assertEqual(lifecycle.approval.decisions[-1]["operation"],

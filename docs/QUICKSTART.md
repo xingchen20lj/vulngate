@@ -18,7 +18,7 @@ cd vulngate
 it in Codex automatically. It finds the `codex` command in your `$PATH` or inside
 the Codex desktop app bundle — no separate CLI installation needed when you use the
 desktop app. Prerequisites: a local Codex client (desktop app or CLI), Python
-3.8+, JDK 8+, `rg`.
+3.10+, JDK 8+, `rg`.
 
 > **New thread required.** Plugin skills load at thread start — open a new Codex
 > thread after installing.

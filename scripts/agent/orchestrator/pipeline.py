@@ -27,6 +27,7 @@ from ..tools.public_scan import NOVELTY_QUERY_POLICY_VERSION
 from .stages import (StageContext, run_s1, run_s2, run_s3, run_s4, run_s5,
                      run_s6, run_s7, run_s8, _coverage_scope_incomplete,
                      _derive_conclusion)
+from .work_budget import WorkBudget
 
 
 WORKSPACE = Path(__file__).resolve().parents[2]
@@ -108,6 +109,22 @@ def run_round(ctx: StageContext, force: bool = False, only: Optional[str] = None
         print("[pipeline] refusing round: %s" % exc)
         return
     ctx._round_budget_record = round_budget
+    remaining_seconds = max(
+        0.001, float(round_budget_snapshot(round_budget).get(
+            "remaining_seconds", budget_seconds)))
+    configured_slots = getattr(ctx.config, "max_candidates", 8) or 8
+    try:
+        candidate_slots = max(1, int(configured_slots))
+    except (TypeError, ValueError):
+        candidate_slots = 8
+    ctx.work_budget = WorkBudget(
+        name="audit-round", wall_seconds=remaining_seconds,
+        scan_files=500_000, scan_bytes=4 * 1024 * 1024 * 1024,
+        process_slots=128, candidate_slots=candidate_slots,
+        llm_calls=(getattr(ctx.llm, "max_calls", None)
+                   if ctx.llm is not None else None))
+    if ctx.llm is not None and hasattr(ctx.llm, "set_work_budget"):
+        ctx.llm.set_work_budget(ctx.work_budget)
     try:
         source_root = workspace_target_root(ctx.workspace, ctx.target)
         register_active_audit(

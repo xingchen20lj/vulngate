@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from ..tools.build import S4_EVIDENCE_POLICY_VERSION
+from .security_types import ExecutionState
 
 from ..tools.conclusion import _has_real_effect, _is_runtime_evidence, _requires_real_effect
 
@@ -15,7 +16,7 @@ class GateResult:
     gate_id: str
     passed: bool
     verdict: str
-    evidence: List[str] = None  # type: ignore
+    evidence: List[str] = field(default_factory=list)
 
 
 def g0_dead_code(entry: Dict[str, Any], reference_count: int) -> GateResult:
@@ -75,6 +76,10 @@ def g4_runtime(summary: Dict[str, Any], intended: str = "确认",
     errors = summary.get("errors", [])
     gate_blocked = summary.get("gate_blocked", [])
     leaked = summary.get("leaked", [])
+    independent_effects = [
+        effect for effect in (summary.get("independent_effect_evidence") or [])
+        if isinstance(effect, dict) and effect.get("status") == "observed"
+    ]
     if intended == "排除":
         basis = summary.get("exclusion_basis") or {}
         if (isinstance(basis, dict)
@@ -88,7 +93,8 @@ def g4_runtime(summary: Dict[str, Any], intended: str = "确认",
         )
     if intended == "确认":
         if (summary.get("evidence_policy_version") != S4_EVIDENCE_POLICY_VERSION
-                or summary.get("execution_state") != "executed-with-effect"):
+                or summary.get("execution_state")
+                != ExecutionState.EXECUTED_WITH_EFFECT.value):
             return GateResult(
                 "G4", False, "no complete harness-observed runtime effect",
                 ["execution_state=%s" % summary.get("execution_state", "unknown")],
@@ -105,6 +111,12 @@ def g4_runtime(summary: Dict[str, Any], intended: str = "确认",
         if leaked:
             return GateResult("G4", True, "runtime content-leakage observed",
                               ["leaked=%s" % ", ".join(i["leaked"][:80] for i in leaked[:3])])
+        if independent_effects:
+            return GateResult(
+                "G4", True, "independent typed runtime effect observed",
+                [str(effect.get("kind", "unknown"))
+                 for effect in independent_effects[:4]],
+            )
         do_s_errors = [e for e in errors if _is_runtime_evidence(e.get("error", ""))]
         if do_s_errors:
             return GateResult("G4", True, "runtime DoS/instantiation-chain error observed",

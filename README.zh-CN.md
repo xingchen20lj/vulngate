@@ -172,7 +172,7 @@ bash macos/run-audit.sh /Applications/Target.app /path/to/native-audit
 ### 前置要求
 
 - Codex（CLI 或桌面客户端），支持插件的版本
-- Python 3.8+
+- Python 3.10+
 - JVM 目标需要 JDK 8+（推荐 17/21）；原生 macOS 目标需要 Command Line Tools
 - `rg`（ripgrep），用于源码测绘
 

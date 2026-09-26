@@ -46,7 +46,8 @@ PATCHED_FILES = [
     "scripts/agent/tools/source_evidence.py",
     "scripts/agent/tools/target_rules.py",
     "scripts/agent/tools/project_profile.py",
-    "scripts/agent/orchestrator/stages.py",
+    "scripts/agent/orchestrator/stages/common.py",
+    "scripts/agent/orchestrator/stages/s1.py",
 ]
 
 
@@ -121,8 +122,11 @@ class JvmHardcodingRemovedTests(unittest.TestCase):
     """Changes #5, #6 and #8 -- hard-coded .java assumptions in stages.py."""
 
     def setUp(self):
-        self.stages = (ROOT / "scripts" / "agent" / "orchestrator"
-                       / "stages.py").read_text(encoding="utf-8")
+        stage_dir = ROOT / "scripts" / "agent" / "orchestrator" / "stages"
+        self.stages = "\n".join(
+            (stage_dir / name).read_text(encoding="utf-8")
+            for name in ("common.py", "s1.py", "s2.py", "s3.py", "s4.py",
+                         "s5.py", "s6.py", "s7.py", "s8.py"))
 
     def test_gate_scan_no_longer_pins_java_glob(self):
         self.assertNotIn('globs=["*.java"]', self.stages)

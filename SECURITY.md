@@ -35,10 +35,12 @@ before any public disclosure.
   default-deny Seatbelt policy on supported macOS hosts. POSIX process limits
   are per process; RSS and scratch-size watchdogs are sampled best-effort
   stop-losses, not hard aggregate quotas. Unsupported isolation fails closed.
-- **Managed runtime-lab services are different.** They do not inherit the PoC
-  network or filesystem profile. Starting target code this way requires explicit
-  operator authorization and `allow_unconfined_start: true`; only the documented
-  process resource limits and sampled RSS stop-loss apply.
+- **Managed runtime-lab services have an explicit backend boundary.** Linux uses
+  a namespace/container backend with cgroup-v2 where available; macOS requires
+  a configured container/lightweight-VM backend. A repository boolean such as
+  `allow_unconfined_start: true` is never sufficient. A one-time operator
+  approval bound to `run_id + config_digest + expiry` must be consumed before
+  launch; missing backend or approval fails closed.
 - **Evidence must be independently observed.** PoC stdout/stderr markers are
   untrusted claims. The bundled HTTP observer captures response metadata, but
   other effects need a matching observer. A missing observer or failed run is

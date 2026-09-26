@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zer0gate.github.io/vulngate/schema/artifact-envelope-v1.json",
+  "title": "VulnGate artifact envelope",
+  "type": "object",
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": {"type": "string", "minLength": 1},
+    "claim_status": {"const": "not-a-finding"}
+  },
+  "additionalProperties": true
+}

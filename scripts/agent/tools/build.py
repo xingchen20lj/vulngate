@@ -26,6 +26,10 @@ from urllib.parse import urlsplit
 
 from ..sandbox.approval import ApprovalGate
 from ..sandbox.http_observer import LoopbackHTTPObserver, OBSERVER_VERSION
+from ..sandbox.effects import (EFFECT_SCHEMA_VERSION, HTTPSemanticCollector,
+                                collector_for)
+from ..orchestrator.work_budget import WorkBudget, WorkBudgetExceeded
+from ..orchestrator.security_types import StopReason
 from ..sandbox.network_sandbox import (SEATBELT_DENY_ALL_POLICY,
                                        SEATBELT_POC_FILESYSTEM_POLICY,
                                        SEATBELT_PROXY_POLICY,
@@ -69,7 +73,8 @@ class S4ExecutionBudget:
     """Shared wall-clock budgets for one S4 round and each candidate."""
 
     def __init__(self, round_timeout_seconds: int = 5400,
-                 candidate_timeout_seconds: int = 900):
+                 candidate_timeout_seconds: int = 900,
+                 work_budget: Optional[WorkBudget] = None):
         self.requested_round_timeout_seconds = max(1, int(round_timeout_seconds))
         self.requested_candidate_timeout_seconds = max(
             1, int(candidate_timeout_seconds))
@@ -79,9 +84,17 @@ class S4ExecutionBudget:
         self.candidate_timeout_seconds = min(
             self.requested_candidate_timeout_seconds,
             MAX_S4_CANDIDATE_TIMEOUT_SECONDS)
+        self.work_budget = work_budget or WorkBudget(
+            name="s4-round", wall_seconds=self.round_timeout_seconds)
         self.started_at = time.monotonic()
-        self.round_deadline = self.started_at + self.round_timeout_seconds
+        work_remaining = self.work_budget.remaining("wall_seconds")
+        self.round_deadline = self.started_at + min(
+            self.round_timeout_seconds,
+            work_remaining if work_remaining is not None else
+            float(self.round_timeout_seconds))
         self._candidate_deadlines: Dict[str, float] = {}
+        self._candidate_budgets: Dict[str, WorkBudget] = {}
+        self._candidate_lock = threading.Lock()
         self._abort_event = threading.Event()
         self.abort_reason = ""
 
@@ -97,10 +110,22 @@ class S4ExecutionBudget:
 
     def deadline_for(self, candidate_id: str) -> float:
         key = str(candidate_id)
-        if key not in self._candidate_deadlines:
-            self._candidate_deadlines[key] = min(
-                self.round_deadline,
-                time.monotonic() + self.candidate_timeout_seconds)
+        with self._candidate_lock:
+            if key not in self._candidate_deadlines:
+                try:
+                    child = self.work_budget.child(
+                        "s4-candidate:%s" % key,
+                        wall_seconds=self.candidate_timeout_seconds,
+                        candidate_slots=1)
+                    child.acquire_candidate()
+                    self._candidate_budgets[key] = child
+                    child_remaining = child.remaining("wall_seconds")
+                except WorkBudgetExceeded as exc:
+                    self.abort("work-budget-candidate-slots-exhausted:%s" % str(exc)[:100])
+                    child_remaining = 0.0
+                self._candidate_deadlines[key] = min(
+                    self.round_deadline,
+                    time.monotonic() + (child_remaining or 0.0))
         return self._candidate_deadlines[key]
 
     def remaining(self, candidate_id: str) -> float:
@@ -119,10 +144,11 @@ class S4ExecutionBudget:
 
     def stop_reason(self, candidate_id: str) -> str:
         if self._abort_event.is_set():
-            return self.abort_reason or "s4-aborted"
+            return self.abort_reason or StopReason.S4_ABORTED.value
         if self.round_remaining() < 1.0:
-            return "s4-round-timebox-exhausted"
-        return "candidate-timebox-exhausted:%s" % candidate_id
+            return StopReason.ROUND_TIMEBOX_EXHAUSTED.value
+        return "%s:%s" % (StopReason.CANDIDATE_TIMEBOX_EXHAUSTED.value,
+                           candidate_id)
 
     def snapshot(self) -> Dict[str, Any]:
         now = time.monotonic()
@@ -145,6 +171,7 @@ class S4ExecutionBudget:
             "abort_reason": self.abort_reason,
             "candidates_started": len(self._candidate_deadlines),
             "candidate_timeboxes_exhausted": expired,
+            "work_budget": self.work_budget.snapshot(),
         }
 
 
@@ -208,6 +235,97 @@ def _contained_path(root: Path, relative: Any, label: str,
     if not resolved.is_relative_to(resolved_root):
         raise ValueError("%s escapes its authorized root" % label)
     return resolved
+
+
+def _effect_observer_plan(spec: Any) -> Dict[str, Dict[str, Any]]:
+    """Normalize the explicitly declared target-side observer plan.
+
+    Effect collection is opt-in.  A target configuration can declare a
+    bounded filesystem, process, fixture DB, JVM lifecycle/protocol, or
+    authorization scope, but
+    the declaration itself is never evidence and unknown kinds are ignored.
+    """
+    raw = getattr(spec, "effect_observers", {})
+    if not isinstance(raw, dict):
+        return {}
+    plan: Dict[str, Dict[str, Any]] = {}
+    for kind, value in raw.items():
+        collector = collector_for(str(kind).strip().lower())
+        if collector is None or str(kind).strip().lower() == "http-semantic":
+            continue
+        config = value if isinstance(value, dict) else {}
+        plan[str(kind).strip().lower()] = dict(config)
+    return plan
+
+
+def _prepare_effect_observers(workspace: Path, spec: Any) -> List[Dict[str, Any]]:
+    """Take bounded before-snapshots for a target-specific effect plan."""
+    prepared: List[Dict[str, Any]] = []
+    for kind, config in _effect_observer_plan(spec).items():
+        collector = collector_for(kind)
+        if collector is None:
+            continue
+        try:
+            if kind == "filesystem-diff":
+                before = collector.snapshot(_contained_path(
+                    workspace, config.get("root", "."),
+                    "filesystem effect root"))
+            elif kind == "fixture-db":
+                path = _contained_path(workspace, config.get("path", ""),
+                                       "fixture DB path")
+                before = collector.snapshot(path, config.get("tables", []))
+            elif kind in {"authorization-state", "jvm-protocol"}:
+                path = _contained_path(workspace, config.get("path", ""),
+                                       "authorization state path")
+                before = collector.snapshot(path, config.get("paths", []))
+            else:
+                before = collector.snapshot()
+        except (OSError, TypeError, ValueError):
+            before = {"status": "pending", "reason": "observer-scope-invalid"}
+        prepared.append({"kind": kind, "collector": collector,
+                         "config": config, "before": before})
+    return prepared
+
+
+def _collect_effect_observers(workspace: Path, prepared: List[Dict[str, Any]],
+                              run_id: str, candidate_id: str,
+                              cell_id: str) -> List[Dict[str, Any]]:
+    """Take after-snapshots and produce only bounded collector artifacts."""
+    effects: List[Dict[str, Any]] = []
+    for row in prepared:
+        kind = row["kind"]
+        collector = row["collector"]
+        config = row["config"]
+        try:
+            if kind == "filesystem-diff":
+                after = collector.snapshot(_contained_path(
+                    workspace, config.get("root", "."),
+                    "filesystem effect root"))
+            elif kind == "fixture-db":
+                path = _contained_path(workspace, config.get("path", ""),
+                                       "fixture DB path")
+                after = collector.snapshot(path, config.get("tables", []))
+            elif kind in {"authorization-state", "jvm-protocol"}:
+                path = _contained_path(workspace, config.get("path", ""),
+                                       "authorization state path")
+                after = collector.snapshot(path, config.get("paths", []))
+            else:
+                after = collector.snapshot()
+            if kind in {"process-effect", "jvm-effect"}:
+                effect = collector.collect(
+                    run_id, candidate_id, cell_id, row["before"], after,
+                    config.get("expected_names", []))
+            else:
+                effect = collector.collect(
+                    run_id, candidate_id, cell_id, row["before"], after)
+            if effect is not None:
+                effects.append(effect.as_dict())
+        except (OSError, TypeError, ValueError):
+            pending = collector._pending(
+                run_id, candidate_id, cell_id, kind,
+                collector.collector_id, "observer-collection-failed")
+            effects.append(pending.as_dict())
+    return effects
 
 
 def scan_source_egress(src_text: str, src_path: str = "",
@@ -425,6 +543,9 @@ class POCSpec:
     logic: str = ""
     notes: str = ""
     budget_key: str = ""
+    # Explicit target-side observers.  The runner only accepts bounded,
+    # workspace-local scopes and persists summaries, never raw target state.
+    effect_observers: Dict[str, Any] = field(default_factory=dict)
 
 
 ENV_ERROR_PATTERN = re.compile(
@@ -751,7 +872,7 @@ def _trusted_observations(cell: Dict[str, Any]) -> Dict[str, Any]:
         return {}
     observations = cell.get("observations")
     if not isinstance(observations, dict) or set(observations) - {
-            "HTTP_CODE", "HTTP_RESPONSES"}:
+            "HTTP_CODE", "HTTP_RESPONSES", "HTTP_PREDICATES"}:
         return {}
     responses = observations.get("HTTP_RESPONSES")
     if not isinstance(responses, list) or len(responses) > 256:
@@ -777,6 +898,16 @@ def _trusted_observations(cell: Dict[str, Any]) -> Dict[str, Any]:
         request_ids.append(row["request_id"])
     if len(request_ids) != len(set(request_ids)):
         return {}
+    predicates = observations.get("HTTP_PREDICATES", [])
+    if not isinstance(predicates, list) or len(predicates) > 32:
+        return {}
+    for predicate in predicates:
+        if (not isinstance(predicate, dict)
+                or not isinstance(predicate.get("id"), str)
+                or not predicate.get("id")
+                or not isinstance(predicate.get("matched"), bool)
+                or ("error" in predicate and not isinstance(predicate.get("error"), str))):
+            return {}
     if (type(provenance.get("response_count")) is not int
             or provenance.get("response_count") != len(responses)
             or not isinstance(provenance.get("observer_gaps"), list)
@@ -807,6 +938,53 @@ def _cell_poc_claims(cell: Dict[str, Any]) -> Dict[str, Any]:
                 "fields": {str(key): (value if isinstance(value, list) else [value])
                            for key, value in legacy.items()}}
     return {}
+
+
+def _trusted_observed_effects(cell: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return only harness-shaped effects from a supported collector.
+
+    ``observed_effects`` is intentionally a separate field from PoC claims.
+    A row is accepted only when its schema, collector identity, scope and
+    digest shape agree with a collector registered by this runtime.  Invalid
+    or hand-authored rows are ignored and therefore cannot promote a verdict.
+    """
+    rows = cell.get("observed_effects")
+    if not isinstance(rows, list):
+        return []
+    accepted: List[Dict[str, Any]] = []
+    for raw in rows[:64]:
+        if not isinstance(raw, dict):
+            continue
+        kind = str(raw.get("kind", "")).strip().lower()
+        collector = collector_for(kind)
+        if (raw.get("schema_version") != EFFECT_SCHEMA_VERSION
+                or collector is None
+                or raw.get("collector_id") != collector.collector_id
+                or raw.get("independent") is not True
+                or raw.get("status") not in {"observed", "absent", "pending"}
+                or not str(raw.get("run_id", "")).strip()
+                or not re.fullmatch(r"[0-9a-f]{64}",
+                                    str(raw.get("value_digest", "")))
+                or not isinstance(raw.get("details", {}), dict)):
+            continue
+        if raw.get("candidate_id", "") not in ("", cell.get("candidate_id", "")):
+            continue
+        if raw.get("cell_id", "") not in ("", cell.get("cell_id", "")):
+            continue
+        accepted.append({
+            "schema_version": raw["schema_version"],
+            "kind": kind,
+            "collector_id": raw["collector_id"],
+            "run_id": str(raw["run_id"])[:120],
+            "candidate_id": str(raw.get("candidate_id", ""))[:120],
+            "cell_id": str(raw.get("cell_id", ""))[:120],
+            "status": raw["status"],
+            "predicate_id": str(raw.get("predicate_id", ""))[:120],
+            "value_digest": raw["value_digest"],
+            "details": dict(raw.get("details", {})),
+            "independent": True,
+        })
+    return accepted
 
 
 class JavaMatrixRunner:
@@ -1059,6 +1237,18 @@ class JavaMatrixRunner:
                 wrapped_policy)
             denied.update(self._runtime_fields(runtime))
             return denied
+        run_id = str(uuid.uuid4())
+        cell_id = hashlib.sha256(json.dumps({
+            "candidate_id": spec.candidate_id,
+            "version": cell.version,
+            "safe_mode": cell.safe_mode,
+            "precondition": cell.precondition,
+            "features": list(cell.features),
+            "args": list(cell.args),
+            "authz_fixture_id": authz_fixture_id(cell.authz),
+        }, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False).encode("utf-8")).hexdigest()
+        effect_plan = _prepare_effect_observers(self.workspace, spec)
         try:
             result = self.runner.run(
                 isolated_cmd,
@@ -1088,6 +1278,8 @@ class JavaMatrixRunner:
             denied.update(_cell_metadata(cell))
             denied.update(self._runtime_fields(runtime))
             return denied
+        observed_effects = _collect_effect_observers(
+            self.workspace, effect_plan, run_id, spec.candidate_id, cell_id)
         poc_claims = parse_poc_claims(result.stdout, result.stderr)
         obs: Dict[str, Any] = {}
         authz_assertion = assert_authz_observations(cell.authz, obs)
@@ -1100,12 +1292,15 @@ class JavaMatrixRunner:
             "precondition": cell.precondition,
             "required_runtime": cell.required_runtime,
             "authz": normalize_authz_case(cell.authz),
+            "cell_id": cell_id,
+            "run_id": run_id,
             "returncode": result.returncode,
             "timed_out": result.timed_out,
             "duration_ms": result.duration_ms,
             "runner_timeout_seconds": result.timeout_seconds,
             "runner_timeout_capped": result.timeout_capped,
             "observations": obs,
+            "observed_effects": observed_effects,
             "poc_claims": poc_claims,
             "observation_provenance": {
                 "schema_version": POC_CLAIMS_SCHEMA,
@@ -1280,6 +1475,11 @@ class ShellPOCSpec:
     logic: str = ""
     notes: str = ""
     budget_key: str = ""
+    effect_observers: Dict[str, Any] = field(default_factory=dict)
+    # Optional workspace-local certificate pair for the controlled HTTPS
+    # CONNECT fixture. Missing material remains an observer gap.
+    https_tls_certfile: str = ""
+    https_tls_keyfile: str = ""
 
 
 class ShellMatrixRunner:
@@ -1512,7 +1712,19 @@ class ShellMatrixRunner:
         run_id = str(uuid.uuid4())
         try:
             if wants_http_observer:
-                observer = LoopbackHTTPObserver(target_url, run_id).start()
+                tls_certfile = None
+                tls_keyfile = None
+                if parsed_target and parsed_target.scheme.lower() == "https":
+                    if spec.https_tls_certfile and spec.https_tls_keyfile:
+                        tls_certfile = str(_contained_path(
+                            self.workspace, spec.https_tls_certfile,
+                            "HTTPS fixture certificate"))
+                        tls_keyfile = str(_contained_path(
+                            self.workspace, spec.https_tls_keyfile,
+                            "HTTPS fixture key"))
+                observer = LoopbackHTTPObserver(
+                    target_url, run_id, tls_certfile=tls_certfile,
+                    tls_keyfile=tls_keyfile).start()
         except (OSError, ValueError) as exc:
             result_payload = {
                 "candidate_id": spec.candidate_id,
@@ -1570,6 +1782,23 @@ class ShellMatrixRunner:
             "TMP": str(scratch_dir), "TEMP": str(scratch_dir),
             "VULNGATE_SCRATCH_DIR": str(scratch_dir),
         })
+
+        target_digest = observer.target_digest if observer is not None else ""
+        cell_identity = {
+            "candidate_id": spec.candidate_id,
+            "version": cell.version,
+            "safe_mode": cell.safe_mode,
+            "precondition": cell.precondition,
+            "features": list(cell.features),
+            "args": list(cell.args),
+            "source_digest": source_digest,
+            "target_digest": target_digest,
+            "authz_fixture_id": authz_fixture_id(cell.authz),
+        }
+        cell_id = hashlib.sha256(json.dumps(
+            cell_identity, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False).encode("utf-8")).hexdigest()
+        effect_plan = _prepare_effect_observers(self.workspace, spec)
 
         cmd = ["bash", str(script)] + list(cell.args)
         proxy_url = observer.proxy_url if observer is not None else None
@@ -1640,6 +1869,7 @@ class ShellMatrixRunner:
             return result_payload
         run_error = None
         result = None
+        configured_effects: List[Dict[str, Any]] = []
         try:
             result = self.runner.run(
                 run_cmd,
@@ -1652,6 +1882,8 @@ class ShellMatrixRunner:
         except PermissionError as exc:
             run_error = exc
         finally:
+            configured_effects = _collect_effect_observers(
+                self.workspace, effect_plan, run_id, spec.candidate_id, cell_id)
             if observer is not None:
                 observer.close()
             scratch.cleanup()
@@ -1664,21 +1896,20 @@ class ShellMatrixRunner:
         if observer is not None and requires_http_observation and "HTTP_CODE" not in obs:
             observer_gaps.append("expected-http-code-not-independently-observed")
 
-        target_digest = str(obs_snapshot.get("target_digest", "")) if obs_snapshot else ""
-        cell_identity = {
-            "candidate_id": spec.candidate_id,
-            "version": cell.version,
-            "safe_mode": cell.safe_mode,
-            "precondition": cell.precondition,
-            "features": list(cell.features),
-            "args": list(cell.args),
-            "source_digest": source_digest,
-            "target_digest": target_digest,
-            "authz_fixture_id": authz_fixture_id(cell.authz),
-        }
-        cell_id = hashlib.sha256(json.dumps(
-            cell_identity, sort_keys=True, separators=(",", ":"),
-            ensure_ascii=False).encode("utf-8")).hexdigest()
+        observed_effects = configured_effects
+        for predicate in obs.get("HTTP_PREDICATES", []) if isinstance(
+                obs.get("HTTP_PREDICATES", []), list) else []:
+            if not isinstance(predicate, dict) or not predicate.get("id"):
+                continue
+            observed_effects.append(HTTPSemanticCollector().collect(
+                run_id=str(obs_snapshot.get("run_id", "")),
+                candidate_id=spec.candidate_id,
+                cell_id=cell_id,
+                predicate_id=str(predicate.get("id")),
+                matched=bool(predicate.get("matched")),
+                details={"error": str(predicate.get("error", ""))[:80]}
+                if predicate.get("error") else {},
+            ).as_dict())
         if result is None:
             returncode = -3
             timed_out = False
@@ -1723,6 +1954,7 @@ class ShellMatrixRunner:
             "runner_timeout_capped": (result.timeout_capped
                                       if result is not None else False),
             "observations": obs,
+            "observed_effects": observed_effects,
             "poc_claims": poc_claims,
             "authz_assertion": authz_assertion,
             "stdout": stdout,
@@ -1942,6 +2174,9 @@ def classify_s4_execution(cells: List[Dict]) -> Dict[str, object]:
                 and cell.get("returncode") == 0)
 
     def _has_effect(cell: Dict) -> bool:
+        if any(row.get("status") == "observed"
+               for row in _trusted_observed_effects(cell)):
+            return True
         obs = _trusted_observations(cell)
         effect_kind = str(obs.get("EFFECT_KIND", "")).strip().lower()
         effect = str(obs.get("EFFECT", obs.get("SIDE_EFFECT", ""))).strip()
@@ -2167,6 +2402,8 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
     http_evidence = []
     safe_equivalent = []
     effect_evidence = []
+    independent_effects = []
+    independent_effect_evidence = []
     availability_proof = []
     experiment_evidence = []
     capability_evidence = []
@@ -2183,6 +2420,16 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
 
     for c in cells:
         obs = _trusted_observations(c)
+        for effect in _trusted_observed_effects(c):
+            row = dict(effect)
+            row.update({
+                "version": c.get("version"),
+                "safe": c.get("safe_mode"),
+                "precondition": c.get("precondition"),
+            })
+            independent_effects.append(row)
+            if row.get("status") == "observed":
+                independent_effect_evidence.append(row)
         claims = _cell_poc_claims(c)
         claim_fields = claims.get("fields", {}) if isinstance(claims, dict) else {}
         if isinstance(claim_fields, dict) and claim_fields:
@@ -2367,6 +2614,8 @@ def summarize_candidate(cells: List[Dict]) -> Dict:
         "http_evidence": http_evidence,
         "safe_equivalent": safe_equivalent,
         "effect_evidence": effect_evidence,
+        "independent_effects": independent_effects,
+        "independent_effect_evidence": independent_effect_evidence,
         "availability_proof": availability_proof,
         "experiment_evidence": experiment_evidence,
         "capability_evidence": capability_evidence,

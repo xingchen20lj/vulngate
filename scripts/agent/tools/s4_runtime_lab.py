@@ -648,6 +648,7 @@ def _clone_spec(spec: Any, kind: str, candidate_id: str,
             input_shape=spec.input_shape,
             logic=spec.logic,
             notes=spec.notes,
+            effect_observers=dict(spec.effect_observers),
         )
     return ShellPOCSpec(
         candidate_id=candidate_id,
@@ -660,6 +661,9 @@ def _clone_spec(spec: Any, kind: str, candidate_id: str,
         input_shape=spec.input_shape,
         logic=spec.logic,
         notes=spec.notes,
+        effect_observers=dict(spec.effect_observers),
+        https_tls_certfile=spec.https_tls_certfile,
+        https_tls_keyfile=spec.https_tls_keyfile,
     )
 
 

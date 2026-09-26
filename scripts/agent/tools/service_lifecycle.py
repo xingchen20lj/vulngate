@@ -30,6 +30,8 @@ from urllib.parse import urlparse, urlunsplit
 import ipaddress
 
 from ..sandbox.approval import ApprovalGate
+from ..orchestrator.work_budget import WorkBudgetExceeded
+from ..sandbox.isolation import detect_isolation_backend
 from ..sandbox.runner import (CommandRunner, minimal_poc_env,
                               POC_MAX_PROCESS_TREE_RSS_BYTES,
                               POC_PROCESS_TREE_RSS_POLICY_VERSION,
@@ -41,9 +43,9 @@ from ..sandbox.runner import (CommandRunner, minimal_poc_env,
 from .redaction import redact_text
 
 
-SERVICE_SCHEMA_VERSION = "service-lifecycle-v5-isolation-contract"
+SERVICE_SCHEMA_VERSION = "service-lifecycle-v6-isolation-backend"
 PROCESS_SCHEMA_VERSION = "service-processes-v4-isolation-contract"
-SERVICE_ISOLATION_POLICY_VERSION = "managed-service-host-isolation-unavailable-v1"
+SERVICE_ISOLATION_POLICY_VERSION = "managed-service-isolation-backend-v1"
 CLAIM_STATUS = "not-a-finding"
 MAX_COMMAND_TOKENS = 32
 MAX_ENV_KEYS = 32
@@ -169,10 +171,17 @@ class ServiceLifecycle:
         self.round_no = int(round_no)
         self.configured, raw = _raw_service(config)
         self.raw = raw
+        self.run_id = str(raw.get("run_id") or
+                         "%s:round-%02d" % (self.target, self.round_no))
         self.enabled = self.configured and raw.get("enabled", True) is not False
-        # Managed services need inbound network permission. macOS Seatbelt's
-        # localhost inbound filter is not limited to the loopback interface,
-        # so never start one implicitly as if it were contained.
+        # A repository config can request a backend, but it cannot authorize a
+        # launch by itself.  Backend detection is side-effect free and is
+        # persisted with every service artifact.
+        self.isolation_backend, self.isolation_descriptor = (
+            detect_isolation_backend(self.workspace, raw))
+        # Kept as a compatibility/deprecation field for old configs.  It is
+        # never sufficient to start a process and is not included in the
+        # authorization decision.
         self.allow_unconfined_start = raw.get("allow_unconfined_start") is True
         self.start_command = _command(raw.get("start_command", raw.get("start")))
         self.stop_command = _command(raw.get("stop_command", raw.get("stop")))
@@ -223,6 +232,7 @@ class ServiceLifecycle:
         self.registry_error = ""
         self.resource_limits: Dict[str, Any] = {}
         self.resource_limit_error = ""
+        self.cgroup_controller = None
         self.process: Optional[subprocess.Popen] = None
         self.registry_pid: Optional[int] = None
         self._managed_service_started = False
@@ -293,6 +303,7 @@ class ServiceLifecycle:
         return {
             "schema_version": SERVICE_SCHEMA_VERSION,
             "configured": bool(self.configured),
+            "run_id": self.run_id,
             "enabled": bool(self.enabled),
             "start_command_configured": bool(self.start_command),
             "allow_unconfined_start": bool(self.allow_unconfined_start),
@@ -305,8 +316,11 @@ class ServiceLifecycle:
             "process_registry": str(self.process_registry.relative_to(self.workspace)),
             "process_registry_error": self.registry_error,
             "resource_limits": dict(self.resource_limits),
+            "cgroup_v2": (self.cgroup_controller.snapshot()
+                          if self.cgroup_controller is not None else {}),
             "resource_limit_error": self.resource_limit_error,
             "isolation_policy": SERVICE_ISOLATION_POLICY_VERSION,
+            "isolation_backend": self.isolation_descriptor.as_dict(),
             **self._isolation_contract("pending"),
             "env_keys": sorted(self.env),
             "healthcheck": self._health_url_info() if self.health_url
@@ -322,29 +336,53 @@ class ServiceLifecycle:
                 "env_keys": sorted(self.env), "expected_status": self.expected_status,
                 "stop_external": self.stop_external,
                 "isolation_policy": SERVICE_ISOLATION_POLICY_VERSION,
+                "isolation_backend": self.isolation_descriptor.as_dict(),
+                "run_id": self.run_id,
             })[:24],
             "claim_status": CLAIM_STATUS,
         }
 
     def _isolation_contract(self, status: str) -> Dict[str, Any]:
         if self._managed_service_started:
-            isolation_status = "unconfined"
-            reason = ("managed target service has no OS network or filesystem "
-                      "sandbox; only the recorded POSIX resource limits apply")
+            descriptor = self.isolation_descriptor
+            isolation_status = "isolated"
+            reason = ("managed target service runs under %s (%s)" %
+                      (descriptor.backend, descriptor.version))
+            result = {
+                "policy": SERVICE_ISOLATION_POLICY_VERSION,
+                "status": isolation_status,
+                "enforced": True,
+                "backend": descriptor.backend,
+                "backend_version": descriptor.version,
+                "reason": reason,
+                "claim_status": CLAIM_STATUS,
+            }
         elif status == "external-ready":
             isolation_status = "unknown-external-process"
             reason = ("VulnGate did not start or sandbox this already-ready "
                       "service; its host access is unknown")
+            result = {
+                "policy": SERVICE_ISOLATION_POLICY_VERSION,
+                "status": isolation_status,
+                "enforced": False,
+                "backend": "external-process",
+                "backend_version": "unknown",
+                "reason": reason,
+                "claim_status": CLAIM_STATUS,
+            }
         else:
             isolation_status = "not-started"
-            reason = "no target service process was started by this lifecycle"
-        result = {
-            "policy": SERVICE_ISOLATION_POLICY_VERSION,
-            "status": isolation_status,
-            "enforced": False,
-            "reason": reason,
-            "claim_status": CLAIM_STATUS,
-        }
+            reason = ("no target service process was started by this lifecycle; "
+                      + self.isolation_descriptor.reason)
+            result = {
+                "policy": SERVICE_ISOLATION_POLICY_VERSION,
+                "status": isolation_status,
+                "enforced": False,
+                "backend": self.isolation_descriptor.backend,
+                "backend_version": self.isolation_descriptor.version,
+                "reason": reason,
+                "claim_status": CLAIM_STATUS,
+            }
         return {
             "network_isolation": dict(result),
             "filesystem_isolation": dict(result),
@@ -673,6 +711,14 @@ class ServiceLifecycle:
 
     def _probe(self) -> Dict[str, Any]:
         if self.health_url:
+            if (self._managed_service_started and self.isolation_backend is not None
+                    and self.isolation_descriptor.network in {
+                        "private-network-namespace-loopback-only",
+                        "container-network-none",
+                    }):
+                return {"kind": "url", "ready": False,
+                        "status": "policy-denied",
+                        "reason": "isolated service requires an in-namespace healthcheck_command"}
             info = self._health_url_info()
             if not info.get("valid"):
                 return {"kind": "url", "ready": False, "status": "policy-denied"}
@@ -722,6 +768,9 @@ class ServiceLifecycle:
                     connection.close()
         if self.health_command:
             command = self._resolve_command_paths(self.health_command)
+            if self._managed_service_started and self.isolation_backend is not None:
+                command = self.isolation_backend.health_command(
+                    command, int(self.process.pid) if self.process is not None else None)
             error = self._validate_command(command)
             if error:
                 return {"kind": "command", "ready": False, "status": "policy-denied"}
@@ -769,8 +818,10 @@ class ServiceLifecycle:
             return self._base_result("precondition-unavailable", False,
                                      health=existing,
                                      reason="service is not ready and start_command is absent")
-        if not self.allow_unconfined_start:
-            reason = "managed service start requires allow_unconfined_start=true; the process has no OS network/filesystem sandbox"
+        if self.isolation_backend is None:
+            reason = ("managed service start requires an available isolation "
+                      "backend; refusing unconfined launch: "
+                      + self.isolation_descriptor.reason)
             self.approval.request("policy_denied", "service lifecycle start: " + reason)
             self._release_lock()
             return self._base_result("policy-denied", False,
@@ -788,6 +839,16 @@ class ServiceLifecycle:
             self._release_lock()
             return self._base_result("policy-denied", False,
                                      health=existing, reason=str(exc))
+        config_digest = str(self.snapshot().get("config_digest", ""))
+        if not self.approval.consume_authorized(
+                "service_lifecycle", self.run_id, config_digest):
+            reason = ("service start requires a one-time operator approval "
+                      "bound to run_id=%s and config_digest=%s" %
+                      (self.run_id, config_digest))
+            self.approval.request("policy_denied", reason)
+            self._release_lock()
+            return self._base_result("policy-denied", False,
+                                     health=existing, reason=reason)
         service_env = minimal_poc_env({
             **self.env, "VULNGATE_SERVICE_LIFECYCLE": "true"})
         try:
@@ -806,6 +867,12 @@ class ServiceLifecycle:
                 "sample_count": 0,
                 "tracked_process_count": 0,
             }
+            if self.isolation_descriptor.backend == "linux-bubblewrap":
+                self.cgroup_controller = self.isolation_backend.prepare_cgroup(
+                    self.workspace, "%s-%s" % (self.target, self.round_no))
+                if self.cgroup_controller is None:
+                    raise PermissionError("delegated cgroup v2 unavailable")
+                self.resource_limits["cgroup_v2"] = self.cgroup_controller.snapshot()
         except PermissionError as exc:
             self.resource_limit_error = str(exc)[:300]
             self.approval.request(
@@ -816,16 +883,34 @@ class ServiceLifecycle:
                                      health=existing,
                                      reason="service resource limits unavailable")
         try:
+            isolated_command = self.isolation_backend.wrap_command(
+                limited_command, self.workspace, self.working_dir, service_env)
+            work_budget = getattr(self.execution_budget, "work_budget", None)
+            if work_budget is not None:
+                work_budget.acquire_process()
             self.process = subprocess.Popen(
-                limited_command,
+                isolated_command,
                 cwd=str(self.working_dir),
                 env=service_env,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 text=True, start_new_session=True)
+            if self.cgroup_controller is not None:
+                try:
+                    self.cgroup_controller.attach(int(self.process.pid))
+                    self.resource_limits["cgroup_v2"] = self.cgroup_controller.snapshot()
+                except OSError as exc:
+                    self.resource_limit_error = "cgroup v2 attach failed: %s" % type(exc).__name__
+                    self._cleanup_managed_process_tree(immediate=True)
+                    raise PermissionError(self.resource_limit_error) from exc
             self._managed_service_started = True
             self.registry_pid = int(self.process.pid)
             self._register_process(self.registry_pid)
             self._start_process_tree_monitor()
+        except WorkBudgetExceeded as exc:
+            self._release_lock()
+            return self._base_result(
+                "budget-exhausted", False, health=existing,
+                reason="shared process budget exhausted: %s" % str(exc)[:160])
         except OSError as exc:
             self._release_lock()
             return self._base_result("run-failed", False,
@@ -912,6 +997,9 @@ class ServiceLifecycle:
         if not still_active:
             self.registry_pid = None
             self._release_lock()
+            if self.cgroup_controller is not None:
+                self.cgroup_controller.close()
+                self.cgroup_controller = None
         return {
             "status": stop_status,
             "stopped": stopped,

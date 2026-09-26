@@ -4,6 +4,27 @@
 
 **语言：** [English](ARCHITECTURE.md) | 简体中文
 
+**当前 runtime-lab 契约：** 托管服务必须运行在已识别的 namespace/container
+backend 中，并消费绑定 `run_id + config_digest + expiry` 的一次性操作员授权。
+`allow_unconfined_start` 仅保留为兼容元数据，不能授权宿主启动；backend 或授权缺失时
+fail closed。本文后面的历史说明若仍提及 unconfined 语义，以本段和当前代码为准。
+
+目标特定的独立副作用通过 PoC 的 `effect_observers` 显式声明。matrix runner 支持
+有界的文件差分、进程/JVM 生命周期、target-specific `jvm-protocol` 状态、SQLite
+fixture 和授权 JSON 的前后快照；路径必须位于审计 workspace 内，`jvm-protocol` 还必须
+声明 JSON 文件和 allowlisted JSON pointer，只按类型与 digest 观察协议状态，不解析 PoC
+stdout/stderr。产物只保留名称、数量、谓词结果、类型和摘要。未声明或不可用的 observer
+产生 `pending`，不能满足 G4。
+
+例如，目标适配器可以声明：
+
+```json
+{"effect_observers":{"jvm-protocol":{"path":"state/jvm/protocol.json",
+  "paths":["/phase","/authorization/status"]}}}
+```
+
+适配器必须独立于 PoC 输出生成这个有界快照；runner 会拒绝审计 workspace 之外的路径。
+
 VulnGate 是一个围绕确定性研究框架的轻量原生插件。设计原则：
 **宿主 Codex 智能体负责决策；捆绑代码负责计算。**
 
@@ -38,7 +59,7 @@ VulnGate 是一个围绕确定性研究框架的轻量原生插件。设计原�
 
 宿主原生审计轮次通过 `audit-budget` 在 assistant turn 之间持久记录 90 分钟 S0–S8 预算。接入预算的 runner、阶段边界和受信任 shell hook 会约束它们覆盖的操作；它们无法中断宿主模型推理、已经运行但未接入的工具或 hook 之外的专用路径，因此这不是对 assistant 整个 turn 的硬墙钟上限。主 Agent 必须在长操作前后检查预算，过期后停止新工作；守卫登记继续保留到进度报告写完并显式执行 release，期间只放行匹配的 status/release。首批最多深入验证 3 个候选，并在源码分析早期检查目标 revision 是否有可用的定向测试环境。全仓覆盖索引超时后可以带着明确的 partial 标记继续定向候选审计；不完整覆盖不能支持覆盖完成声明、广泛排除或负向结论。只有显著缩小范围后才允许重试一次。
 
-支持的 shell HTTP cell 使用每次运行独立的 loopback 代理，记录有界响应元数据并绑定 run 与 cell digest；PoC 自行打印的 marker 仍是声明。macOS 会在执行 PoC 前预检 Seatbelt 策略，并把 shell 进程树的出站限制到该代理的精确端口。Seatbelt 的 `localhost` 过滤器并不按网卡区分，因此不能宣称严格只允许 `127.0.0.1`；其他平台或无效策略会在运行前停止。离线 shell 和 Java 编译/运行使用拒绝所有网络的策略；Java 网络 PoC 在协议 observer 可用前保持 unsupported。PoC 写入只允许落在本次运行的 scratch/output 目录。PoC 文件读取采用默认拒绝：仅允许标准系统工具、`/usr/lib` 与 `/System/Library` 等系统运行库、已安装的 Command Line Tools/Xcode/Cryptex 运行时、本轮 workspace 和显式配置的 runtime 根目录。用户主目录、挂载卷及临时目录默认拒绝读取，明确配置的 workspace/runtime 子树可例外放行；Keychain、本机账户数据库、SSH 配置/主机密钥、sudoers 和 Kerberos keytab 即使位于系统允许根目录下仍保持拒绝。PoC PATH 固定为 `/usr/bin:/bin:/usr/sbin:/sbin`。POSIX runner 还为每个进程设置 CPU 时间、虚拟地址空间（最高 4 GiB，或更低的继承硬上限）、单文件大小、打开文件数和 core dump 上限，并把 real UID 进程总数限制在启动基线 +128；地址空间限额由子进程继承，但不提供进程树累计 RSS 硬上限；另有独立 watcher 每 100 毫秒合计采样到的进程 RSS，超过 2 GiB 即停止本次运行。该止损不是硬配额，可能在采样间隔内超限，且 RSS 求和可能重复计算共享页；监控失败时运行结果保持无效。Watcher 使用 PID 与进程启动时间识别已观测的后代；只有采样确认仍有本次运行的活进程留在原进程组时才发送组信号，分离的已观测子进程则逐个清理，避免对复用的 PGID 误发信号。子进程若在两次采样间脱离并被重新托管仍可能逃逸。每 250 毫秒另抽样检查 scratch 树，超过 256 MiB 或 4096 个目录项时终止被跟踪的进程组；这同样是尽力而为的止损，不是文件系统硬配额，也看不到已 unlink 但仍打开的文件。Seatbelt 会拒绝直接调用 `setsid` 和 `setpgid`，拦截常见的进程组逃逸方式。Runner 即使遇到命令关闭 stdout/stderr，也会继续执行墙钟超时检查；主进程退出后会额外尝试清理原进程组。Darwin `posix_spawn` 属性仍可请求新进程组/会话，因此不能保证每种派生方式都能被进程组清理回收；PoC 请求外部服务启动任务也不在此边界内。runtime-lab 托管服务进程不继承 PoC Seatbelt 网络/文件系统策略；启动前会预检并继承 POSIX 的每进程 CPU、虚拟地址空间、单文件大小、文件描述符、UID 进程数和 core dump 限额，并将实际值写入服务结果和 `S4/processes.json`。只有设置 `allow_unconfined_start: true` 才启动；每进程限额本身不限制进程树累计内存；托管服务另用 100 毫秒、2 GiB RSS watcher 止损，外部已就绪服务不受监控。所有服务仍缺少文件读取和网络隔离。无响应都属 inconclusive。HTTPS、非 loopback origin、chunked 请求和超过 16 MiB 的请求体不受支持。
+支持的 shell HTTP cell 使用每次运行独立的 loopback 代理，记录有界响应元数据并绑定 run 与 cell digest；PoC 自行打印的 marker 仍是声明。macOS 会在执行 PoC 前预检 Seatbelt 策略，并把 shell 进程树的出站限制到该代理的精确端口。Seatbelt 的 `localhost` 过滤器并不按网卡区分，因此不能宣称严格只允许 `127.0.0.1`；其他平台或无效策略会在运行前停止。离线 shell 和 Java 编译/运行使用拒绝所有网络的策略；Java 网络 PoC 在协议 observer 可用前保持 unsupported。PoC 写入只允许落在本次运行的 scratch/output 目录。PoC 文件读取采用默认拒绝：仅允许标准系统工具、`/usr/lib` 与 `/System/Library` 等系统运行库、已安装的 Command Line Tools/Xcode/Cryptex 运行时、本轮 workspace 和显式配置的 runtime 根目录。用户主目录、挂载卷及临时目录默认拒绝读取，明确配置的 workspace/runtime 子树可例外放行；Keychain、本机账户数据库、SSH 配置/主机密钥、sudoers 和 Kerberos keytab 即使位于系统允许根目录下仍保持拒绝。PoC PATH 固定为 `/usr/bin:/bin:/usr/sbin:/sbin`。POSIX runner 还为每个进程设置 CPU 时间、虚拟地址空间（最高 4 GiB，或更低的继承硬上限）、单文件大小、打开文件数和 core dump 上限，并把 real UID 进程总数限制在启动基线 +128；地址空间限额由子进程继承，但不提供进程树累计 RSS 硬上限；另有独立 watcher 每 100 毫秒合计采样到的进程 RSS，超过 2 GiB 即停止本次运行。该止损不是硬配额，可能在采样间隔内超限，且 RSS 求和可能重复计算共享页；监控失败时运行结果保持无效。Watcher 使用 PID 与进程启动时间识别已观测的后代；只有采样确认仍有本次运行的活进程留在原进程组时才发送组信号，分离的已观测子进程则逐个清理，避免对复用的 PGID 误发信号。子进程若在两次采样间脱离并被重新托管仍可能逃逸。每 250 毫秒另抽样检查 scratch 树，超过 256 MiB 或 4096 个目录项时终止被跟踪的进程组；这同样是尽力而为的止损，不是文件系统硬配额，也看不到已 unlink 但仍打开的文件。Seatbelt 会拒绝直接调用 `setsid` 和 `setpgid`，拦截常见的进程组逃逸方式。Runner 即使遇到命令关闭 stdout/stderr，也会继续执行墙钟超时检查；主进程退出后会额外尝试清理原进程组。Darwin `posix_spawn` 属性仍可请求新进程组/会话，因此不能保证每种派生方式都能被进程组清理回收；PoC 请求外部服务启动任务也不在此边界内。runtime-lab 托管服务必须在已识别的 namespace/container backend 中运行，并消费绑定 `run_id + config_digest + expiry` 的一次性操作员授权；`allow_unconfined_start` 仅为兼容元数据，即使配置为 true 也不能授权宿主启动。backend 或授权缺失时 fail closed；Linux 优先使用 bubblewrap + cgroup-v2，macOS 需要已审核的 container/lightweight VM。启动前会预检并继承 POSIX 的每进程 CPU、虚拟地址空间、单文件大小、文件描述符、UID 进程数和 core dump 限额，实际值写入服务结果及 `S4/processes.json`；托管服务另有 100 毫秒、2 GiB 阈值的进程树 RSS 尽力止损，外部已就绪服务不受管理或监控。未声明或不可用的 target-specific effect observer 产生 `pending`，不能满足 G4。无响应都属 inconclusive。HTTPS、非 loopback origin、chunked 请求和超过 16 MiB 的请求体不受支持。
 
 捆绑的 `CommandRunner` 对每次命令另设 15 分钟墙钟上限，包括绕过 S4 矩阵预算的直接构建命令。S4 总预算和候选预算分别最多 90 分钟与 15 分钟；配置可以调低，不能调高。预算快照记录请求值、应用值和截断状态，cell 产物记录单命令的实际时限及是否截断。
 

@@ -93,8 +93,9 @@ this is not a literal 127.0.0.1-only guarantee. Other
 platforms and rejected profiles stop before PoC execution. Offline shell and
 Java compile/run commands use a deny-all network profile; Java code that uses
 network APIs remains unsupported until a protocol observer exists. Missing
-responses are inconclusive. HTTPS, non-loopback origins, chunked requests, and
-request bodies above 16 MiB are unsupported. PoC writes are confined to
+responses are inconclusive. Loopback HTTPS is supported only as a declared
+fixture with workspace-local certificate material; non-loopback origins,
+chunked requests, and request bodies above 16 MiB are unsupported. PoC writes are confined to
 per-run scratch/output roots. Reads from user-home trees, other mounted
 volumes, per-user and shared temp trees, keychain stores, local SSH configuration/host
 keys, sudoers, and Kerberos keytabs are denied except for explicit
@@ -128,15 +129,40 @@ group/session, and a PoC can ask an external service to launch work, so cleanup
 is not guaranteed for every spawn path.
 Runtime-lab service processes do not inherit this PoC Seatbelt network/
 filesystem profile. VulnGate reuses a healthy external service; a managed start
-requires `allow_unconfined_start: true` and a successful POSIX resource-limit
-preflight. Managed services inherit the per-process CPU, file-size, descriptor,
-UID-process, address-space and core-dump limits recorded in the service result
-and `S4/processes.json`. A managed service also gets the sampled 2 GiB
-process-tree RSS stop-loss. If the threshold is exceeded or its process-table
-monitor fails, VulnGate stops the observed tree and aborts the shared S4 budget;
-active PoC commands stop and later pipeline stages are skipped. This remains a
-best-effort monitor that can overshoot. External-ready services are not managed
+requires a recorded namespace/container backend, a one-time operator approval
+bound to `run_id + config_digest + expiry`, and a successful POSIX resource-limit
+preflight. Linux's preferred backend also attaches cgroup-v2 hard limits when
+delegation is available; macOS requires a configured container/lightweight-VM
+backend. A repository `allow_unconfined_start` boolean is never sufficient.
+Managed services inherit the per-process CPU, file-size, descriptor, UID-process,
+address-space and core-dump limits recorded in the service result and
+`S4/processes.json`. A managed service also gets the sampled 2 GiB process-tree
+RSS stop-loss. If the threshold is exceeded or its process-table monitor fails,
+VulnGate stops the observed tree and aborts the shared S4 budget; active PoC
+commands stop and later pipeline stages are skipped. This remains a best-effort
+monitor that can overshoot. External-ready services are not managed
 or monitored. The watchdog does not add filesystem-read or network isolation.
+
+Target-specific independent effects are opt-in under a PoC's
+`effect_observers` map. The matrix runner supports bounded `filesystem-diff`,
+`process-effect`, `jvm-effect`, `jvm-protocol`, `fixture-db`, and
+`authorization-state` before/after snapshots in addition to the HTTP semantic
+observer. `jvm-protocol` requires a target-declared workspace-local JSON state
+file and an allowlist of JSON-pointer paths; it observes protocol state by
+digest and never parses PoC stdout/stderr. Paths are resolved under the audit
+workspace; only names, counts, predicate outcomes, types, and digests are
+persisted. An undeclared or unavailable observer produces `pending` and cannot
+satisfy G4.
+
+For example, a target adapter may declare:
+
+```json
+{"effect_observers":{"jvm-protocol":{"path":"state/jvm/protocol.json",
+  "paths":["/phase","/authorization/status"]}}}
+```
+
+The adapter must create that bounded snapshot independently of PoC output; the
+runner rejects paths outside the audit workspace.
 
 ## Historical CVE benchmark boundary
 

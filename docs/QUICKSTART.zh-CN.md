@@ -36,7 +36,7 @@ cd vulngate
 
 `install.sh` 会自动完成：安装插件、注册个人市场、并在 Codex 中启用。它会先在
 `$PATH` 中查找 `codex` 命令，再查找桌面应用内置的 CLI——用桌面应用的话不需要
-单独安装 CLI。前置要求：本机 Codex 客户端（桌面应用或 CLI）、Python 3.8+、
+单独安装 CLI。前置要求：本机 Codex 客户端（桌面应用或 CLI）、Python 3.10+、
 JDK 8+、`rg`。
 
 > **必须新建线程。** 插件技能在线程启动时加载——安装后请打开新的 Codex 线程。
@@ -88,15 +88,17 @@ Feature）——它决定了每一条发现的前置分级。
 G4/G5 结论分开保存。未提供 `runtime_lab` 配置或配置为空时，不会额外重放。
 
 有状态 Web/中间件 PoC 可以让 VulnGate 管理一个本地服务。命令必须是 argv 数组，工作目录
-必须在 workspace 内，并且必须提供回环健康检查；不要把 Token、Cookie 或 Password 放入配置：
+必须在 workspace 内，并且必须提供回环健康检查；不要把 Token、Cookie 或 Password 放入配置。
+托管服务必须使用可用的 Linux namespace/container backend，并且每次运行都需要由操作者
+创建绑定 `run_id + config_digest + expiry` 的一次性授权记录；仓库配置本身不能授权启动：
 
 ```json
 {
   "runtime_lab": {
     "service": {
       "start_command": ["python3", "-m", "http.server", "8080", "--bind", "127.0.0.1"],
-      "allow_unconfined_start": true,
-      "healthcheck_url": "http://127.0.0.1:8080/",
+      "isolation_backend": "auto",
+      "healthcheck_command": ["python3", "healthcheck.py", "8080"],
       "startup_timeout": 20,
       "shutdown_timeout": 8
     }
@@ -104,11 +106,16 @@ G4/G5 结论分开保存。未提供 `runtime_lab` 配置或配置为空时，�
 }
 ```
 
+`healthcheck.py` 必须是 workspace 内已经审阅的 argv 入口；它会在隔离 backend
+内部执行。启动前还需使用实际的 `run_id` 和 `config_digest` 创建一次性授权记录，配置文件本身不会授权服务启动。
+
 运行时会复用已健康的本地实例，只回收本轮自己启动的进程组；PID/端口生命周期写入
 `S4/processes.json`。`S4/runtime-lab.json` 的 `configuration` 是脱敏快照，授权/租户/对象
 用例会生成稳定的 `authz_fixture_id`；服务未就绪只记录为
 `precondition-unavailable`，不会被解释成漏洞不存在。禁止使用 shell `-c`、远程命令或非回环
-健康地址。托管服务没有 OS 网络/文件系统沙箱；启动前会预检并使用 POSIX CPU、单文件大小、文件描述符、UID 进程数和 core dump 限额，但不限制内存、文件读取范围或网络。只有明确接受该边界并设置 `allow_unconfined_start: true` 后才会启动。
+健康地址。Linux 优先使用 bubblewrap 的 mount/PID/network namespace；macOS 必须配置已审核
+的容器/轻量 VM backend。没有可用 backend 时 fail closed，旧的 `allow_unconfined_start`
+字段即使写成 `true` 也不会启动宿主上的服务。
 
 ## 5. 运行管线（自主模式）
 

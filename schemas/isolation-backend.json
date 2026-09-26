@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zer0gate.github.io/vulngate/schema/isolation-backend-v1.json",
+  "title": "VulnGate runtime-lab isolation descriptor",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "backend", "version", "available", "network", "filesystem"],
+  "properties": {
+    "schema_version": {"const": "isolation-backend-v1"},
+    "backend": {"type": "string", "maxLength": 120},
+    "version": {"type": "string", "maxLength": 160},
+    "available": {"type": "boolean"},
+    "network": {"type": "string", "maxLength": 160},
+    "filesystem": {"type": "string", "maxLength": 160},
+    "reason": {"type": "string", "maxLength": 240},
+    "capabilities": {"type": "array", "maxItems": 32, "items": {"type": "string", "maxLength": 80}}
+  }
+}

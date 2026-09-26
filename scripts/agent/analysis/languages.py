@@ -573,12 +573,14 @@ def _git_index_files(root: Path, source_filter: SourceFilter,
 
     deleted = {os.fsdecode(item) for item in nul_records(deleted_data)}
     files: List[Tuple[Path, str]] = []
+    excluded: List[ExcludedDir] = []
     excluded_counts: Dict[str, int] = {}
     excluded_capped: Set[str] = set()
     gaps: List[str] = []
     seen: Set[str] = set()
     state: Dict[str, Any] = {
         "files_seen": 0, "source_files": 0, "non_source_files": 0,
+        "bytes_seen": 0,
         "directories_seen": 0, "excluded_dirs_seen": 0,
         "elapsed_seconds": 0.0, "current_path": "git index",
         "git_index_used": True, "gitlink_gaps": [],
@@ -670,7 +672,7 @@ def _git_index_files(root: Path, source_filter: SourceFilter,
                         producer=row.producer, confidence=row.confidence,
                         evidence_type=row.evidence_type))
                 for key in ("files_seen", "source_files", "non_source_files",
-                            "directories_seen", "excluded_dirs_seen"):
+                            "directories_seen", "excluded_dirs_seen", "bytes_seen"):
                     state[key] += int(nested_stats.get(key, 0))
                 gaps.extend(str(item) for item in nested_stats.get("gitlink_gaps", []))
                 tick(rel)
@@ -691,6 +693,10 @@ def _git_index_files(root: Path, source_filter: SourceFilter,
             return
         seen.add(rel)
         state["files_seen"] += 1
+        try:
+            state["bytes_seen"] += int(abs_path.stat().st_size)
+        except OSError:
+            pass
         if tracked:
             state["tracked_files"] += 1
         else:
@@ -774,6 +780,7 @@ def scan_tree(root: Path, source_filter: Optional[SourceFilter] = None,
         "files_seen": 0,
         "source_files": 0,
         "non_source_files": 0,
+        "bytes_seen": 0,
         "directories_seen": 0,
         "excluded_dirs_seen": 0,
         "elapsed_seconds": 0.0,
@@ -808,6 +815,10 @@ def scan_tree(root: Path, source_filter: Optional[SourceFilter] = None,
 
     def add_file(path: Path, rel: str) -> None:
         state["files_seen"] += 1
+        try:
+            state["bytes_seen"] += int(path.stat().st_size)
+        except OSError:
+            pass
         is_source = Path(rel).suffix.lower() in known_suffixes
         if is_source:
             state["source_files"] += 1

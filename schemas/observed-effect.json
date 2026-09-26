@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zer0gate.github.io/vulngate/schema/observed-effect-v1.json",
+  "title": "VulnGate independently observed effect",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "collector_id", "run_id", "status", "independent"],
+  "properties": {
+    "schema_version": {"const": "observed-effect-v1"},
+    "kind": {"enum": ["http-semantic", "filesystem-diff", "process-effect", "fixture-db", "jvm-effect", "jvm-protocol", "authorization-state"]},
+    "collector_id": {"type": "string", "maxLength": 120},
+    "run_id": {"type": "string", "maxLength": 120},
+    "candidate_id": {"type": "string", "maxLength": 120},
+    "cell_id": {"type": "string", "maxLength": 120},
+    "status": {"enum": ["observed", "absent", "pending"]},
+    "predicate_id": {"type": "string", "maxLength": 120},
+    "value_digest": {"type": "string", "maxLength": 128},
+    "details": {"type": "object"},
+    "independent": {"const": true}
+  }
+}

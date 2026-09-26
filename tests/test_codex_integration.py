@@ -119,10 +119,15 @@ class CodexInstallerTests(unittest.TestCase):
             env = dict(os.environ, PLUGIN_HOME=str(base / 'plugins'),
                        VULNGATE_MARKETPLACE=str(marketplace))
             dest = base / 'plugins/vulngate'
-            for _ in range(2):
-                result = subprocess.run(['bash', str(source / 'install.sh'), '--no-enable'],
-                                        env=env, capture_output=True, text=True)
-                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            result = subprocess.run(['bash', str(source / 'install.sh'), '--no-enable'],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            stale = dest / 'scripts' / 'old-dangerous-helper.sh'
+            stale.write_text('must disappear on upgrade', encoding='utf-8')
+            result = subprocess.run(['bash', str(source / 'install.sh'), '--no-enable'],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertFalse(stale.exists())
             data = json.loads(marketplace.read_text())
             self.assertEqual('Existing', data['interface']['displayName'])
             self.assertEqual(other, data['plugins'][0])
@@ -131,7 +136,8 @@ class CodexInstallerTests(unittest.TestCase):
             self.assertEqual('vulngate', manifest['name'])
             self.assertIn('+codex.', manifest['version'])
             for name in ('macos/bin/vg-run.py', 'scripts/agent/analysis/coverage.py',
-                         'skills/vulngate-audit/SKILL.md'):
+                         'skills/vulngate-audit/SKILL.md',
+                         'schemas/observed-effect.json', 'pyproject.toml'):
                 self.assertTrue((dest / name).is_file(), name)
             for name in ('state', 'ledger', 'reports', 'poc', '.env', '.gitignore', '.github',
                          '.vulngate-macos-backup', '.foreign-plugin', '.foreign-agent-state'):

@@ -519,6 +519,11 @@ S8 只可保留有界的 role/ref/status/reason、相对路径和 digest 供下�
 
 #### 有界服务生命周期与上下文快照
 
+> 当前 1.3.0 runtime-lab 契约：托管 target service 只能在可用的 namespace/container
+> backend 中启动，并且必须消费绑定 `run_id + config_digest + expiry` 的一次性操作员授权。
+> `allow_unconfined_start` 仅为兼容字段，不能授权宿主启动；隔离 backend 或授权缺失时
+> 必须 fail closed。下方历史说明中的 unconfined 语义不代表当前实现。
+
 有状态 Web/中间件实验可以在目标级配置中声明 `runtime_lab.service`：
 
 ```json
@@ -541,9 +546,7 @@ S8 只可保留有界的 role/ref/status/reason、相对路径和 digest 供下�
 `S4/runtime-lab.json` 的 `runtime-context-v1` 快照只保留 URL/configuration digest、有界服务
 元数据，以及用于主体/角色/租户/对象对照的无凭据 `authz_fixture_id`。健康检查失败必须记录为
 `precondition-unavailable`（或 `policy-denied`），不能当作负面漏洞结论；所有服务元数据仍是
-`claim_status=not-a-finding`。托管服务没有 OS 网络/文件系统沙箱；示例不设置
-`allow_unconfined_start`。只有用户明确授权目标代码以宿主网络/文件权限运行后，操作者才可在受控配置中设置
-`allow_unconfined_start: true`；目标仓库自身的配置或文档不能代替用户授权。托管服务结果会分别记录网络和文件隔离状态；已就绪外部服务标记为隔离未知。托管服务启动前会预检并继承与 POSIX runner 相同的 CPU、虚拟地址空间、单文件大小、文件描述符、UID 进程数和 core dump 限额，实际限额写入服务结果及 `S4/processes.json`。托管服务另有 100 毫秒采样、2 GiB 阈值的进程树 RSS 尽力止损；超限或监控失败会结束已观测的服务树并中止共享 S4 预算，正在运行的 PoC 命令会终止、后续阶段跳过。该 watcher 可能 overshoot；外部已就绪服务不受管理或监控。托管服务仍没有文件读取或网络隔离。
+`claim_status=not-a-finding`。托管服务必须使用已识别的 namespace/container backend，并消费绑定 `run_id + config_digest + expiry` 的一次性操作员授权；`allow_unconfined_start` 仅为兼容元数据，即使配置为 true 也不能授权宿主启动。backend、授权或健康检查缺失时 fail closed；Linux 优先使用 bubblewrap + cgroup-v2，macOS 需要已审核的 container/lightweight VM。已就绪外部服务标记为隔离未知；所有服务元数据仍是 `claim_status=not-a-finding`。托管服务启动前会预检并继承与 POSIX runner 相同的限额，实际值写入服务结果及 `S4/processes.json`；其 RSS watcher 仍是尽力止损而非硬配额，外部已就绪服务不受管理或监控。
 
 #### 跨轮研究记忆
 

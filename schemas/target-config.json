@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zer0gate.github.io/vulngate/schema/target-config-v1.json",
+  "title": "VulnGate target configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "target-config-v1"},
+    "name": {"type": "string"},
+    "discovery_date": {"type": "string"},
+    "target_type": {"type": "string"},
+    "runtime_lab": {"type": "object"}
+  },
+  "required": ["name", "discovery_date"]
+}

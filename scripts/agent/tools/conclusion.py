@@ -65,13 +65,14 @@ def _requires_real_effect(cand: Dict[str, Any]) -> bool:
 
 
 def _has_real_effect(summary: Dict[str, Any], cand: Optional[Dict[str, Any]] = None) -> bool:
-    effects = summary.get("effect_evidence") or []
+    effects = summary.get("independent_effect_evidence") or []
     if not _requires_real_effect(cand or {}):
         return bool(effects)
-    # A successful loopback connection or a parser canary is not code
-    # execution. RCE requires an actual process/command effect marker.
-    allowed = {"command-executed", "command-marker", "process-started",
-               "code-execution", "file-marker"}
+    # A successful loopback connection, parser canary, authorization change or
+    # fixture mutation is not code execution. RCE requires an independently
+    # observed process lifecycle or filesystem effect; PoC labels remain
+    # claims even when their EFFECT_KIND sounds convincing.
+    allowed = {"process-effect", "filesystem-diff", "jvm-effect"}
     return any(str(e.get("kind", "")).lower() in allowed for e in effects)
 
 

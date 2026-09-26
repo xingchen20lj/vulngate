@@ -9,6 +9,7 @@
 # Mode A (host-native) does NOT need this script: the host Codex agent calls
 # `agent_cli.py` for deterministic steps and reasons itself.
 set -euo pipefail
+umask 077
 
 PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PYTHONPATH="$PLUGIN_ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}"

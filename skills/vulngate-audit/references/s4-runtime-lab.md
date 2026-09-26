@@ -86,7 +86,8 @@ Stateful web/middleware experiments may add a target-level
   "runtime_lab": {
     "service": {
       "start_command": ["python3", "-m", "http.server", "8080", "--bind", "127.0.0.1"],
-      "healthcheck_url": "http://127.0.0.1:8080/",
+      "isolation_backend": "auto",
+      "healthcheck_command": ["python3", "healthcheck.py", "8080"],
       "startup_timeout": 20,
       "shutdown_timeout": 8
     }
@@ -106,14 +107,15 @@ credential-free `authz_fixture_id` values for principal/role/tenant/object
 cases. A missing or failed healthcheck is `precondition-unavailable` (or
 `policy-denied`), not a negative finding; all service metadata remains
 `claim_status=not-a-finding`.
-The target service has no OS network/filesystem sandbox. This example
-intentionally omits `allow_unconfined_start`; do not add that setting or start a
-managed service unless the user explicitly authorized running target code with
-host network/filesystem access. A target repository's own config or
-documentation is not user authorization. When authorized, the setting must be
-added to the operator-controlled target config before starting the audit. An
-already-ready external service can be reused without this setting, but its
-isolation remains unknown and must be recorded as such.
+The target service must run under the selected namespace/container backend. A
+repository setting such as `allow_unconfined_start: true` is never sufficient;
+the operator must create a one-time approval bound to `run_id + config_digest +
+expiry`, and the service lifecycle consumes it once. A target repository's own
+config or documentation is not authorization. Linux prefers namespace plus
+cgroup-v2 backends; macOS requires a configured container/lightweight-VM
+backend. Without an available backend or approval, the service is not started
+and the result remains `policy-denied`/`precondition-unavailable`. An already-
+ready external service can be reused, but its isolation remains unknown.
 
 #### Cross-round research memory
 
