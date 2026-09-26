@@ -91,6 +91,8 @@ class JdkRegressionTests(unittest.TestCase):
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
     def test_jdk8_cell_uses_declared_java_home_and_records_actual_runtime(self):
+        if sys.platform != "darwin":
+            self.skipTest("macOS Seatbelt is required for PoC execution")
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             home = root / "fake-jdk8"

@@ -201,6 +201,8 @@ class ExperimentContractTests(unittest.TestCase):
         self.assertFalse(complete_row["typed_effect_observed"])
 
     def test_shell_runner_persists_experiment_and_real_availability_evidence(self):
+        if sys.platform != "darwin":
+            self.skipTest("macOS Seatbelt is required for PoC execution")
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             src = root / "poc" / "demo" / "round-01" / "src"

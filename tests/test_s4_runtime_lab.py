@@ -301,6 +301,8 @@ class S4RuntimeLabTests(unittest.TestCase):
         ))
 
     def test_shell_adapter_reuses_loopback_runner(self):
+        if sys.platform != "darwin":
+            self.skipTest("macOS Seatbelt is required for PoC execution")
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             src = root / "poc" / "shell-lab" / "round-01" / "src"
