@@ -134,6 +134,14 @@ def _filesystem_rules(workspace_root: Path, readable_paths: List[Path],
                      quote(root))
         rules.append('(allow file-map-executable (subpath %s))' % quote(root))
 
+    # Apple's system curl initializes LibreSSL even for plain HTTP and reads
+    # this non-secret system configuration file. Grant only the exact file;
+    # do not reopen the surrounding /private/etc/ssl tree.
+    ssl_config = Path("/private/etc/ssl/openssl.cnf")
+    if ssl_config.is_file():
+        rules.append('(allow file-read* file-test-existence (literal %s))' %
+                     quote(ssl_config.resolve()))
+
     # Apply broad denials after system.sb's standard path grants.
     for root in POC_REOPENABLE_READ_DENY_ROOTS:
         rules.append('(deny file-read* (literal %s))' % quote(Path(root)))
