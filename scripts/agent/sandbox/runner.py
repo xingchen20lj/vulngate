@@ -63,30 +63,26 @@ POC_PROCESS_TABLE_TIMEOUT_SECONDS = 1
 MAX_COMMAND_WALL_TIMEOUT_SECONDS = 15 * 60
 PROCESS_TREE_CLEANUP_POLICY_VERSION = "verified-pid-starttime-cleanup-v2"
 
-_POSIX_RESOURCE_LAUNCHER = r'''import os
-import resource
-import sys
-
-args = sys.argv[1:]
-cpu, file_bytes, open_files, user_processes, address_space = map(int, args[:5])
-separator = args[5]
-command = args[6:]
-if separator != "--" or not command:
-    raise SystemExit("invalid VulnGate resource-limit launcher arguments")
-limits = (
-    ("RLIMIT_CPU", resource.RLIMIT_CPU, cpu),
-    ("RLIMIT_FSIZE", resource.RLIMIT_FSIZE, file_bytes),
-    ("RLIMIT_NOFILE", resource.RLIMIT_NOFILE, open_files),
-    ("RLIMIT_NPROC", resource.RLIMIT_NPROC, user_processes),
-    ("RLIMIT_CORE", resource.RLIMIT_CORE, 0),
-    ("RLIMIT_AS", resource.RLIMIT_AS, address_space),
-)
-for name, limit, value in limits:
-    try:
-        resource.setrlimit(limit, (value, value))
-    except (OSError, ValueError) as exc:
-        raise SystemExit("cannot apply %s=%s: %s" % (name, value, exc))
-os.execvpe(command[0], command, os.environ)
+_POSIX_RESOURCE_LAUNCHER = r'''set -eu
+cpu_limit="$1"
+file_blocks="$2"
+open_files="$3"
+user_process_limit="$4"
+address_space_kib="$5"
+shift 5
+ulimit -S -c 0
+ulimit -H -c 0
+ulimit -S -n "$open_files"
+ulimit -H -n "$open_files"
+ulimit -S -f "$file_blocks"
+ulimit -H -f "$file_blocks"
+ulimit -S -t "$cpu_limit"
+ulimit -H -t "$cpu_limit"
+ulimit -S -u "$user_process_limit"
+ulimit -H -u "$user_process_limit"
+ulimit -S -v "$address_space_kib"
+ulimit -H -v "$address_space_kib"
+exec "$@"
 '''
 
 
@@ -171,12 +167,16 @@ def _resource_limit_contract(cpu_seconds_per_process: int, process_baseline: int
 def _resource_limited_argv(command: List[str],
                            resource_limits: Dict[str, Any]) -> List[str]:
     """Set non-raiseable POSIX resource limits before exec, without preexec_fn."""
-    return [sys.executable, "-c", _POSIX_RESOURCE_LAUNCHER,
+    file_blocks = max(1, int(resource_limits["max_file_bytes"]) // 1024)
+    address_space_kib = max(
+        1, int(resource_limits["max_address_space_bytes"]) // 1024)
+    return ["/bin/bash", "-c", _POSIX_RESOURCE_LAUNCHER,
+            "vulngate-resource-limits",
             str(resource_limits["cpu_seconds_per_process"]),
-            str(resource_limits["max_file_bytes"]),
+            str(file_blocks),
             str(resource_limits["max_open_files"]),
             str(resource_limits["max_user_processes"]),
-            str(resource_limits["max_address_space_bytes"]), "--"] + list(command)
+            str(address_space_kib)] + list(command)
 
 
 def prepare_posix_resource_limited_command(
