@@ -352,7 +352,14 @@ class EvidenceTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=2)
-            self.assertEqual(results[0]["observations"]["HTTP_CODE"], "403")
+            result = results[0]
+            self.assertEqual(
+                result["observations"].get("HTTP_CODE"), "403",
+                {key: result.get(key) for key in (
+                    "returncode", "timed_out", "duration_ms", "stderr",
+                    "harness_error", "network_isolation", "policy_status",
+                    "observation_gaps", "resource_limit_exceeded",
+                    "resource_limits")})
             self.assertEqual(_trusted_observations(results[0])["HTTP_CODE"], "403")
             self.assertEqual(results[0]["poc_claims"]["fields"]["HTTP_CODE"], ["200"])
             self.assertEqual(results[0]["authz_assertion"]["status"], "passed")
