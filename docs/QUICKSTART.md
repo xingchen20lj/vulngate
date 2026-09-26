@@ -9,7 +9,7 @@ This guide walks through a first VulnGate run.
 ## 1. Install
 
 ```bash
-git clone https://github.com/xingchen20lj/vulngate.git
+git clone https://github.com/Zer0Gate/vulngate.git
 cd vulngate
 ./install.sh
 ```
@@ -46,10 +46,11 @@ The host agent will:
 1. Map the attack surface (S1) — entries, danger call sites, default features.
 2. Propose candidates (S2) with precondition tiers.
 3. Audit the source with file:line evidence (S3).
-4. Run a mandatory S4 spawn preflight probe, then spawn sub-agents to write,
-   compile, and run PoC matrices (S4) across versions × safe-mode ×
-   preconditions. If the probe fails (no heartbeat within 90s), the whole
-   round degrades to host-sequential execution and records "degraded mode".
+4. Decide whether S4 work benefits from parallel agents. Spawn only independent
+   checks whose expected time savings exceed probe, coordination, and review
+   costs; keep shared build/runtime work sequential and run no more than three
+   workers at once. Run the spawn preflight only when choosing parallel work.
+   If it fails, continue sequentially and record the observed failure.
 5. Sweep upstream issues/PRs and public disclosures (S5) and apply the hard
    novelty downgrade.
 6. Compute CVSS with precondition consistency (S6).
@@ -58,11 +59,10 @@ The host agent will:
 Results land under `state/<target>/`, `reports/<target>/`, and
 `ledger/<target>/`.
 
-Ordinary S4 PoCs also produce a bounded replay/differential artifact at
-`S4/runtime-lab.json`. Set `runtime_lab.enabled=false` in the target config (or
-on one candidate) for an intentionally non-repeatable PoC; otherwise stable
-replay, version × SafeMode differences, and harness gaps remain separate from
-G4/G5.
+Ordinary S4 replay/differential work is opt-in because it reruns PoCs and uses
+the same candidate budget. Enable it with `runtime_lab.enabled=true` in the
+target config when repeated stability or version × SafeMode comparisons are
+needed. Its results remain separate from G4/G5.
 
 ## 4. Run the pipeline (autonomous mode)
 

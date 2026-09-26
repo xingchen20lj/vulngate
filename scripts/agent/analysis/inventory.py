@@ -327,14 +327,29 @@ class CoverageStore:
     def write(self, name: str, payload: Any) -> Path:
         self.ensure()
         target = self.path(name)
-        tmp = target.with_name(".%s.tmp.%d" % (target.name, __import__("os").getpid()))
-        tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp = target.with_name(".%s.tmp.%d" % (target.name, os.getpid()))
+        with tmp.open("w", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=False,
+                      separators=(",", ":"))
         tmp.replace(target)
         return target
 
     def write_records(self, name: str, records: Iterable[Any]) -> Path:
-        return self.write(name, [r.as_dict() if hasattr(r, "as_dict") else r
-                                 for r in records])
+        self.ensure()
+        target = self.path(name)
+        tmp = target.with_name(".%s.tmp.%d" % (target.name, os.getpid()))
+        with tmp.open("w", encoding="utf-8") as stream:
+            stream.write("[")
+            first = True
+            for row in records:
+                if not first:
+                    stream.write(",")
+                json.dump(row.as_dict() if hasattr(row, "as_dict") else row,
+                          stream, ensure_ascii=False, separators=(",", ":"))
+                first = False
+            stream.write("]")
+        tmp.replace(target)
+        return target
 
     def read(self, name: str, default: Any = None) -> Any:
         path = self.path(name)
@@ -430,6 +445,17 @@ def coverage_scope_status(store: CoverageStore, root: Path,
     existing report can omit scope inputs and retain backward compatibility.
     """
     summary = store.read("inventory-summary") or {}
+    build_status = store.read("coverage-build-status") or {}
+    if isinstance(build_status, dict) and build_status.get("status") in {
+            "running", "incomplete", "failed"}:
+        return {
+            "status": str(build_status.get("status")), "usable": False,
+            "expected": build_coverage_scope(root, source_dirs, source_filter,
+                                             target_type),
+            "actual": (summary.get("scope") if isinstance(summary, dict) else {}) or {},
+            "mismatches": ["coverage-build-%s" % build_status.get("status")],
+            "build_status": build_status,
+        }
     actual = summary.get("scope") if isinstance(summary, dict) else None
     expected = build_coverage_scope(root, source_dirs, source_filter,
                                     target_type)
@@ -479,10 +505,13 @@ class SourceUniverse:
     #: shaped was dropped.
     non_source_files: int = 0
     scanned_files: int = 0
+    gitlink_gaps: List[str] = field(default_factory=list)
+    enumeration: Dict[str, Any] = field(default_factory=dict)
 
 
 def enumerate_source_universe(root: Path, source_dirs: Optional[Sequence[str]] = None,
-                              source_filter: Optional[SourceFilter] = None
+                              source_filter: Optional[SourceFilter] = None,
+                              progress_callback=None
                               ) -> SourceUniverse:
     """Build the complete source universe with an explicit state per file.
 
@@ -495,16 +524,22 @@ def enumerate_source_universe(root: Path, source_dirs: Optional[Sequence[str]] =
     """
     root = Path(root).resolve()
     flt = source_filter or SourceFilter()
-    files, excluded = scan_tree(root, flt, source_dirs)
+    scan_stats: Dict[str, Any] = {}
+    files, excluded = scan_tree(
+        root, flt, source_dirs, source_only=True, stats=scan_stats,
+        progress_callback=progress_callback)
     known = flt.known_suffixes()
     records: List[models.SourceFileRecord] = []
-    non_source = 0
+    non_source = int(scan_stats.get("non_source_files", 0))
 
     for path, rel in files:
         suffix = path.suffix.lower()
         language = suffix_owner_language(rel)
         if suffix not in known or language is None:
-            non_source += 1
+            # Runtime-registered suffixes that do not have a canonical language
+            # are still outside the parsers' supported source universe.
+            if suffix in known:
+                non_source += 1
             continue
         try:
             size = path.stat().st_size
@@ -532,7 +567,14 @@ def enumerate_source_universe(root: Path, source_dirs: Optional[Sequence[str]] =
 
     records.sort(key=lambda r: r.file)
     return SourceUniverse(records=records, excluded_dirs=excluded,
-                          non_source_files=non_source, scanned_files=len(files))
+                          non_source_files=non_source,
+                          scanned_files=int(scan_stats.get("files_seen", len(files))),
+                          gitlink_gaps=list(scan_stats.get("gitlink_gaps") or []),
+                          enumeration={key: scan_stats.get(key) for key in (
+                              "git_index_used", "tracked_files", "untracked_files",
+                              "files_seen", "source_files", "non_source_files",
+                              "directories_seen", "elapsed_seconds")
+                              if key in scan_stats})
 
 
 # ---------------------------------------------------------------------------
@@ -901,6 +943,12 @@ class InventoryResult:
             "excluded_dirs": len(self.excluded_dirs),
             "excluded_dir_file_count": sum(int(d.get("file_count", 0))
                                            for d in self.excluded_dirs),
+            "excluded_dir_counts_capped": sum(
+                bool(d.get("count_capped")) for d in self.excluded_dirs),
+            "excluded_dir_file_count_is_lower_bound": any(
+                bool(d.get("count_capped"))
+                or str(d.get("confidence", "")) == "lower-bound"
+                for d in self.excluded_dirs),
             "non_source_files": self.non_source_files,
             "scanned_files": self.scanned_files,
             "languages": languages,
@@ -999,7 +1047,8 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
                     source_filter: Optional[SourceFilter] = None,
                     target: str = "", target_type: Optional[str] = None,
                     with_flows: bool = True,
-                    fix_history: Optional[Sequence[Dict[str, Any]]] = None
+                    fix_history: Optional[Sequence[Dict[str, Any]]] = None,
+                    progress_callback=None
                     ) -> InventoryResult:
     """Full inventory: universe + entries + sinks + controls + symbols + flows.
 
@@ -1016,7 +1065,8 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
     started = time.time()
     root = Path(root).resolve()
     flt = source_filter or SourceFilter()
-    universe = enumerate_source_universe(root, source_dirs, flt)
+    universe = enumerate_source_universe(root, source_dirs, flt,
+                                         progress_callback=progress_callback)
     files = universe.records
     production_rels = [r.file for r in files if r.production]
 
@@ -1176,13 +1226,22 @@ def build_inventory(root: Path, source_dirs: Optional[Sequence[str]] = None,
         rec.symbols = symbol_counts.get(rec.file, 0)
         rec.callables = callable_counts.get(rec.file, 0)
 
+    scope = build_coverage_scope(
+        root, source_dirs, flt, target_type, files,
+        [d.as_dict() for d in universe.excluded_dirs])
+    scope["enumeration"] = dict(universe.enumeration)
+    if universe.gitlink_gaps:
+        scope["valid"] = False
+        scope["gitlink_gaps"] = list(universe.gitlink_gaps)
+        scope["analysis_gaps"] = sorted(set(
+            list(scope.get("analysis_gaps") or []) +
+            ["gitlink-content-unavailable"]))
+
     return InventoryResult(
         root=str(root), target=target or root.name,
         generated_at=datetime.now().isoformat(timespec="seconds"),
         filter=flt.as_dict(),
-        scope=build_coverage_scope(
-            root, source_dirs, flt, target_type, files,
-            [d.as_dict() for d in universe.excluded_dirs]),
+        scope=scope,
         files=files,
         excluded_dirs=[d.as_dict() for d in universe.excluded_dirs],
         entries=entries, sinks=sinks, controls=controls,

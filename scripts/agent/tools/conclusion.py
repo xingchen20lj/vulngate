@@ -19,6 +19,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
+from .evidence_policy import S4_EVIDENCE_POLICY_VERSION
+
 
 DENY_CLASS_HINTS = (
     "JdbcRowSetImpl", "JdbcRowSet", "TemplatesImpl", "GroovyShell",
@@ -154,7 +156,39 @@ def derive_conclusion(summary: Dict[str, Any],
 
     Returns one of: 确认 / 排除 / 候选（待验证）
     """
-    if summary.get("harness_error") or summary.get("compile_error"):
+    if cells is None:
+        summary.setdefault("validation_issues", []).append(
+            "runtime conclusion withheld: raw S4 cells are missing; "
+            "summary fields alone are not evidence")
+        return "候选（待验证）"
+
+    # Rebuild security-relevant facts from the cells instead of allowing a
+    # caller-supplied or persisted summary to promote its own claims.
+    from .build import _trusted_observations, summarize_candidate
+    prior_issues = summary.get("validation_issues", [])
+    if not isinstance(prior_issues, list):
+        prior_issues = [str(prior_issues)] if prior_issues else []
+    verified = summarize_candidate(cells)
+    summary.update(verified)
+    summary["validation_issues"] = list(dict.fromkeys(
+        [str(issue) for issue in prior_issues]
+        + [str(issue) for issue in verified.get("validation_issues", [])]))
+    trusted_cells = []
+    for cell in cells:
+        if not isinstance(cell, dict):
+            continue
+        trusted = dict(cell)
+        trusted["observations"] = _trusted_observations(cell)
+        trusted_cells.append(trusted)
+
+    if (summary.get("evidence_policy_version") != S4_EVIDENCE_POLICY_VERSION
+            or summary.get("harness_error") or summary.get("compile_error")):
+        return "候选（待验证）"
+    execution_state = summary.get("execution_state")
+    if execution_state not in ("executed-with-effect", "executed-no-effect"):
+        summary.setdefault("validation_issues", []).append(
+            "runtime conclusion withheld: S4 matrix is incomplete or did not execute cleanly "
+            "(execution_state=%s)" % (execution_state or "unknown"))
         return "候选（待验证）"
     errs = [e.get("error", "") for e in summary.get("errors", [])]
     env_errs = summary.get("env_errors") or []
@@ -177,35 +211,23 @@ def derive_conclusion(summary: Dict[str, Any],
         return "候选（待验证）"
 
     if summary.get("instantiated"):
-        issues = validate_confirmation(cand or {}, cells or [])
+        issues = validate_confirmation(cand or {}, trusted_cells)
         if issues:
             summary["validation_issues"] = issues
-            return "排除"
+            return "候选（待验证）"
         return "确认"
     if summary.get("leaked"):
-        issues = validate_confirmation(cand or {}, cells or [])
+        issues = validate_confirmation(cand or {}, trusted_cells)
         if issues:
             summary["validation_issues"] = issues
-            return "排除"
+            return "候选（待验证）"
         return "确认"
     if summary.get("http_evidence"):
-        # Web-app evidence (ShellMatrixRunner): a cell with a concrete
-        # RESP_MATCH / EVIDENCE marker proves the HTTP side-effect (e.g.
-        # session takeover -> /api/user/current 200 with admin identity).
-        strong_http = [r for r in summary["http_evidence"]
-                       if r.get("resp_match") or r.get("evidence")]
-        if strong_http:
-            bad = []
-            for r in strong_http:
-                val = str(r.get("resp_match") or r.get("evidence") or "")
-                if not re.search(r"[\s:/\=\;\{\}\@\.\-\u4e00-\u9fff]", val):
-                    bad.append(val)
-            if bad:
-                summary["validation_issues"] = [
-                    "HTTP evidence value lacks content separators (hardcoded?): %s"
-                    % "; ".join(bad[:2])]
-                return "排除"
-            return "确认"
+        # The current observer captures status and body digests, not response
+        # content or target state. Transport metadata cannot prove impact.
+        summary.setdefault("validation_issues", []).append(
+            "independent HTTP transport was observed, but response content or "
+            "target-state impact was not independently verified")
     if any(_is_runtime_evidence(e) for e in errs):
         # OOM must be input amplification: a huge input that OOMs by itself
         # (e.g. a 200MB JSON array) is trivial large-input DoS, not a library
@@ -213,7 +235,7 @@ def derive_conclusion(summary: Dict[str, Any],
         # (<1MB) confirms amplification; missing INPUT_BYTES downgrades to
         # 待验证 (honest, no false confirmation); >=1MB is trivial.
         oom_cells = [
-            c for c in (cells or [])
+            c for c in trusted_cells
             if "OutOfMemory" in str(c.get("observations", {}).get("ERROR", ""))]
         if oom_cells:
             sizes = []
@@ -224,13 +246,13 @@ def derive_conclusion(summary: Dict[str, Any],
             if sizes and all(s >= 1_048_576 for s in sizes):
                 summary["validation_issues"] = [
                     "trivial large-input OOM: INPUT_BYTES>=1MB, no amplification"]
-                return "排除"
+                return "候选（待验证）"
             if not sizes:
                 summary["validation_issues"] = [
                     "OOM without INPUT_BYTES evidence (amplification not established)"]
                 return "候选（待验证）"
         soe_cells = [
-            c for c in (cells or [])
+            c for c in trusted_cells
             if "StackOverflow" in str(c.get("observations", {}).get("ERROR", ""))]
         if soe_cells:
             sizes = []
@@ -244,5 +266,6 @@ def derive_conclusion(summary: Dict[str, Any],
                 return "候选（待验证）"
         return "确认"
     if summary.get("gate_blocked") or errs:
-        return "排除"
+        summary.setdefault("validation_issues", []).append(
+            "runtime error or policy gate does not disprove the candidate")
     return "候选（待验证）"

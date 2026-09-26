@@ -179,7 +179,7 @@ bash macos/run-audit.sh /Applications/Target.app /path/to/native-audit
 ### 从本仓库安装
 
 ```bash
-git clone https://github.com/xingchen20lj/vulngate.git
+git clone https://github.com/Zer0Gate/vulngate.git
 cd vulngate
 ./install.sh
 ```
@@ -252,7 +252,7 @@ VulnGate 面向经过授权的安全研究。
 
 ## 开发、溯源与贡献
 
-VulnGate 由 **xingchen20lj** 独立设计和维护，开发过程中使用 ChatGPT 与 Codex 进行 AI-assisted development。AI 工具作为实现和设计辅助；关键研究决策通过真实审计行为进行验证，并逐步固化为确定性规则与回归测试。
+VulnGate 由 **Zer0Gate** 独立设计和维护，开发过程中使用 ChatGPT 与 Codex 进行 AI-assisted development。AI 工具作为实现和设计辅助；关键研究决策通过真实审计行为进行验证，并逐步固化为确定性规则与回归测试。
 
 公开 Git 历史从 2026-08-09 的 VulnGate 0.1.0 开始。后续提交持续记录由实际审计暴露的问题，例如 Metabase 审计轮次经验、fix-completeness gate、spawn 诊断、patch variant analysis、Novelty 查询失败保留，以及 S4 evidence convergence/runtime isolation。
 

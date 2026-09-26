@@ -33,8 +33,16 @@ VulnGate 是一个围绕确定性研究框架的轻量原生插件。设计原�
 - S1→S8 阶段顺序及各阶段产物；
 - G0–G5 硬闸门以及每一道闸门拦截什么；
 - 证据契约（由机器可读的观测行驱动结论）；
-- 安全模型（仅回环、审批日志、修复前不披露）；
+- 安全模型（Seatbelt 网络约束、PoC 文件读取/写入白名单、审批日志、修复前不披露；runtime-lab 服务不继承 PoC OS profile）；
 - 前置分级 → CVSS 映射。
+
+宿主原生审计轮次通过 `audit-budget` 在 assistant turn 之间持久记录 90 分钟 S0–S8 预算。接入预算的 runner、阶段边界和受信任 shell hook 会约束它们覆盖的操作；它们无法中断宿主模型推理、已经运行但未接入的工具或 hook 之外的专用路径，因此这不是对 assistant 整个 turn 的硬墙钟上限。主 Agent 必须在长操作前后检查预算，过期后停止新工作；守卫登记继续保留到进度报告写完并显式执行 release，期间只放行匹配的 status/release。首批最多深入验证 3 个候选，并在源码分析早期检查目标 revision 是否有可用的定向测试环境。全仓覆盖索引超时后可以带着明确的 partial 标记继续定向候选审计；不完整覆盖不能支持覆盖完成声明、广泛排除或负向结论。只有显著缩小范围后才允许重试一次。
+
+支持的 shell HTTP cell 使用每次运行独立的 loopback 代理，记录有界响应元数据并绑定 run 与 cell digest；PoC 自行打印的 marker 仍是声明。macOS 会在执行 PoC 前预检 Seatbelt 策略，并把 shell 进程树的出站限制到该代理的精确端口。Seatbelt 的 `localhost` 过滤器并不按网卡区分，因此不能宣称严格只允许 `127.0.0.1`；其他平台或无效策略会在运行前停止。离线 shell 和 Java 编译/运行使用拒绝所有网络的策略；Java 网络 PoC 在协议 observer 可用前保持 unsupported。PoC 写入只允许落在本次运行的 scratch/output 目录。PoC 文件读取采用默认拒绝：仅允许标准系统工具、`/usr/lib` 与 `/System/Library` 等系统运行库、已安装的 Command Line Tools/Xcode/Cryptex 运行时、本轮 workspace 和显式配置的 runtime 根目录。用户主目录、挂载卷及临时目录默认拒绝读取，明确配置的 workspace/runtime 子树可例外放行；Keychain、本机账户数据库、SSH 配置/主机密钥、sudoers 和 Kerberos keytab 即使位于系统允许根目录下仍保持拒绝。PoC PATH 固定为 `/usr/bin:/bin:/usr/sbin:/sbin`。POSIX runner 还为每个进程设置 CPU 时间、虚拟地址空间（最高 4 GiB，或更低的继承硬上限）、单文件大小、打开文件数和 core dump 上限，并把 real UID 进程总数限制在启动基线 +128；地址空间限额由子进程继承，但不提供进程树累计 RSS 硬上限；另有独立 watcher 每 100 毫秒合计采样到的进程 RSS，超过 2 GiB 即停止本次运行。该止损不是硬配额，可能在采样间隔内超限，且 RSS 求和可能重复计算共享页；监控失败时运行结果保持无效。Watcher 使用 PID 与进程启动时间识别已观测的后代；只有采样确认仍有本次运行的活进程留在原进程组时才发送组信号，分离的已观测子进程则逐个清理，避免对复用的 PGID 误发信号。子进程若在两次采样间脱离并被重新托管仍可能逃逸。每 250 毫秒另抽样检查 scratch 树，超过 256 MiB 或 4096 个目录项时终止被跟踪的进程组；这同样是尽力而为的止损，不是文件系统硬配额，也看不到已 unlink 但仍打开的文件。Seatbelt 会拒绝直接调用 `setsid` 和 `setpgid`，拦截常见的进程组逃逸方式。Runner 即使遇到命令关闭 stdout/stderr，也会继续执行墙钟超时检查；主进程退出后会额外尝试清理原进程组。Darwin `posix_spawn` 属性仍可请求新进程组/会话，因此不能保证每种派生方式都能被进程组清理回收；PoC 请求外部服务启动任务也不在此边界内。runtime-lab 托管服务进程不继承 PoC Seatbelt 网络/文件系统策略；启动前会预检并继承 POSIX 的每进程 CPU、虚拟地址空间、单文件大小、文件描述符、UID 进程数和 core dump 限额，并将实际值写入服务结果和 `S4/processes.json`。只有设置 `allow_unconfined_start: true` 才启动；每进程限额本身不限制进程树累计内存；托管服务另用 100 毫秒、2 GiB RSS watcher 止损，外部已就绪服务不受监控。所有服务仍缺少文件读取和网络隔离。无响应都属 inconclusive。HTTPS、非 loopback origin、chunked 请求和超过 16 MiB 的请求体不受支持。
+
+捆绑的 `CommandRunner` 对每次命令另设 15 分钟墙钟上限，包括绕过 S4 矩阵预算的直接构建命令。S4 总预算和候选预算分别最多 90 分钟与 15 分钟；配置可以调低，不能调高。预算快照记录请求值、应用值和截断状态，cell 产物记录单命令的实际时限及是否截断。
+
+目标 checkout 上可能阻塞的宿主命令通过 `audit-exec` CLI wrapper 运行：它要求持久轮次 deadline，把单命令时限压到请求值、15 分钟或剩余预算中的最小值，并将有界输出摘要和进程清理状态写入 `S0/host-command-runs.jsonl`。子进程只收到精简环境，不继承宿主模型/API 凭据。命令超时、失败或清理不完整后，相同命令摘要会被阻止重跑；只有确认原进程已退出、源码范围或环境有变化并给出 `--retry-reason` 才可重试。wrapper 不提供 OS 网络/文件系统沙箱，输出保持 `not-a-finding`，不能验证 PoC。`audit-budget start --root` 还会把活动源码根登记给 Codex `PreToolUse` hook；hook 会拦截工作目录位于该根目录内、显式路径参数（包括相对路径和 symlink alias）解析到该目录内、或从其父目录执行递归扫描/解释器命令的普通 Bash/Unified Exec，并放行匹配轮次的 VulnGate CLI。父目录中的复杂 shell 语法会保守拦截；活动登记存在但 hook 输入损坏、缺字段或超长时，也会拒绝该 Bash 调用，而不会静默放行；命令超过 64 KiB 或 2048 个 shell token 时会在路径解析前拒绝，限制 hook 自身的检查耗时。直接目标命令仍须匹配同项目/轮次的 `audit-exec`，轮次控制命令也必须匹配活动项目和轮次。必须在 Codex 中审阅并信任 hook；部分专用工具路径仍可能绕过，因此它是工具层护栏而非 OS 强制边界。轮次结束后用 `audit-budget release` 清除登记。
 
 ## Historical CVE Benchmark 边界
 
@@ -363,6 +371,12 @@ ID 绑定完整 payload 摘要和源码文件 SHA-256。嵌套的控制/守卫/�
 只读一次，限制为每文件 8 MiB、总计 64 MiB，超限明确记缺口。同源候选名单每组
 只存一份，避免逐候选复制带来的平方级膨胀。跨分析层不是原子快照，源码变化后
 须用 `--rebuild` 重建。配置式/自主式 S1 和原生命令行调度复用同一索引。
+
+autonomous 轮次只有在已有索引完整且 scope 匹配时才会在首批候选前加载索引派生候选；
+S1 本轮 source→sink 摘要派生的复合链候选不依赖全量索引，索引延期时仍进入首批候选。
+缺失或过期索引不会阻塞第一批候选的 S3/S4 证伪；候选完成后，如果仍至少剩余
+15 分钟，最多额外用 5 分钟尝试一次覆盖索引。S2 没有任何候选时，也允许一次同样有界的
+索引尝试来寻找静态线索。失败或部分索引仍不能进入调度。
 
 ```bash
 python3 scripts/agent_cli.py evidence-provenance <target> \

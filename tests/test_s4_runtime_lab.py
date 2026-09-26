@@ -301,6 +301,8 @@ class S4RuntimeLabTests(unittest.TestCase):
         ))
 
     def test_shell_adapter_reuses_loopback_runner(self):
+        if sys.platform != "darwin":
+            self.skipTest("macOS Seatbelt is required for PoC execution")
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             src = root / "poc" / "shell-lab" / "round-01" / "src"
@@ -309,7 +311,6 @@ class S4RuntimeLabTests(unittest.TestCase):
                 "#!/bin/sh\nprintf 'PARSED=ok\\n'\n", encoding="utf-8")
             case = {"case_id": "cross-tenant", "principal": "u1",
                     "role": "user", "tenant_id": "a", "object_id": "o7",
-                    "expected_http_codes": [403], "expected_authz": "deny",
                     "token": "do-not-persist"}
             cfg = TargetConfig(
                 name="shell-lab", discovery_date="2026-09-21",
@@ -377,6 +378,7 @@ class S4RuntimeLabTests(unittest.TestCase):
 
         cfg = TargetConfig(
             name="pipeline-lab", discovery_date="2026-09-21",
+            runtime_lab={"enabled": True},
             jars=[{"version": "1.0", "path": "missing.jar"}],
             candidates=[{
                 "candidate_id": "C1", "surface": "parser",

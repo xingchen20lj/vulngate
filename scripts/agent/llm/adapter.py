@@ -13,7 +13,7 @@ import re
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 class BudgetExceeded(Exception):
@@ -66,6 +66,35 @@ class LLMClient:
         self.timeout = timeout
         self.reasoning_effort = reasoning_effort or os.environ.get("LLM_REASONING_EFFORT")
         self.usage = LLMUsage()
+        self._timeout_provider: Optional[Callable[[], Optional[float]]] = None
+
+    def set_timeout_provider(
+            self, provider: Optional[Callable[[], Optional[float]]]) -> None:
+        """Clamp each request and retry to a caller-owned wall-clock budget."""
+        self._timeout_provider = provider
+
+    def _remaining_timeout_budget(self) -> Optional[float]:
+        provider = self._timeout_provider
+        if provider is None:
+            return None
+        remaining = provider()
+        return None if remaining is None else max(0.0, float(remaining))
+
+    def _request_timeout(self) -> float:
+        remaining = self._remaining_timeout_budget()
+        if remaining is None:
+            return float(self.timeout)
+        if remaining < 1.0:
+            raise BudgetExceeded("audit round deadline expired before LLM request")
+        return min(float(self.timeout), remaining)
+
+    def _retry_delay(self, requested: float) -> float:
+        remaining = self._remaining_timeout_budget()
+        if remaining is None:
+            return requested
+        if remaining < 1.0:
+            raise BudgetExceeded("audit round deadline expired during LLM retry")
+        return min(requested, max(0.0, remaining - 0.25))
 
     # -- internals ---------------------------------------------------------
     def _post(self, payload: Dict[str, Any], endpoint: str = "chat/completions") -> Dict[str, Any]:
@@ -77,18 +106,27 @@ class LLMClient:
         last: Optional[Exception] = None
         for attempt in range(3):
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
+                with urllib.request.urlopen(req, timeout=self._request_timeout()) as resp:
+                    response_body = resp.read()
+                remaining = self._remaining_timeout_budget()
+                if remaining is not None and remaining < 1.0:
+                    raise BudgetExceeded(
+                        "audit round deadline expired while awaiting LLM response")
+                return json.loads(response_body.decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 last = exc
                 if exc.code in (429, 500, 502, 503, 504) and attempt < 2:
-                    time.sleep(2 * (attempt + 1))
+                    delay = self._retry_delay(2 * (attempt + 1))
+                    if delay:
+                        time.sleep(delay)
                     continue
                 raise
             except (urllib.error.URLError, TimeoutError) as exc:
                 last = exc
                 if attempt < 2:
-                    time.sleep(2 * (attempt + 1))
+                    delay = self._retry_delay(2 * (attempt + 1))
+                    if delay:
+                        time.sleep(delay)
                     continue
                 raise
         raise last if last is not None else RuntimeError("unreachable")
@@ -223,6 +261,8 @@ class LLMClient:
             except ValueError as exc:
                 last_exc = exc
                 continue
+            except BudgetExceeded:
+                raise
             except Exception:
                 continue
         # Fallback: plain mode with an explicit "JSON only" instruction.

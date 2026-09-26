@@ -563,6 +563,20 @@ class CandidateIntakeTests(unittest.TestCase):
         self.assertEqual(3, meta["categories"]["exec"]["active"])
         self.assertEqual(3, meta["categories"]["parser"]["active"])
 
+    def test_active_window_and_pool_digest_ignore_input_order(self):
+        pool = ([{"candidate_id": "exec-%03d" % index, "category": "exec"}
+                 for index in range(100)] +
+                [{"candidate_id": "auth-%03d" % index, "category": "authz"}
+                 for index in range(37)])
+        first, first_meta = SCH.bounded_candidate_intake(
+            pool, slots=4, round_no=7, window_size=16)
+        second, second_meta = SCH.bounded_candidate_intake(
+            list(reversed(pool)), slots=4, round_no=7, window_size=16)
+        self.assertEqual([row["candidate_id"] for row in first],
+                         [row["candidate_id"] for row in second])
+        self.assertEqual(first_meta["pool_digest"], second_meta["pool_digest"])
+        self.assertEqual(first_meta["active_digest"], second_meta["active_digest"])
+
 
 # ---------------------------------------------------------------------------
 # 3. stratified selection (spec §13.3)

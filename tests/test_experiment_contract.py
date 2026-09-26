@@ -40,7 +40,7 @@ class ExperimentContractTests(unittest.TestCase):
         self.assertTrue(any("capped" in item for item in warnings))
 
     def test_observation_parser_keeps_ordered_step_and_state_traces(self):
-        observations = parse_observations(
+        claims = parse_observations(
             "STEP=seed\n"
             "STEP_EVIDENCE=seed:fixture-created\n"
             "STATE=seeded\n"
@@ -48,6 +48,7 @@ class ExperimentContractTests(unittest.TestCase):
             "STEP_EVIDENCE=mutate:second-write\n"
             "STATE=mutated\n"
         )
+        observations = claims["fields"]
         self.assertEqual(observations["STEP_TRACE"], ["seed", "mutate"])
         self.assertEqual(observations["STEP_EVIDENCE"],
                          ["seed:fixture-created", "mutate:second-write"])
@@ -101,21 +102,19 @@ class ExperimentContractTests(unittest.TestCase):
         env = _cell_experiment_env(cell)
         self.assertEqual([residual_id], json.loads(env["VULNGATE_RESIDUAL_IDS"]))
         self.assertNotIn("must-not-cross", env["VULNGATE_RESIDUAL_CONTRACT"])
-        observations = parse_observations(
+        claims = parse_observations(
             "RESIDUAL_ID=%s\nRESIDUAL_STATUS=falsified\n"
             "RESIDUAL_FALSIFIER=variant-rejected\n" % residual_id)
-        self.assertEqual(residual_id, observations["RESIDUAL_ID"])
-        self.assertEqual("falsified", observations["RESIDUAL_STATUS"])
+        observations = claims["fields"]
+        self.assertEqual([residual_id], observations["RESIDUAL_ID"])
+        self.assertEqual(["falsified"], observations["RESIDUAL_STATUS"])
         summary = summarize_candidate([{
             "candidate_id": "C1", "version": "local", "safe_mode": False,
             "precondition": "none", "returncode": 0, "timed_out": False,
             "residual_contracts": contract, "observations": observations,
         }])
-        row = summary["residual_falsifiers"][0]
-        self.assertTrue(row["contract_declared"])
-        self.assertFalse(row["effect_observed"])
-        self.assertEqual("executed", row["execution_state"])
-        self.assertEqual("not-a-finding", row["claim_status"])
+        self.assertEqual([], summary["residual_falsifiers"])
+        self.assertGreater(summary["untrusted_claim_field_count"], 0)
 
     def test_residual_error_does_not_count_as_executed_falsifier(self):
         residual_id = "rr-01234567890123456789"
@@ -135,16 +134,17 @@ class ExperimentContractTests(unittest.TestCase):
                 "ERROR": "probe failed after marker",
             },
         }])
-        self.assertEqual("run-failed",
-                         summary["residual_falsifiers"][0]["execution_state"])
+        self.assertEqual([], summary["residual_falsifiers"])
+        self.assertGreater(summary["untrusted_claim_field_count"], 0)
 
     def test_parser_keeps_capability_and_transition_traces(self):
-        observations = parse_observations(
+        claims = parse_observations(
             "CAPABILITY=read\n"
             "CAPABILITY_EVIDENCE=read:fixture\n"
             "TRANSITION=read->exec\n"
             "TRANSITION_EVIDENCE=read->exec:local-marker\n"
         )
+        observations = claims["fields"]
         self.assertEqual(observations["CAPABILITY_TRACE"], ["read"])
         self.assertEqual(observations["CAPABILITY_EVIDENCE"], ["read:fixture"])
         self.assertEqual(observations["TRANSITION_TRACE"], ["read->exec"])
@@ -171,10 +171,9 @@ class ExperimentContractTests(unittest.TestCase):
             },
         }])
         row = partial["capability_evidence"][0]
-        self.assertEqual(row["status"], "partial")
-        self.assertEqual(row["missing_capabilities"], ["credential-read"])
-        self.assertEqual(row["missing_transitions"], ["credential-read->exec"])
-        self.assertEqual(row["missing_capability_evidence"], ["exec"])
+        self.assertEqual(row["status"], "no-trace")
+        self.assertEqual(row["missing_capabilities"],
+                         ["read", "credential-read", "exec"])
         self.assertFalse(row["typed_effect_observed"])
         self.assertEqual(row["claim_status"], "not-a-finding")
 
@@ -198,10 +197,12 @@ class ExperimentContractTests(unittest.TestCase):
             },
         }])
         complete_row = complete["capability_evidence"][0]
-        self.assertEqual(complete_row["status"], "complete")
-        self.assertTrue(complete_row["typed_effect_observed"])
+        self.assertEqual(complete_row["status"], "no-trace")
+        self.assertFalse(complete_row["typed_effect_observed"])
 
     def test_shell_runner_persists_experiment_and_real_availability_evidence(self):
+        if sys.platform != "darwin":
+            self.skipTest("macOS Seatbelt is required for PoC execution")
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             src = root / "poc" / "demo" / "round-01" / "src"
@@ -240,27 +241,29 @@ class ExperimentContractTests(unittest.TestCase):
             self.assertEqual(cells[0]["sequence"], ["seed", "mutate", "probe"])
             self.assertEqual(cells[0]["concurrency"], 4)
             self.assertTrue(cells[0]["availability_probe"])
-            self.assertEqual(cells[0]["observations"]["CONCURRENCY"], "4")
-            self.assertEqual(cells[0]["observations"]["STEP_TRACE"], ["seed", "mutate"])
-            self.assertEqual(cells[0]["observations"]["STATE_TRACE"], ["seeded"])
-            self.assertEqual(cells[0]["observations"]["CAPABILITY_TRACE"],
+            self.assertEqual(cells[0]["observations"], {})
+            self.assertEqual(cells[0]["poc_claims"]["fields"]["CONCURRENCY"], ["4"])
+            self.assertEqual(cells[0]["poc_claims"]["fields"]["STEP_TRACE"],
+                             ["seed", "mutate"])
+            self.assertEqual(cells[0]["poc_claims"]["fields"]["STATE_TRACE"],
+                             ["seeded"])
+            self.assertEqual(cells[0]["poc_claims"]["fields"]["CAPABILITY_TRACE"],
                              ["read", "exec"])
             self.assertEqual(cells[0]["experiment"]["capability_contract"]
                              ["required_capabilities"], ["read", "exec"])
 
             summary = summarize_candidate(cells)
-            self.assertEqual(summary["availability_proof"][0]["concurrency"], 4)
+            self.assertEqual(summary["availability_proof"], [])
             self.assertEqual(summary["experiment_evidence"][0]["declared_sequence"],
                              ["seed", "mutate", "probe"])
             self.assertEqual(summary["experiment_evidence"][0]["sequence_status"],
-                             "partial")
-            self.assertEqual(summary["experiment_evidence"][0]["step_evidence"],
-                             ["seed:fixture-created", "mutate:state-transition"])
-            self.assertEqual(summary["capability_evidence"][0]["status"], "complete")
+                             "no-trace")
+            self.assertEqual(summary["experiment_evidence"][0]["step_evidence"], [])
+            self.assertEqual(summary["capability_evidence"][0]["status"], "no-trace")
             ok, reason = check_impact_consistency(
                 {"surface": "stateful race denial of service"}, summary,
                 "AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H")
-            self.assertTrue(ok, reason)
+            self.assertFalse(ok)
 
     def test_declared_concurrency_without_observation_is_not_availability_proof(self):
         cell = MatrixCell(version="local", safe_mode=False,

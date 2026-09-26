@@ -41,7 +41,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import coverage as cov
-from .inventory import CoverageStore, load_inventory
+from .inventory import (COVERAGE_SCOPE_VERSION, CoverageStore,
+                        load_inventory)
 from ..evaluation.benchmark import (
     BENCHMARK_FEEDBACK_FACTORS,
     MAX_FEEDBACK_WEIGHT_DELTA,
@@ -61,7 +62,9 @@ from ..memory.research import (
     research_key,
 )
 from ..memory.portfolio import load_research_portfolio
-from .research_agenda import load_research_agenda, normalize_research_agenda
+from .research_agenda import (load_research_agenda,
+                              normalize_candidate_ids,
+                              normalize_research_agenda)
 from .research_strategy import (
     STRATEGY_GUIDANCE_ACTIONS,
     apply_research_guidance,
@@ -109,7 +112,7 @@ DEFAULT_QUOTA: Dict[str, int] = {
 # layers emit tens of thousands of leads.  All source candidates remain in
 # their producer artifacts; the intake artifact records the deterministic
 # window and the still-unscheduled count.
-CANDIDATE_INTAKE_SCHEMA_VERSION = "candidate-intake-v1"
+CANDIDATE_INTAKE_SCHEMA_VERSION = "candidate-intake-v2"
 DEFAULT_CANDIDATE_INTAKE_MINIMUM = 64
 CANDIDATE_INTAKE_MULTIPLIER = 12
 MAX_CANDIDATE_INTAKE_WINDOW = 256
@@ -615,7 +618,7 @@ def _candidate_intake_identity(candidate: Dict[str, Any]) -> str:
 def bounded_candidate_intake(
         candidates: Sequence[Dict[str, Any]], slots: int,
         round_no: int = 0, window_size: Optional[int] = None,
-        pinned: Sequence[str] = (),
+        pinned: Sequence[str] = (), priority_ids: Sequence[str] = (),
         ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Return a deterministic, category-stratified active candidate window.
 
@@ -638,22 +641,26 @@ def bounded_candidate_intake(
         window_size = min(MAX_CANDIDATE_INTAKE_WINDOW, window_size)
     window = max(1, int(window_size))
 
-    groups: Dict[str, List[Dict[str, Any]]] = {}
+    groups: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
+    digest_sum = 0
+    digest_xor = 0
+    digest_modulus = 1 << 256
     for candidate in pool:
-        groups.setdefault(candidate_category(candidate), []).append(candidate)
+        category = candidate_category(candidate)
+        identity = _candidate_intake_identity(candidate)
+        groups.setdefault(category, []).append((identity, candidate))
+        row_hash = int.from_bytes(hashlib.sha256(
+            (category + "\0" + identity).encode("utf-8")).digest(), "big")
+        digest_sum = (digest_sum + row_hash) % digest_modulus
+        digest_xor ^= row_hash
     categories = sorted(groups)
     for category in categories:
-        groups[category].sort(key=_candidate_intake_identity)
-
-    source_rows = [
-        {"candidate_id": _candidate_intake_identity(candidate),
-         "category": candidate_category(candidate)}
-        for candidate in pool
-    ]
-    source_rows.sort(key=lambda row: (row["category"], row["candidate_id"]))
-    source_digest = "pool-" + hashlib.sha256(json.dumps(
-        source_rows, ensure_ascii=False, sort_keys=True,
-        separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
+        groups[category].sort(key=lambda row: row[0])
+    # A commutative multiset digest stays independent of input ordering while
+    # avoiding a second 129k-row allocation, sort, and giant JSON serialization.
+    digest_material = "%d:%064x:%064x" % (len(pool), digest_sum, digest_xor)
+    source_digest = "pool-" + hashlib.sha256(
+        digest_material.encode("ascii")).hexdigest()[:24]
 
     capacity = min(window, len(pool))
     allocations = {category: 0 for category in categories}
@@ -679,7 +686,7 @@ def bounded_candidate_intake(
         allocation = allocations[category]
         start = ((round_index * allocation) % len(rows)) if rows and allocation else 0
         for offset in range(allocation):
-            active.append(rows[(start + offset) % len(rows)])
+            active.append(rows[(start + offset) % len(rows)][1])
         category_meta[category] = {
             "total": len(rows), "active": allocation,
             "deferred_intake": max(0, len(rows) - allocation),
@@ -690,8 +697,15 @@ def bounded_candidate_intake(
     # scheduler even if a broad static category happened to fill the window.
     # They still count against both the intake window and the later round slot
     # budget; this is priority, not a way to bypass a budget.
-    by_id = {str(candidate.get("candidate_id") or ""): candidate
-             for candidate in pool if candidate.get("candidate_id")}
+    priority_ids = normalize_candidate_ids(priority_ids)
+    wanted_ids = ({str(candidate_id) for candidate_id in pinned if candidate_id}
+                  | set(priority_ids))
+    by_id = {}
+    if wanted_ids:
+        for candidate in pool:
+            candidate_id = str(candidate.get("candidate_id") or "")
+            if candidate_id in wanted_ids:
+                by_id[candidate_id] = candidate
     pinned_candidates = []
     seen_pinned = set()
     for candidate_id in pinned:
@@ -700,13 +714,28 @@ def bounded_candidate_intake(
             continue
         seen_pinned.add(candidate_id)
         pinned_candidates.append(by_id[candidate_id])
-    pinned_ids = {str(candidate.get("candidate_id") or "")
-                  for candidate in pinned_candidates}
-    if pinned_candidates:
+    selected_pinned = pinned_candidates[:capacity]
+    selected_ids = {str(candidate.get("candidate_id") or "")
+                    for candidate in selected_pinned}
+    priority_candidates = []
+    seen_priority = set()
+    for candidate_id in priority_ids:
+        candidate = by_id.get(candidate_id)
+        if (candidate is None or candidate_id in selected_ids
+                or candidate_id in seen_priority):
+            continue
+        seen_priority.add(candidate_id)
+        priority_candidates.append(candidate)
+    selected_priority = priority_candidates[
+        :max(0, capacity - len(selected_pinned))]
+    selected_ids.update(str(candidate.get("candidate_id") or "")
+                        for candidate in selected_priority)
+    if selected_pinned or selected_priority:
         remaining = [candidate for candidate in active
-                     if str(candidate.get("candidate_id") or "") not in pinned_ids]
-        active = (pinned_candidates[:capacity] +
-                  remaining[:max(0, capacity - len(pinned_candidates))])
+                     if str(candidate.get("candidate_id") or "") not in selected_ids]
+        active = (selected_pinned + selected_priority +
+                  remaining[:max(0, capacity - len(selected_pinned)
+                                 - len(selected_priority))])
     active_by_category = Counter(candidate_category(candidate) for candidate in active)
     for category, detail in category_meta.items():
         detail["active"] = int(active_by_category.get(category, 0))
@@ -734,7 +763,13 @@ def bounded_candidate_intake(
         "active_digest": active_digest,
         "active_candidate_ids": [row["candidate_id"] for row in active_rows],
         "pinned_candidate_ids": [str(candidate.get("candidate_id") or "")
-                                 for candidate in pinned_candidates[:capacity]],
+                                 for candidate in selected_pinned],
+        "requested_priority_candidate_ids": priority_ids,
+        "priority_candidate_ids": [str(candidate.get("candidate_id") or "")
+                                   for candidate in selected_priority],
+        "unmatched_priority_candidate_ids": [
+            candidate_id for candidate_id in priority_ids
+            if candidate_id not in by_id],
         "categories": category_meta,
         "claim_status": "not-a-finding",
     }
@@ -1916,6 +1951,11 @@ class SchedulePlan:
     #: Candidates selected outside the quota because they carry runtime
     #: evidence the static score cannot see (see :func:`stratified_select`).
     pinned: List[str] = field(default_factory=list)
+    #: Candidates selected first within the slot budget by explicit operator
+    #: priority. They remain subject to the round width and runtime pins.
+    priority_candidate_ids: List[str] = field(default_factory=list)
+    requested_priority_candidate_ids: List[str] = field(default_factory=list)
+    deferred_priority_candidate_ids: List[str] = field(default_factory=list)
 
     def selected_ids(self) -> List[str]:
         return [s.candidate_id for s in self.selected]
@@ -1935,6 +1975,11 @@ class SchedulePlan:
             "selected": [s.as_dict() for s in self.selected],
             "deferred": [s.as_dict() for s in self.deferred],
             "pinned": list(self.pinned),
+            "priority_candidate_ids": list(self.priority_candidate_ids),
+            "requested_priority_candidate_ids": list(
+                self.requested_priority_candidate_ids),
+            "deferred_priority_candidate_ids": list(
+                self.deferred_priority_candidate_ids),
             "quota": {
                 "requested": dict(self.requested_quota),
                 "filled": dict(self.filled_quota),
@@ -1953,7 +1998,8 @@ class SchedulePlan:
 
 def stratified_select(scores: Sequence[CandidateScore], slots: int,
                       quota: Optional[Dict[str, int]] = None,
-                      pinned: Sequence[str] = ()
+                      pinned: Sequence[str] = (),
+                      priority_ids: Sequence[str] = ()
                       ) -> Tuple[List[CandidateScore], List[CandidateScore],
                                  Dict[str, int], Dict[str, int], Dict[str, int]]:
     """Fill per-category quota, then relocate whatever could not be filled.
@@ -1979,6 +2025,10 @@ def stratified_select(scores: Sequence[CandidateScore], slots: int,
     candidate would discard the strongest evidence in the round.  Pinning is
     reported in the plan, and pinning more ids than ``slots`` truncates rather
     than over-filling.
+
+    Explicit operator priorities are selected after runtime pins but before
+    category quotas. They consume the same finite slot budget; any remaining
+    slots are filled by the ordinary category-stratified scheduler.
     """
     quota = dict(quota if quota is not None else DEFAULT_QUOTA)
     slots = max(0, int(slots))
@@ -1988,6 +2038,7 @@ def stratified_select(scores: Sequence[CandidateScore], slots: int,
 
     taken: set = set()
     selected: List[CandidateScore] = []
+    filled: Dict[str, int] = {category: 0 for category in quota}
     by_id = {s.candidate_id: s for s in scores}
     for candidate_id in pinned:
         score = by_id.get(str(candidate_id))
@@ -1998,20 +2049,32 @@ def stratified_select(scores: Sequence[CandidateScore], slots: int,
         selected.append(score)
         taken.add(score.candidate_id)
 
+    for candidate_id in priority_ids:
+        score = by_id.get(str(candidate_id))
+        if score is None or score.candidate_id in taken:
+            continue
+        if len(selected) >= slots:
+            break
+        selected.append(score)
+        taken.add(score.candidate_id)
+        if score.category in filled and filled[score.category] < max(
+                0, int(quota.get(score.category, 0))):
+            filled[score.category] += 1
+
     # 1. quota categories, in the declared order
-    filled: Dict[str, int] = {}
     for category in quota:
         want = max(0, int(quota[category]))
+        remaining_quota = max(0, want - filled.get(category, 0))
         available = [s for s in by_category.get(category, ())
                      if s.candidate_id not in taken]
         got = 0
-        for score in available[:want]:
+        for score in available[:remaining_quota]:
             if len(selected) >= slots:
                 break
             selected.append(score)
             taken.add(score.candidate_id)
             got += 1
-        filled[category] = got
+        filled[category] = filled.get(category, 0) + got
 
     # 2. relocate unfilled quota, then spend any remaining slots
     remaining = [s for s in scores if s.candidate_id not in taken]
@@ -2027,7 +2090,16 @@ def stratified_select(scores: Sequence[CandidateScore], slots: int,
         if shortfall:
             relocated[category] = shortfall
 
-    selected.sort(key=lambda s: (-s.total, s.candidate_id))
+    pinned_order = {str(candidate_id): index
+                    for index, candidate_id in enumerate(pinned)}
+    priority_order = {str(candidate_id): index
+                      for index, candidate_id in enumerate(priority_ids)}
+    selected.sort(key=lambda score: (
+        0 if score.candidate_id in pinned_order else
+        1 if score.candidate_id in priority_order else 2,
+        pinned_order.get(score.candidate_id, 0),
+        priority_order.get(score.candidate_id, 0),
+        -score.total, score.candidate_id))
     deferred = [s for s in scores if s.candidate_id not in taken]
     return selected, deferred, quota, filled, relocated
 
@@ -2067,6 +2139,9 @@ def residual_sweep(store: CoverageStore, workspace: Path, target: str,
 # top level
 # ---------------------------------------------------------------------------
 
+class CoverageScopeUnavailable(RuntimeError):
+    """Raised when persisted indices cannot support coverage-based ranking."""
+
 def build_schedule(workspace: Path, target: str,
                    candidates: Sequence[Dict[str, Any]],
                    slots: int = DEFAULT_SLOTS,
@@ -2075,7 +2150,8 @@ def build_schedule(workspace: Path, target: str,
                    round_no: int = 0,
                    refresh: bool = True,
                    pinned: Sequence[str] = (),
-                   benchmark_feedback: Optional[Dict[str, Any]] = None
+                   benchmark_feedback: Optional[Dict[str, Any]] = None,
+                   priority_ids: Sequence[str] = ()
                    ) -> SchedulePlan:
     """Score, dedupe and select this round's candidates.
 
@@ -2086,6 +2162,10 @@ def build_schedule(workspace: Path, target: str,
     """
     workspace = Path(workspace).resolve()
     store = CoverageStore(workspace, target)
+    scope_blocker = _coverage_scope_blocker(
+        store, check_coverage_summary=not refresh)
+    if scope_blocker:
+        raise CoverageScopeUnavailable(scope_blocker)
     from .evidence_provenance import enrich_candidates, load_evidence_provenance
 
     candidates = enrich_candidates(candidates, load_evidence_provenance(store))
@@ -2133,8 +2213,9 @@ def build_schedule(workspace: Path, target: str,
         research_agenda=research_agenda,
         threat_model=threat_model)
     scores = score_candidates(candidates, ctx)
+    priority_ids = normalize_candidate_ids(priority_ids)
     selected, deferred, requested, filled, relocated = stratified_select(
-        scores, slots, quota, pinned)
+        scores, slots, quota, pinned, priority_ids)
     # ``refresh=False`` is used when the caller recomputes coverage itself; the
     # plan then records that the residual was *not* measured rather than
     # reporting ``0`` uncovered -- an absent measurement must not read as "clean".
@@ -2145,6 +2226,10 @@ def build_schedule(workspace: Path, target: str,
         "measured": bool(refresh),
     }
     selected_ids = {s.candidate_id for s in selected}
+    pinned_ids = {str(cid) for cid in pinned}
+    selected_priority_ids = [
+        candidate_id for candidate_id in priority_ids
+        if candidate_id in selected_ids and candidate_id not in pinned_ids]
     plan = SchedulePlan(
         round_no=round_no, slots=slots, selected=selected, deferred=deferred,
         requested_quota=requested, filled_quota=filled,
@@ -2160,6 +2245,11 @@ def build_schedule(workspace: Path, target: str,
         threat_model=dict(ctx.threat_model),
         weight_adjustments=dict(ctx.weight_adjustments),
         pinned=[str(cid) for cid in pinned if str(cid) in selected_ids],
+        priority_candidate_ids=selected_priority_ids,
+        requested_priority_candidate_ids=priority_ids,
+        deferred_priority_candidate_ids=[
+            candidate_id for candidate_id in priority_ids
+            if candidate_id not in selected_ids],
     )
     payload = plan.as_dict()
     store.ensure()
@@ -2254,6 +2344,50 @@ def selected_candidates(plan: SchedulePlan,
     return out
 
 
+def _coverage_scope_blocker(store: CoverageStore,
+                            check_coverage_summary: bool = True) -> str:
+    """Explain why persisted indices cannot support a coverage-aware schedule."""
+    build_status = store.read("coverage-build-status") or {}
+    if isinstance(build_status, dict) and build_status.get("status") in {
+            "running", "incomplete", "failed"}:
+        return "coverage build %s" % build_status.get("status")
+
+    inventory = store.read("inventory-summary") or {}
+    scope = inventory.get("scope") if isinstance(inventory, dict) else None
+    if not isinstance(scope, dict):
+        return "inventory scope metadata missing"
+    if scope.get("schema_version") != COVERAGE_SCOPE_VERSION:
+        return "inventory scope schema is missing or outdated"
+    if scope.get("valid") is not True:
+        gaps = [str(value) for value in scope.get("analysis_gaps") or [] if value]
+        return "inventory scope invalid%s" % (
+            ": " + ", ".join(gaps[:4]) if gaps else "")
+    try:
+        source_count = int(scope.get("source_file_count") or 0)
+    except (TypeError, ValueError):
+        source_count = 0
+    if source_count <= 0:
+        return "source universe is empty"
+
+    required_indices = {
+        "source-inventory", "entry-index", "sink-index",
+        "security-control-index", "symbol-index", "flow-index",
+    }
+    missing = sorted(required_indices - set(store.existing_indices()))
+    if missing:
+        return "required indices missing: %s" % ", ".join(missing)
+
+    if check_coverage_summary:
+        coverage = store.read("coverage-summary") or {}
+        audit_status = (coverage.get("audit_status")
+                        if isinstance(coverage, dict) else None)
+        if isinstance(audit_status, dict) and (
+                audit_status.get("scope_present") is False
+                or audit_status.get("scope_valid") is False):
+            return "coverage summary reports an invalid scope"
+    return ""
+
+
 def round_selection(workspace, target: str,
                     candidates: Sequence[Dict[str, Any]], slots: int,
                     round_no: int = 0,
@@ -2261,7 +2395,8 @@ def round_selection(workspace, target: str,
                     weights: Optional[Dict[str, int]] = None,
                     pinned: Sequence[str] = (),
                     refresh: bool = True,
-                    benchmark_feedback: Optional[Dict[str, Any]] = None
+                    benchmark_feedback: Optional[Dict[str, Any]] = None,
+                    priority_ids: Sequence[str] = ()
                     ) -> Tuple[List[Dict[str, Any]], Optional[SchedulePlan], str]:
     """Pick this round's candidates, degrading to proposal order on failure.
 
@@ -2280,7 +2415,12 @@ def round_selection(workspace, target: str,
         plan = build_schedule(workspace, target, pool, slots=slots, quota=quota,
                               weights=weights, round_no=round_no,
                               refresh=refresh, pinned=pinned,
+                              priority_ids=priority_ids,
                               benchmark_feedback=benchmark_feedback)
+    except CoverageScopeUnavailable as exc:
+        return pool[:slots], None, (
+            "coverage-aware scheduling unavailable (%s); returned the bounded "
+            "candidate order without coverage ranking" % exc)
     except Exception as exc:  # pragma: no cover - defensive by design
         return pool[:slots], None, (
             "scheduler unavailable (%s: %s); fell back to proposal order"

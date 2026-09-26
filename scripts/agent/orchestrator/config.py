@@ -51,11 +51,30 @@ class TargetConfig:
     poc_src_dir: Optional[str] = None
     entry_points: List[Dict[str, Any]] = field(default_factory=list)
     candidates: List[Dict[str, Any]] = field(default_factory=list)
+    # Explicit candidate IDs selected before category quotas, within the
+    # round's finite slot budget and after runtime-backed pinned candidates.
+    priority_candidate_ids: List[str] = field(default_factory=list)
     # Per-round candidate budget (spec §13).  A positive value is the explicit
     # work budget.  ``0`` is accepted as a legacy spelling for the scheduler's
     # finite default; it must never expand into "audit the whole pool" because
     # static evidence inventories can contain tens of thousands of leads.
     max_candidates: int = 8
+    # Source-universe enumeration has a bounded wall-clock budget. A timed-out
+    # inventory is marked incomplete and prevents later stages from consuming
+    # a stale or partial coverage index. Zero disables the limit explicitly.
+    coverage_scan_timeout_seconds: int = 600
+    # Permit a bounded candidate-only round when S1 coverage is incomplete.
+    # Index-derived candidates and coverage-aware scheduling remain disabled,
+    # and S8 must keep the coverage closure explicitly incomplete.
+    allow_partial_coverage: bool = False
+    # Persistent wall-clock cap for the complete config-driven S1-S8 round.
+    # Must be between 1 second and 90 minutes; resume never resets the deadline.
+    audit_round_timeout_seconds: int = 5400
+    # S4 shares a 90-minute round and 15-minute candidate hard maximum across
+    # matrix runs and replay/differential lab. These values may lower the caps,
+    # never raise them. Expiry preserves completed cells and writes stop-loss rows.
+    s4_timeout_seconds: int = 5400
+    s4_candidate_timeout_seconds: int = 900
     # Index-derived candidates (spec §11/§12 plus capability paths) enter the
     # round's pool automatically: an unguarded path, sibling control
     # differential, and explicit primitive chain are exactly the "high value

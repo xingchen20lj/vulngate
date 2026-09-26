@@ -18,6 +18,9 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 from agent.orchestrator import pipeline
 from agent.orchestrator.config import TargetConfig
 from agent.orchestrator.stages import StageContext
+from agent.analysis.languages import SOURCE_INVENTORY_POLICY_VERSION
+from agent.tools.build import S4_EVIDENCE_POLICY_VERSION
+from agent.tools.public_scan import NOVELTY_QUERY_POLICY_VERSION
 
 
 def load_adapter(name):
@@ -33,9 +36,21 @@ class PipelineSelectionTests(unittest.TestCase):
             cfg = TargetConfig('fixture', '2026-09-16', candidates=[
                 {'candidate_id': 'deferred', 'surface': 'exec'}])
             ctx = StageContext(Path(td), 'fixture', 1, cfg, offline=True)
-            ctx.store.save_stage('S1', {'complete': True})
+            ctx.store.write_artifact('S1', 'coverage-summary.json', {
+                'status': 'complete',
+                'scope': {'status': 'matched', 'valid': True},
+            })
+            ctx.store.save_stage('S1', {
+                'complete': True,
+                'coverage_policy_version': SOURCE_INVENTORY_POLICY_VERSION,
+            })
             for stage in ('S4', 'S5', 'S6', 'S7', 'S8'):
-                ctx.store.save_stage(stage, {'complete': True})
+                checkpoint = {'complete': True}
+                if stage == 'S4' or stage in ('S6', 'S7', 'S8'):
+                    checkpoint['evidence_policy_version'] = S4_EVIDENCE_POLICY_VERSION
+                if stage == 'S5':
+                    checkpoint['query_policy_version'] = NOVELTY_QUERY_POLICY_VERSION
+                ctx.store.save_stage(stage, checkpoint)
             if resume:
                 ctx.store.save_stage('S2', {'candidates': selection})
             seen = []

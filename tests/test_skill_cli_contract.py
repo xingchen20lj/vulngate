@@ -19,7 +19,8 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SKILL_MD = REPO_ROOT / "skills" / "vulngate-audit" / "SKILL.md"
+SKILL_ROOT = REPO_ROOT / "skills" / "vulngate-audit"
+SKILL_MD = SKILL_ROOT / "SKILL.md"
 RUN_AGENT = REPO_ROOT / "scripts" / "agent" / "autonomous" / "run_agent.py"
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
@@ -57,11 +58,15 @@ def _choice_map(parser):
 
 
 class SkillCliContractTests(unittest.TestCase):
-    """SKILL.md must not document a subcommand or flag that argparse rejects."""
+    """The skill and its phase references must document valid CLI usage."""
 
     @classmethod
     def setUpClass(cls):
-        cls.lines = SKILL_MD.read_text(encoding="utf-8").splitlines()
+        cls.lines = [
+            line
+            for path in sorted(SKILL_ROOT.rglob("*.md"))
+            for line in path.read_text(encoding="utf-8").splitlines()
+        ]
         cls.subs = _subcommands()
 
     def _invocations(self):
@@ -78,7 +83,7 @@ class SkillCliContractTests(unittest.TestCase):
 
     def test_every_documented_subcommand_exists(self):
         bad = [(n, s) for n, _, s in self._invocations() if s not in self.subs]
-        self.assertEqual(bad, [], f"SKILL.md documents unknown subcommands: {bad}")
+        self.assertEqual(bad, [], f"skill documentation lists unknown subcommands: {bad}")
 
     def test_every_documented_flag_exists(self):
         bad = []
@@ -86,7 +91,7 @@ class SkillCliContractTests(unittest.TestCase):
             known = _option_strings(self.subs[sub])
             for flag in FLAG_RE.findall(line):
                 if flag not in known:
-                    bad.append(f"SKILL.md:{lineno}  {sub} {flag}")
+                    bad.append(f"skill documentation:{lineno}  {sub} {flag}")
         self.assertEqual(
             bad, [], "documented flags that argparse rejects:\n  " + "\n  ".join(bad)
         )
@@ -107,7 +112,7 @@ class SkillCliContractTests(unittest.TestCase):
                 documented = set(spec.split("|"))
                 if documented != actual:
                     bad.append(
-                        f"SKILL.md:{lineno}  {sub} {flag}: documented "
+                        f"skill documentation:{lineno}  {sub} {flag}: documented "
                         f"{sorted(documented)} != actual {sorted(actual)}"
                     )
         self.assertEqual(

@@ -27,11 +27,11 @@ from ..evaluation.research_consistency_actions import (
 )
 from ..evaluation.research_consistency_rechecks import summarize_recheck_lane
 from .build import (JavaMatrixRunner, MatrixCell, POCSpec, ShellMatrixRunner,
-                    ShellPOCSpec)
+                    ShellPOCSpec, S4ExecutionBudget)
 from .redaction import redact_text
 from .runtime_lab import (LAB_SCHEMA_VERSION, MAX_CELLS,
                           summarize_replay, summarize_version_differential)
-from .service_lifecycle import ServiceLifecycle
+from .service_lifecycle import SERVICE_SCHEMA_VERSION, ServiceLifecycle
 from .surface_variants import (normalize_variant_fixture_context,
                                normalize_variant_fixture_plan)
 from .source_revisions import (source_revision_index,
@@ -201,11 +201,14 @@ def _options(config: Any) -> Dict[str, Any]:
     else:
         raw = getattr(config, "runtime_lab", {}) if config is not None else {}
     if raw is True:
-        raw = {}
+        raw = {"enabled": True}
     if raw is False or raw is None:
         raw = {"enabled": False} if raw is False else {}
     if not isinstance(raw, dict):
         raw = {}
+    enabled_value = raw.get("enabled", bool(raw))
+    enabled = (enabled_value if isinstance(enabled_value, bool) else
+               str(enabled_value).strip().lower() in {"true", "1", "yes", "on"})
     try:
         max_fixtures = max(1, min(int(raw.get("max_fixtures", 8)),
                                   MAX_S4_FIXTURES))
@@ -231,7 +234,10 @@ def _options(config: Any) -> Dict[str, Any]:
     if not isinstance(candidate_ids, list):
         candidate_ids = []
     return {
-        "enabled": raw.get("enabled", True) is not False,
+        # Empty/default config must not schedule an extra replay matrix for
+        # every candidate. Supplying a non-empty runtime_lab mapping is an
+        # explicit opt-in; `enabled` can override it either way.
+        "enabled": enabled,
         "max_fixtures": max_fixtures,
         "replay_runs": replay_runs,
         "safe_modes": safe_modes,
@@ -321,7 +327,7 @@ def build_runtime_context_snapshot(
         if len(authz_fixtures) >= MAX_CONTEXT_AUTHZ_FIXTURES:
             break
     service = service_info or {
-        "schema_version": "service-lifecycle-v1",
+        "schema_version": SERVICE_SCHEMA_VERSION,
         "configured": False,
         "enabled": False,
         "claim_status": "not-a-finding",
@@ -629,6 +635,7 @@ def _clone_spec(spec: Any, kind: str, candidate_id: str,
     if kind == "java":
         return POCSpec(
             candidate_id=candidate_id,
+            budget_key=spec.budget_key or spec.candidate_id,
             class_name=spec.class_name,
             src=spec.src,
             cells=cells,
@@ -644,6 +651,7 @@ def _clone_spec(spec: Any, kind: str, candidate_id: str,
         )
     return ShellPOCSpec(
         candidate_id=candidate_id,
+        budget_key=spec.budget_key or spec.candidate_id,
         script=spec.script,
         cells=cells,
         env=dict(spec.env),
@@ -785,7 +793,8 @@ def _run_s4_runtime_lab_core(
         baseline_results: Optional[Dict[str, List[Dict[str, Any]]]] = None,
         approval: Any = None,
         version_universe: Optional[Sequence[str]] = None,
-        source_revision_artifacts: Optional[Dict[str, Any]] = None
+        source_revision_artifacts: Optional[Dict[str, Any]] = None,
+        execution_budget: Optional[S4ExecutionBudget] = None
         ) -> Dict[str, Any]:
     """Run bounded replay/differential experiments for ordinary S4 specs."""
     source_revision_artifacts = source_revision_artifacts or {}
@@ -834,15 +843,22 @@ def _run_s4_runtime_lab_core(
             "claim_status": "not-a-finding",
     }
 
-    java_runner = (JavaMatrixRunner(workspace, target, round_no, approval=approval)
+    java_runner = (JavaMatrixRunner(
+        workspace, target, round_no, approval=approval,
+        execution_budget=execution_budget)
                    if any(item[2] == "java" for item in work_items) else None)
-    shell_runner = (ShellMatrixRunner(workspace, target, round_no, approval=approval)
+    shell_runner = (ShellMatrixRunner(
+        workspace, target, round_no, approval=approval,
+        execution_budget=execution_budget)
                     if any(item[2] == "shell" for item in work_items) else None)
     source_revision_entries = source_revision_index(source_revision_artifacts)
     baseline_results = baseline_results or {}
     rows: List[Dict[str, Any]] = []
+    candidate_timebox_skips = 0
     for (candidate, spec, kind, spec_index, base, template_key,
          variant_context, consistency_lane) in work_items:
+        if execution_budget and execution_budget.round_remaining() < 1.0:
+            break
         variant_base = (_variant_cell(base, variant_context)
                         if variant_context else base)
         if consistency_lane:
@@ -859,6 +875,10 @@ def _run_s4_runtime_lab_core(
                 "consistency_action", {}))
         fixture_id = fixture["fixture_id"]
         candidate_id = str(candidate.get("candidate_id", ""))
+        if (execution_budget and
+                execution_budget.remaining(candidate_id) < 1.0):
+            candidate_timebox_skips += 1
+            continue
         selected_versions = versions or [str(base.version)]
         primary = (str(variant_base.version)
                    if str(variant_base.version) in selected_versions
@@ -1026,13 +1046,20 @@ def _run_s4_runtime_lab_core(
     return {
         "schema_version": LAB_SCHEMA_VERSION,
         "scope": "ordinary-s4",
-        "status": "completed",
+        "status": ("timebox-exhausted"
+                   if (candidate_timebox_skips or
+                       (execution_budget and
+                        execution_budget.round_remaining() < 1.0))
+                   else "completed"),
         "replay_runs": options["replay_runs"],
         "safe_modes": options["safe_modes"],
         "version_count": len(versions),
         "fixture_count": len(rows),
         "fixture_budget": options["max_fixtures"],
         "fixture_budget_truncated": work_item_count > len(work_items),
+        "timebox_truncated": len(rows) < len(work_items),
+        "unprocessed_fixture_count": max(0, len(work_items) - len(rows)),
+        "candidate_timebox_skipped_fixture_count": candidate_timebox_skips,
         "source_revision_artifacts": source_revision_artifact_view,
         "comparison_contracts": _unique_comparison_contracts(rows),
         "candidate_status": candidate_status,
@@ -1086,21 +1113,41 @@ def run_s4_runtime_lab(
         approval: Any = None,
         version_universe: Optional[Sequence[str]] = None,
         service_lifecycle: Optional[ServiceLifecycle] = None,
-        source_revision_artifacts: Optional[Dict[str, Any]] = None
+        source_revision_artifacts: Optional[Dict[str, Any]] = None,
+        execution_budget: Optional[S4ExecutionBudget] = None
         ) -> Dict[str, Any]:
     """Run ordinary S4 lab experiments with a bounded service context."""
+    execution_budget = execution_budget or S4ExecutionBudget()
+    options = _options(config)
+    if not options["enabled"]:
+        # A disabled lab must not resolve source revisions, instantiate a
+        # service lifecycle, or run its cleanup path (which may stop an
+        # explicitly configured external service).
+        return _run_s4_runtime_lab_core(
+            workspace, target, round_no, config, candidates, java_specs,
+            shell_specs, jars_by_version, baseline_results=baseline_results,
+            approval=approval, version_universe=version_universe,
+            source_revision_artifacts=source_revision_artifacts or {},
+            execution_budget=execution_budget)
+
     if source_revision_artifacts is None:
         from .source_revisions import resolve_source_revision_artifacts
 
         source_revision_artifacts = resolve_source_revision_artifacts(
             workspace, config)
-    options = _options(config)
     versions = _version_set(jars_by_version, version_universe)
     owns_lifecycle = service_lifecycle is None
     lifecycle = service_lifecycle or ServiceLifecycle(
-        workspace, target, round_no, config, approval=approval)
+        workspace, target, round_no, config, approval=approval,
+        execution_budget=execution_budget)
     service_info = (lifecycle.snapshot() if owns_lifecycle
                     else lifecycle.result())
+
+    if execution_budget and execution_budget.round_remaining() < 1.0:
+        return _runtime_lab_gap(
+            "timebox-exhausted", options, versions,
+            "S4 round wall-clock budget expired before runtime-lab replay",
+            service_info, config, candidates, source_revision_artifacts)
 
     # Do not start a target service when the configured candidates do not have
     # any repeatable fixture.  The core function still owns the exact
@@ -1145,7 +1192,8 @@ def run_s4_runtime_lab(
             workspace, target, round_no, config, candidates, java_specs,
             shell_specs, jars_by_version, baseline_results=baseline_results,
             approval=approval, version_universe=version_universe,
-            source_revision_artifacts=source_revision_artifacts)
+            source_revision_artifacts=source_revision_artifacts,
+            execution_budget=execution_budget)
     finally:
         # An external-ready service is deliberately not owned by this run;
         # a process started above is always stopped in the same turn. When a

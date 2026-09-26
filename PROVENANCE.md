@@ -6,7 +6,7 @@ It is not a legal opinion and does not claim that every broad idea used by VulnG
 
 ## Maintainer and development model
 
-VulnGate is independently designed and maintained by **xingchen20lj**.
+VulnGate is independently designed and maintained by **Zer0Gate**.
 
 The project has been developed with AI-assisted software engineering using ChatGPT and Codex as design and implementation aids. The maintainer selects the architecture, evaluates behavior, runs audits, reviews generated changes, and iterates on failures observed during real open-source security research.
 

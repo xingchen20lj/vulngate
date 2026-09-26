@@ -53,7 +53,8 @@ def run_one(args: argparse.Namespace, name: str) -> Dict[str, Any]:
                   max_candidates=args.max_candidates, max_rounds=args.max_rounds,
                   fuzz_budget=args.fuzz_budget, fuzz_seed=args.fuzz_seed,
                   fuzz_force=args.fuzz_force,
-                  fuzz_skip_minimize=args.fuzz_skip_minimize)
+                  fuzz_skip_minimize=args.fuzz_skip_minimize,
+                  force=getattr(args, "force", False))
     t0 = time.time()
     rounds_done = run_loop(ctx, round_no)
     elapsed = time.time() - t0
@@ -168,6 +169,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--reasoning-effort", default=None)
     ap.add_argument("--lang", default=None, choices=["zh", "en"])
     ap.add_argument("--offline", action="store_true")
+    ap.add_argument("--force", action="store_true",
+                    help="rebuild stage checkpoints and retry failed coverage scopes")
     ap.add_argument("--parallel", action="store_true",
                     help="run targets concurrently (ThreadPoolExecutor); default serial")
     ap.add_argument("--fuzz-budget", type=int, default=0)

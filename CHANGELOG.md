@@ -6,8 +6,344 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-26
+
+### Changed
+
+- Candidate intake admits prior-agenda and explicit user-priority IDs before
+  ordinary category rotation. Runtime-backed candidates remain first; explicit
+  user-priority IDs then reserve slots within the same finite round budget
+  before category quotas, while prior-agenda candidates remain scoring hints.
+  Intake artifacts record requested, admitted, and unmatched IDs, and schedule
+  artifacts record selected and deferred explicit priorities.
+- Parallel S4/S5 sub-agents are now explicitly optional: use them only when
+  independent work is expected to save more time than probe, coordination, and
+  review. Quickstart no longer instructs users to spawn one worker per
+  candidate.
+- S4 parallel receipts now record bounded, challenge-bound progress events and
+  expose an `--inspect` snapshot. Five minutes is a liveness check interval;
+  each worker keeps one fixed deadline within the shared candidate/round budget,
+  so useful work is not discarded at five minutes and stale workers are not
+  polled indefinitely. The Chinese skill guidance now matches the English
+  execution contract instead of imposing a conflicting five-minute total cap.
+- Runtime-lab service and process records now distinguish an unconfined
+  VulnGate-managed service, an already-ready external process with unknown
+  isolation, and a service that was not started. The lifecycle schema versions
+  change so older service snapshots are not mistaken for the new contract.
+- The audit skill entrypoint now loads only shared rules and phase routing; S1–S8
+  details and optional S4 runtime-lab procedures live in on-demand references.
+  The full Chinese mirror moved to `docs/AUDIT-PLAYBOOK.zh-CN.md`, outside the
+  runtime skill context, leaving one English execution contract and removing
+  duplicated operational rules from each audit's initial context.
+- Audit skill examples no longer include `allow_unconfined_start: true` by
+  default. The skill now requires explicit user authorization in the audit task
+  before adding that setting to operator-controlled configuration.
+- The 90-minute audit deadline now applies to all audit work, including host
+  reasoning and browsing between commands. The skill requires a deadline check
+  at every stage transition and investigation loop; expired source roots stay
+  blocked until explicit release.
+
+### Fixed
+
+- Conclusion derivation now rebuilds evidence from raw S4 cells and refuses
+  summary-only verdicts. HTTP status/body digests remain transport metadata and
+  cannot confirm impact; summary rows retain observer and cell identifiers.
+  S4 evidence policy v12 invalidates checkpoints written under the older
+  conclusion contract. Executed Java cells without an independent runtime
+  observer now record an explicit observer gap.
+- The active-audit hook now resolves relative and symlinked path arguments
+  against the Bash working directory. Recursive/metadata commands and
+  interpreters issued from an ancestor of the registered source root are
+  treated as in-scope, and ambiguous shell syntax from that location is
+  blocked unless it matches the round's allowed VulnGate CLI contract. The
+  ancestor-directory check also detects interpreters/build tools behind common
+  command wrappers, not only when they are argv[0].
+  While a guard is active, commands over 64 KiB or 2,048 shell tokens are
+  rejected before path inspection so the hook cannot spend its timeout
+  tokenizing a generated argv list.
+  Oversized, malformed, or incomplete hook events also fail closed whenever
+  the active-audit registry contains or may contain a registration.
+- The English quickstart no longer requires an S4 spawn probe or worker
+  creation on every audit; parallelism is chosen only when it is expected to
+  save more time than its probe, coordination, and review costs.
+- The plugin manifest and current project references now use the maintainer's
+  `Zer0Gate` identity and current GitHub repository URL. Security-policy pages
+  describe the platform-specific PoC boundary, observer limits, sampled
+  stop-losses, and host-side audit deadlines without presenting them as a
+  universal sandbox or hard wall-clock limit.
+- Conclusion derivation now rebuilds evidence from raw S4 cells and refuses
+  summary-only verdicts. HTTP status/body digests remain transport metadata and
+  cannot confirm impact; summary rows retain the observer and cell identifiers
+  for review.
+- `agent_cli.py doctor --json` is now accepted for consistency with the other
+  machine-readable commands. `doctor` already emitted JSON, but the rejected
+  flag previously wrote argparse usage text into redirected `.json` artifacts.
+- The coverage scheduler now rejects missing/invalid inventory scopes, failed
+  coverage builds, empty source universes, and missing core index files instead
+  of emitting an apparently ranked schedule from empty placeholders. Pipeline
+  callers preserve bounded candidates with an explicit degraded note; the
+  standalone `schedule` CLI exits without writing a coverage-ranked plan.
+- Ordinary S4 replay/differential runtime-lab is now opt-in. An omitted or
+  empty `runtime_lab` config no longer reruns every candidate across default
+  replay and safe-mode cells; explicit runtime-lab options preserve the bounded
+  research workflow. Disabled runs also return before source-revision lookup or
+  service lifecycle cleanup, so opting out cannot stop an external service.
+  The S4 policy version changes so old checkpoints are reevaluated without
+  silently carrying forward implicit lab runs.
+- The compatibility manifest no longer sets the unsupported top-level `hooks`
+  field. Codex discovers the bundled `hooks/hooks.json` by default when the
+  selected manifest does not override hook discovery. The installer now also
+  copies the `hooks/` directory into the local plugin source.
+- S4 Java and Web PoC prompts no longer require machine-readable stdout markers;
+  markers remain optional untrusted claims. Candidate summaries set
+  `needs-harness-observer` only when the runner reports that gap, and represent
+  a missing captured HTTP response separately. Shell PoC repair is limited to
+  one attempt after a concrete nonzero script/request failure, so absent
+  evidence alone no longer triggers speculative rewrites. The S4 evidence
+  policy version changes so older checkpoints are reevaluated under this rule.
+- POSIX PoC resource limits are applied by a minimal Bash launcher before the
+  PoC executable starts. Darwin's existing shared-cache mappings are measured
+  and recorded as the address-space baseline, with up to 4 GiB of per-process
+  headroom; other POSIX hosts retain a 4 GiB absolute cap. The 64 MiB file cap
+  is converted using Bash's 1024-byte file-size blocks and independently
+  checked by preflight; stricter existing host hard limits are retained and
+  recorded as applied values. The resource-policy version changes so older
+  evidence is not reused.
+- The command runner keeps enforcing its wall-clock deadline when a child
+  closes stdout/stderr and makes a final process-group cleanup attempt after
+  the leader exits. Runner policy versions change so older S4 checkpoints are
+  not reused under the new cleanup behavior; a child that creates a new
+  process group/session can still escape this cleanup boundary.
+- Host-side command results now expose PID/start-time process-tree cleanup
+  status even outside PoC matrix runs. The new `audit-exec` CLI requires an
+  initialized round deadline, caps each source-checkout command at the
+  requested timeout, 15 minutes, or remaining budget, and runs with a reduced
+  environment. Standalone search/recursive inspection commands (`rg`, `grep`,
+  `find`, `fd`, `ack`, `ag`, `du`) and potentially expensive Git metadata
+  commands (`git grep`, `status`, `diff`, and `ls-files`) are further capped at
+  120 seconds to prevent one broad scan or metadata walk from consuming most of
+  the round. Inline-code interpreters (`python -c`/stdin, `perl -e`, `ruby -e`,
+  `node -e`, and `osascript -e`) receive the same cap to keep inline scripts
+  from bypassing command classification. Run longer scans through dedicated
+  tools with their own enumeration deadlines.
+  Attempts are recorded in `S0/host-command-runs.jsonl`; identical
+  retries after a timeout, failure, or incomplete cleanup require an explicit
+  reason after checking that the earlier process is gone and the scope or
+  environment changed. `audit-budget start --root` registers the active checkout
+  with a bundled Codex `PreToolUse` hook that blocks ordinary Bash/Unified Exec
+  calls touching that root unless they use VulnGate's bundled CLI. Direct host
+  commands still require the matching audit wrapper; round control commands
+  must match the active project and round. Users must review and trust the hook;
+  it is a tool guardrail, not an OS enforcement boundary, and specialized tool
+  paths may bypass it.
+  `audit-budget release` clears the registration at round end.
+- Process-tree cleanup no longer discovers descendants through a vanished or
+  PID-reused leader; it only retains previously observed children by
+  PID/start-time identity. Managed services take their first RSS/process-tree
+  sample synchronously before startup code can reap a short-lived leader.
+- S4 now preserves stdout/stderr markers as untrusted PoC claims instead of
+  treating them as target observations. Legacy cell markers are demoted the
+  same way; incomplete, blocked, and failed runs cannot exclude a candidate.
+- Shell S4 no longer spends up to two model repair rounds when all cells were
+  blocked, timed out, or rejected before a usable execution. It repairs only
+  after at least one cell actually launched without a harness stop condition.
+- New-target autonomous preparation now starts the persisted round budget
+  before type detection, copy, entry scanning, and JAR discovery. These stages
+  share one 15-minute preparation slice tied to the original round start, so a
+  retry cannot renew it; timeouts leave an S0 status with stage and path, and
+  the later audit phases retain the unused round budget.
+- Autonomous LLM HTTP requests and retry sleeps now use the remaining persisted
+  round deadline instead of multiplying a 180-second per-request timeout
+  across retries and JSON fallbacks. A call-budget or deadline stop writes an
+  S0 report with completed stages, remaining time, and LLM usage. If S4 reaches
+  the LLM budget, it cancels queued candidate work and preserves finished rows
+  plus the pending candidate IDs in an S4 partial-results artifact.
+- Autonomous CLI now exits with status 2 for explicit round-budget, LLM-budget,
+  source-scan, S4-timebox, and active-audit-guard stops so schedulers cannot
+  interpret an incomplete run as a successful audit.
+- Unhandled round exceptions now preserve completed stages, the last checkpoint,
+  budget and LLM usage in `S0/round-error-report.json`, and also return status 2.
+- Autonomous library target preparation now scans all ten entry API patterns
+  in one labeled source pass across all configured source roots, with one
+  shared 10-minute deadline, instead of rescanning the repository once per API
+  and source root.
+- Full labeled source scans now stream ripgrep records directly into their
+  uncapped labeled result groups, avoiding a second in-memory copy of all raw
+  matches while preserving complete inventory results and the shared timeout.
+- Fresh autonomous target preparation no longer builds the full coverage and
+  semantic inventories before the round starts. Candidate-first work reuses a
+  valid existing index or defers one bounded rebuild until the first candidate
+  wave has been validated.
+- Candidate IDs are enforced when S4 fallback cells are merged. S1 and S4–S8
+  checkpoints now carry policy versions; a stale or missing earlier checkpoint
+  invalidates downstream stages instead of silently reusing them. S8 requires a
+  valid G5 record before confirming or attaching CVSS, and S7 skips reports
+  without that record and marks superseded generated reports.
+- GitHub search hits now flow into Novelty evaluation with issue/PR state,
+  creation date, and merge time preserved. Missing query coverage, malformed
+  search hits, and NVD channel failures cannot be reported as an authoritative
+  empty scan. CVSS 3.1 parsing now validates metrics and uses Scope-specific PR
+  weights and the zero-impact rule.
+- Large-repository S1 inventory now streams supported source paths, reports
+  progress, reads Git worktrees from the index instead of recursively walking
+  every path, and stops with an explicit incomplete status at its scan deadline.
+- Source-evidence CLI paths are resolved and checked against the authorized
+  root before reading. Candidate coverage now persists control IDs and requires
+  exact line-backed matches; file-only hints no longer close every region in a
+  file, and flows require both their matched entry and sink.
+- Matrix CLI input now retains residual, variant, consistency-lane, and
+  per-version URL context. Replay cohorts deduplicate by verified pack digest,
+  and dependency scanning uses ecosystem-specific Cargo, Composer, and Gradle
+  manifest readers plus numeric fixed-version ordering.
+- Runner metadata and operator guidance distinguish source-level egress
+  screening from OS network isolation. Seatbelt profiles are preflighted before
+  shell and Java compile/run commands; shell HTTP cells are limited to the
+  observer port, while other Java/shell commands deny network access. Network
+  Java PoCs and unsupported platforms fail closed. PoC writes are confined to
+  per-run scratch/output roots. PoC filesystem access is now default-deny:
+  reads are limited to standard OS tool roots, required system libraries and
+  frameworks, installed Command Line Tools/Xcode/Cryptex runtime roots, the audit
+  workspace, and explicit runtime roots. System helper execution is granted
+  only to tool/runtime roots; library roots are read/map-only. User-home,
+  mounted-volume, and temp roots are denied except for scoped workspace/runtime
+  subtrees; keychains, local account databases, SSH host-key/config, sudoers,
+  and Kerberos keytabs remain denied. PoC PATH is limited to
+  `/usr/bin:/bin:/usr/sbin:/sbin`; Java preserves only its explicitly selected
+  runtime `JAVA_HOME`. Runtime-lab managed services do
+  not use this filesystem profile. Resource use remains partially
+  unrestricted; POSIX runners now enforce per-process CPU,
+  per-file size, open-file and core-dump limits, and cap the real-UID process
+  count at startup baseline +128, and RLIMIT_AS caps each process's virtual
+  address space at 4 GiB or a lower inherited hard limit (Darwin's cap is 4 GiB
+  above the measured VulnGate VM-map baseline to account for shared-cache
+  mappings). Java subprocesses get
+  a 1 GiB default heap cap. A separate PoC watchdog samples process-tree RSS
+  every 100 ms and stops a run above a 2 GiB summed-per-process threshold; this
+  is best-effort, may overshoot, and can double-count shared pages. It uses PID
+  plus start-time checks to kill observed descendants across process groups,
+  but cannot guarantee cleanup if a child escapes and reparents between samples.
+  Monitor failure invalidates the run. PoC scratch trees also get a best-effort
+  250 ms stop-loss at 256 MiB or 4096 entries; it is not a filesystem quota,
+  may overshoot between samples, and misses unlinked-open-file usage.
+  Managed runtime-lab services now preflight and inherit those POSIX resource
+  caps; they still do not inherit the PoC network/filesystem profile,
+  and require `allow_unconfined_start: true` before VulnGate starts one.
+  PoC Seatbelt profiles also deny direct `setsid` and `setpgid` syscalls, which
+  blocks the straightforward process-group escape path. Darwin `posix_spawn`
+  attributes can still request another group/session, so process-tree cleanup
+  is not guaranteed against every spawn path or requests to external services.
+  Service healthcheck aliases map directly to a numeric loopback address rather
+  than relying on mutable host/DNS resolution.
+  `0.0.0.0` is no longer classified as a loopback destination; wildcard and
+  empty-address listener literals are explicitly rejected.
+- S4 Java/shell matrix execution and runtime-lab replays now share hard
+  round-wide (90 minute) and per-candidate (15 minute) wall-clock budgets by
+  default. Expired cells are persisted as explicit stop-loss rows, completed
+  cells remain available, and the S4 budget snapshot records elapsed time and
+  exhausted candidate budgets. `TargetConfig` may lower either limit, but the
+  round and candidate hard caps remain 90 and 15 minutes.
+- The autonomous driver shares those budgets across parallel candidate workers,
+  PoC repairs, and runtime-lab replays. An observer gap now ends PoC repair for
+  that candidate immediately. Stale S4 policy checkpoints invalidate S5–S8,
+  old finding documents are marked superseded, and an exhausted S4 round writes
+  a progress report and stops before novelty/CVSS/report generation.
+- The config-driven S1–S8 pipeline now creates or reuses a persistent round
+  deadline, checks it before and after each stage, writes a stop report when it
+  expires, and caps S4 to the remaining time. This is a stage-boundary stop-loss:
+  it cannot interrupt a stage or host-model/tool call that is already running.
+- The audit-round deadline now has an enforced 90-minute maximum across the
+  CLI and both pipeline drivers. Legacy persisted deadlines longer than that
+  are clamped from their original start time, so resuming a round cannot restore
+  a multi-hour budget.
+- Autonomous API-hint learning now runs inside the S0 round deadline instead
+  of before the audit loop. S1.5–S4 prompt-source scans are capped by the
+  remaining round time, and each round writes source-cache hit/read/timing
+  telemetry under its S0 artifacts.
+- Managed runtime-lab services now share the preflighted POSIX per-process CPU,
+  address-space, file-size, descriptor, UID-process and core-dump limits. The active limits are
+  recorded in service results and `S4/processes.json`; missing support blocks
+  managed service startup. A sampled 2 GiB process-tree RSS stop-loss now kills
+  the observed service tree and cancels the shared S4 budget on threshold or
+  monitor failure, stopping active matrix commands and later pipeline stages.
+  This is best-effort and may overshoot. External-ready services are not
+  monitored. The service process tree still has no filesystem-read or network
+  isolation.
+- Bundled `CommandRunner` calls now have a 15-minute hard wall-clock cap even
+  when a caller requests longer. S4 records the applied timeout and cap status;
+  the runner and S4 evidence policy versions invalidate older runtime records.
+- S4 round and per-candidate budgets now cap oversized configuration values at
+  90 and 15 minutes respectively, and expose requested/applied values in the
+  budget snapshot.
+- S1 danger and target-rule digests now share one combined `rg` pass while
+  preserving per-label caps. Finite S1 and candidate-prompt scans stream rg
+  rows and stop when all label caps are met, avoiding an unbounded in-memory
+  hit list. Candidate prompts combine up to six keywords into one scan while
+  retaining the two-hit-per-keyword display limit; autonomous S1.5/S2/S3/S4
+  share bounded source snapshots, and S3/S4 reuse bounded keyword anchors.
+  Unchanged anchored files are normally read once per round; source changes or
+  LRU eviction can trigger another read.
+  Extracted snippets persist in a bounded cache keyed by source-root identity,
+  relative path, content SHA-256, anchor, and extraction policy, so source edits
+  invalidate prior snippets. Per-round S0 telemetry records source bytes read,
+  cache hits, extraction/flush timings, and terminal status. Early-stopped
+  ripgrep streams now close both pipe handles as well as terminating the child.
+  Autonomous coverage rebuilds use the configured
+  source-enumeration deadline and persist running, complete,
+  incomplete, or failed status; an incomplete scope with old derived indices
+  now withholds those candidates instead of reusing stale artifacts. The
+  same-file source/sink digest now uses the bounded Git-index source iterator
+  and records a timeout gap instead of recursively walking repository metadata.
+- Labeled ripgrep scans now apply one wall-clock budget across all configured
+  source directories. Ripgrep failures and malformed structured output raise
+  errors instead of becoming empty-hit results. Autonomous S2 scheduling and
+  prompt coverage blocks now require a usable current scope, and `--force`
+  exposes the already-defined one-retry path for an unchanged failed inventory.
+- Autonomous S1 now records incomplete danger/target-rule scans explicitly,
+  stops a candidate round cleanly when a later source scan times out, and reuses
+  the capability inventory result within the same round instead of refreshing
+  coverage again during S2.
+- Autonomous rounds now reuse only a complete, scope-matched capability index
+  before S2. A missing or stale index no longer blocks the first candidate
+  wave: the round validates that wave first, then may make one five-minute
+  index attempt only when at least 15 minutes remain. If S2 has no candidates,
+  one bounded index attempt may supply a lead. S1 composite-chain candidates
+  remain eligible during index deferral because they come from the current
+  bounded source-to-sink pass; incomplete or stale index rows stay withheld.
+- Large candidate-pool intake now classifies each row once and computes an
+  order-independent streaming multiset digest instead of allocating, sorting,
+  and serializing a duplicate full-pool manifest. Pinned-candidate lookup also
+  indexes only requested IDs.
+- Stage-only pipeline runs now require prior checkpoints and current policy
+  versions, restore the persisted S2/S3 candidate selection, and mark downstream
+  checkpoints for recomputation after a stage is rerun.
+- Host-native rounds now use a persistent 90-minute S0–S8 deadline through the
+  `audit-budget` CLI, with a three-candidate initial wave and early target-revision
+  feasibility checks. A timed-out full-repository inventory may continue as an
+  explicitly partial candidate audit; one materially narrower retry is allowed.
+  Partial coverage cannot support coverage-complete claims or exclusions.
+- The host-native playbook now prioritizes candidate feasibility/review before
+  the optional whole-repository index; a full index no longer blocks the first
+  candidate wave. Parallel workers are optional, limited to independent tasks,
+  and time-boxed; coverage completeness cannot override the round deadline or
+  evidence-yield stop-loss.
+- Shell matrix cells with a declared loopback HTTP target now route proxy-aware
+  clients through a per-run harness observer. Only captured response metadata can
+  populate `HTTP_CODE`; PoC stdout remains an untrusted claim. On macOS, a
+  preflighted Seatbelt profile restricts the PoC process tree to the observer's
+  exact observer port on a host-owned address; Seatbelt's `localhost` filter
+  is not interface-exact. Unsupported platforms stop before execution. The observer rejects
+  unsupported HTTPS, origins, and oversized/chunked requests; missing captures
+  remain inconclusive on all platforms.
+
 ### Added
 
+- Added opt-in `allow_partial_coverage` for config-driven rounds. An incomplete
+  S1 scope can continue with configured candidates only; index-derived leads,
+  coverage-aware scheduling, and stale-index coverage refresh are skipped.
+  Old downstream checkpoints are invalidated on entry; partial-mode checkpoints
+  can resume after interruption. S8 and the target coverage summary remain
+  `scope-incomplete`, with unknown uncovered counts and no coverage-closure
+  claim. Default behavior still stops.
 - Added scope-bound coverage closure and finite `candidate-intake-v1` scheduling:
   the full static pool is retained, while only a rotating active window reaches
   S2/S3/S4. Legacy `max_candidates: 0` now maps to a finite budget. Static

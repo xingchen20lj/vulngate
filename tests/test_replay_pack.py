@@ -241,11 +241,12 @@ class ReplayPackTests(unittest.TestCase):
             {"pack": pack, "project_id": "project-b"},
             {"pack": pack, "project_id": "project-c"},
         ])
-        self.assertEqual("calibrated", cohort["status"])
-        self.assertEqual(3, cohort["metrics"]["pack_projects"])
-        self.assertEqual(3, cohort["metrics"]["provenance_eligible_projects"])
-        self.assertEqual(3, cohort["metrics"]["eligible_projects"])
-        self.assertEqual(5, cohort["metrics"]["pack_rounds"] // 3)
+        self.assertEqual("insufficient-cohort", cohort["status"])
+        self.assertEqual(1, cohort["metrics"]["pack_projects"])
+        self.assertEqual(2, cohort["metrics"]["duplicate_project_inputs"])
+        self.assertEqual(1, cohort["metrics"]["provenance_eligible_projects"])
+        self.assertEqual(1, cohort["metrics"]["eligible_projects"])
+        self.assertEqual(5, cohort["metrics"]["pack_rounds"])
 
         forged = dict(pack)
         forged["provenance"] = dict(pack["provenance"])
@@ -290,7 +291,9 @@ class ReplayPackTests(unittest.TestCase):
             status = agent_cli.main(argv)
         self.assertEqual(0, status)
         cohort_payload = json.loads(output.getvalue())
-        self.assertEqual(3, cohort_payload["cohort"]["metrics"]["pack_projects"])
+        self.assertEqual(1, cohort_payload["cohort"]["metrics"]["pack_projects"])
+        self.assertEqual(2, cohort_payload["cohort"]["metrics"]["duplicate_project_inputs"])
+        self.assertEqual("insufficient-cohort", cohort_payload["cohort"]["status"])
         self.assertEqual("not-a-finding", cohort_payload["claim_status"])
 
 

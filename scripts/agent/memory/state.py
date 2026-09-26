@@ -30,7 +30,7 @@ class CheckpointStore:
         data.setdefault("stage", stage)
         data["updated_at"] = datetime.now().isoformat(timespec="seconds")
         f = self.stage_file(stage)
-        self._atomic_write(f, json.dumps(data, indent=2, ensure_ascii=False))
+        self._atomic_write_json(f, data)
         return f
 
     def completed_stages(self) -> List[str]:
@@ -47,11 +47,18 @@ class CheckpointStore:
     def write_artifact(self, stage: str, name: str, data: Any) -> Path:
         f = self.artifact_path(stage, name)
         if isinstance(data, (dict, list)):
-            content = json.dumps(data, indent=2, ensure_ascii=False)
+            self._atomic_write_json(f, data)
         else:
-            content = str(data)
-        self._atomic_write(f, content)
+            self._atomic_write(f, str(data))
         return f
+
+    @staticmethod
+    def _atomic_write_json(path: Path, data: Any) -> None:
+        """Stream compact JSON to avoid a second full-size in-memory copy."""
+        tmp = path.with_name(".%s.tmp.%d" % (path.name, os.getpid()))
+        with tmp.open("w", encoding="utf-8") as stream:
+            json.dump(data, stream, ensure_ascii=False, separators=(",", ":"))
+        tmp.replace(path)
 
     @staticmethod
     def _atomic_write(path: Path, content: str) -> None:

@@ -233,6 +233,7 @@ def _project_from_calibration(raw: Any, label: str = "", index: int = 0,
         "project_id": _project_id(
             _text(label, 96), _text(calibration.get("target"), 96),
             _text(calibration.get("history_digest"), 48), index),
+        "history_digest": _text(calibration.get("history_digest"), 40),
         "calibration_status": status,
         "input_kind": input_kind,
         "provenance_status": provenance_status,
@@ -306,6 +307,7 @@ def _normalize_project(raw: Any, index: int = 0) -> Dict[str, Any]:
         raw.get("provenance_eligible") is True and pack_digest)
     project: Dict[str, Any] = {
         "project_id": project_id,
+        "history_digest": _text(raw.get("history_digest"), 40),
         "calibration_status": status,
         "input_kind": input_kind,
         "provenance_status": provenance_status,
@@ -406,11 +408,22 @@ def _sum(projects: Sequence[Mapping[str, Any]], key: str,
 def _build_cohort(projects: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     deduped: List[Dict[str, Any]] = []
     seen = set()
+    seen_inputs = set()
+    duplicate_inputs = 0
     for index, raw in enumerate(projects):
         row = _normalize_project(raw, index)
-        if not row or row["project_id"] in seen:
+        if not row:
+            continue
+        pack_digest = str(row.get("pack_digest") or "")
+        history_digest = str(row.get("history_digest") or "")
+        input_identity = (("pack", pack_digest) if pack_digest else
+                          ("history", history_digest) if history_digest else
+                          ("project", row["project_id"]))
+        if row["project_id"] in seen or input_identity in seen_inputs:
+            duplicate_inputs += 1
             continue
         seen.add(row["project_id"])
+        seen_inputs.add(input_identity)
         deduped.append(row)
         if len(deduped) >= MAX_PROJECTS:
             break
@@ -422,6 +435,7 @@ def _build_cohort(projects: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
                            if row.get("provenance_eligible")]
     metrics: Dict[str, Any] = {
         "project_count": len(deduped),
+        "duplicate_project_inputs": duplicate_inputs,
         "calibrated_projects": sum(
             row.get("calibration_status") == "calibrated" for row in deduped),
         "eligible_projects": len(eligible),

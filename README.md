@@ -95,7 +95,7 @@ Current gate identifiers are **G0, G1, G1b, G3, G4, and G5**; G1b is the default
 - **Interprocedural binding evidence** — S1 adds `semantic-call-evidence-v2`: it traces bounded call paths with parser-labelled argument-to-parameter binding and return hints. Java facts come only from JDK parse mode (no target execution, type analysis, or class loading); unresolved dispatch remains a citable research gap, never complete data-flow proof.
 - **Control-flow evidence** — S1 adds `semantic-controlflow-evidence-v1`: it records bounded structural relations for likely dominating guards, `else`/`except` alternate paths, and same-block checks, while keeping full CFG, exception, loop, and path-feasibility semantics as explicit research gaps.
 - **Syntax AST evidence** — S1 adds `semantic-ast-evidence-v2`: Python `ast` and Java JDK parse-only facts confirm bounded scope/branch/terminal-path witnesses and preserve parser gaps. It is not a complete CFG, type/dispatch analysis, or finding.
-- **Finite candidate intake** — S1 retains the complete static pool, while S2 uses a deterministic, category-rotating `candidate-intake-v1` window. Deferred candidates remain queued and rotate across rounds; `max_candidates: 0` maps to a finite default rather than whole-pool scoring.
+- **Finite candidate intake** — S1 retains the complete static pool, while S2 uses a deterministic, category-rotating `candidate-intake-v2` window. Deferred candidates remain queued and rotate across rounds; `max_candidates: 0` maps to a finite default rather than whole-pool scoring.
 - **Parallel delivery receipts** — an S4 probe requires a fresh nonce in both heartbeat and reply; each parallel candidate must additionally prove its matrix artifact with a challenge-bound digest receipt before the host accepts runtime evidence.
 - **Final evidence consistency** — S8 rechecks G4 and G3 before rendering the ledger, writes `final-evidence-consistency.json`, demotes unsupported confirmations, and withholds CVSS/0day-style presentation from unconfirmed static leads.
 - **Semantic transform binding evidence** — S1 adds `semantic-transform-evidence-v1`: it follows a bounded validation/sanitization call to distinguish a result actually bound to the sink from a discarded, overwritten, or unresolved result. It is a research lead, not sanitizer semantics or a finding.
@@ -205,7 +205,7 @@ See [native-target usage](macos/README.md) and
 ### Install from this repository
 
 ```bash
-git clone https://github.com/xingchen20lj/vulngate.git
+git clone https://github.com/Zer0Gate/vulngate.git
 cd vulngate
 ./install.sh
 ```
@@ -281,7 +281,7 @@ Report vulnerabilities in VulnGate itself through [SECURITY.md](SECURITY.md).
 
 ## Development, provenance, and contribution
 
-VulnGate is independently designed and maintained by **xingchen20lj** with AI-assisted development using ChatGPT and Codex. AI tools are used as implementation and design aids; project decisions are tested against real audit behavior and encoded into deterministic rules and regression tests.
+VulnGate is independently designed and maintained by **Zer0Gate** with AI-assisted development using ChatGPT and Codex. AI tools are used as implementation and design aids; project decisions are tested against real audit behavior and encoded into deterministic rules and regression tests.
 
 The public Git history starts with VulnGate 0.1.0 on 2026-08-09. Subsequent commits record audit-driven changes such as Metabase-run lessons, fix-completeness gates, spawn diagnostics, patch-variant analysis, novelty-query failure preservation, and S4 evidence convergence/runtime isolation.
 

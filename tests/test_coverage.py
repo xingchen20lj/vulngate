@@ -257,7 +257,7 @@ class CandidateCoverageTests(unittest.TestCase):
             entries=[entry("e1", file="src/UserController.java", line=100)],
             sinks=[sink("s1", file="src/UserController.java", line=120),
                    sink("s2", file="src/Other.java", line=5)],
-            flows=[flow("f1", entry_id="e1")])
+            flows=[flow("f1", entry_id="e1", sink_id="s1")])
         rows = [{"candidate_id": "C-1", "conclusion": "排除",
                  "code_location": ["src/UserController.java:110"]}]
         records = cov.build_candidate_coverage(rows, data)

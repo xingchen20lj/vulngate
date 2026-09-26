@@ -42,6 +42,7 @@ MAX_REASON_CODES = 8
 MAX_OBSERVATIONS = 8
 MAX_FALSIFIERS = 6
 MAX_SLOTS = 16
+MAX_PRIORITY_CANDIDATE_IDS = MAX_SLOTS * 2
 MAX_PER_SURFACE = 8
 DEFAULT_SLOTS = 8
 DEFAULT_MAX_PER_SURFACE = 3
@@ -820,6 +821,51 @@ def normalize_research_agenda(raw: Any) -> Dict[str, Any]:
     ))
     result["items"] = items
     result["summary"] = _summary(items)
+    return result
+
+
+def selected_candidate_ids(agenda: Any,
+                          current_round: Optional[int] = None) -> List[str]:
+    """Return the prior agenda's selected candidate IDs in agenda order.
+
+    These IDs are scheduling hints only.  They ensure selected research work
+    reaches the scoring window, but do not force it into the round's final
+    candidate slots or change any finding conclusion.
+    """
+    if not isinstance(agenda, Mapping) or \
+            agenda.get("schema_version") != AGENDA_SCHEMA_VERSION:
+        return []
+    agenda_round = _int(agenda.get("round"), 0, 0, 1000000)
+    if current_round and agenda_round >= _int(current_round, 0, 0, 1000000):
+        return []
+    result: List[str] = []
+    for item in agenda.get("items") or []:
+        if not isinstance(item, Mapping) or \
+                item.get("selection_status") != "selected":
+            continue
+        candidate_id = _text(item.get("candidate_id"), 120)
+        if candidate_id and candidate_id not in result:
+            result.append(candidate_id)
+        if len(result) >= MAX_SLOTS:
+            break
+    return result
+
+
+def normalize_candidate_ids(
+        values: Any, limit: int = MAX_PRIORITY_CANDIDATE_IDS) -> List[str]:
+    """Return bounded, unique candidate IDs while preserving caller order."""
+    if isinstance(values, (str, bytes)):
+        values = [values]
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    result: List[str] = []
+    for value in values:
+        candidate_id = _text(value, 120)
+        if candidate_id and candidate_id not in result:
+            result.append(candidate_id)
+        if len(result) >= max(
+                1, min(MAX_PRIORITY_CANDIDATE_IDS, int(limit or 1))):
+            break
     return result
 
 
