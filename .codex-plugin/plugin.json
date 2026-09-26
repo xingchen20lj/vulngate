@@ -1,6 +1,6 @@
 {
   "name": "vulngate",
-  "version": "1.2.0+codex.20260925221441",
+  "version": "1.3.0",
   "description": "VulnGate \u2014 a Codex-native source-audit pipeline for ANY codebase: libraries (parsing/serialization), web frameworks (Spring/Struts), middleware/servers (Tomcat/Jetty), logging libraries (Log4j/Logback), expression engines, message/RPC stacks, and applications. Runs the S1\u2192S8 audit loop (attack-surface map \u2192 candidates \u2192 source audit \u2192 PoC matrix \u2192 novelty gate \u2192 CVSS \u2192 disclosure-ready report) with hard evidence gates (G0\u2013G5) driven by the host agent.\n\nAliases: @vulngate, @vg, \u6f0f\u6d1e\u5ba1\u8ba1, \u6e90\u7801\u5ba1\u8ba1, \u5ba1\u8ba1\u7ba1\u7ebf, vuln audit.\n\nCoverage-driven auditing: full source inventory, heuristic call graphs and flows, security control gaps, sibling differentials, candidate scheduling, and macOS/Electron/native application reconstruction.",
   "author": {
     "name": "Zer0Gate",
